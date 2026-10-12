@@ -1,4 +1,4 @@
-/* GPU 显存负载监控 —— 蓝色精确设计系统（tokens 取自 jingfang-blue-app-ui/theme.css） */
+/* GPU 显存负载监控 —— 蓝色精确设计系统，设计 token 统一在下方 :root 中定义 */
 :root,
 [data-jf-ui="blue"] {
   color-scheme: light;
