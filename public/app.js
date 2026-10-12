@@ -1177,6 +1177,10 @@ function describeStorage(meta) {
   if (storage.oldestTs) parts.push(`最早 ${fmtDateTime(storage.oldestTs)}`);
   parts.push(storage.retentionDays > 0 ? `保留 ${storage.retentionDays} 天` : '永久保留');
   if (storage.storeIntervalMs) parts.push(`每 ${Math.round(storage.storeIntervalMs / 1000)} 秒落一行`);
+  // 只有可回收空间足够大才提示：稳态运行时这个值很小，提示了反而是噪音
+  if (storage.freelistBytes > 32 * 1024 * 1024) {
+    parts.push(`可回收 ${fmtBytes(storage.freelistBytes)}（node tools/db-maintenance.mjs --reclaim）`);
+  }
   return parts.join(' · ');
 }
 

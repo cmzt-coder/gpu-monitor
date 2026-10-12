@@ -23,6 +23,9 @@ export function createMemoryStore(reason = null) {
     prune() {
       return 0;
     },
+    maintain() {
+      return { checkpointed: false, incremental: false, reclaimed: false, autoVacuum: null, error: null };
+    },
     querySamples() {
       return { samples: [], points: 0, step: 0, truncated: false, unsupported: true };
     },
@@ -43,6 +46,8 @@ export function createMemoryStore(reason = null) {
         written: { gpu: 0, host: 0, process: 0 },
         oldestTs: null,
         newestTs: null,
+        freelistBytes: 0,
+        walBytes: 0,
       };
     },
     close() {},
@@ -58,6 +63,7 @@ export async function createStore({ options, nodeId, logger = console }) {
       storeIntervalMs: options.storeIntervalMs,
       retentionDays: options.retentionDays,
       storeProcesses: options.storeProcesses,
+      reclaimOnStart: options.reclaimOnStart,
     });
   } catch (error) {
     const reason = error?.message || String(error);

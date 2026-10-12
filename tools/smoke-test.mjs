@@ -2,6 +2,7 @@
 // 冒烟测试：不依赖网络与真实 GPU，验证 nvidia-smi 解析、字段探测、宿主指标、
 // 空闲调度、环形缓冲与 CSV 导出。
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,7 @@ import { createAlertEngine } from '../src/alerts/engine.js';
 import { expandEnv, loadAlertsConfig } from '../src/alerts/config.js';
 import { buildMessage, encodeHeader, sendMail } from '../src/notify/smtp.js';
 import { createNotifier } from '../src/notify/notifier.js';
+import { runPreflight } from './preflight.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
@@ -597,6 +599,89 @@ assert.equal(systemRowToCsv('2026-01-01T00:00:00.000Z', systemFromRow({
 
 sqliteStore.close();
 
+/* ---------- 历史库维护：增量回收与整库重写 ---------- */
+const tmpDb = path.join(os.tmpdir(), `gm-maint-${process.pid}.db`);
+const legacyDb = path.join(os.tmpdir(), `gm-legacy-${process.pid}.db`);
+const removeDb = (file) => {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try {
+      fs.unlinkSync(file + suffix);
+    } catch {
+      // 文件不存在就不用删
+    }
+  }
+};
+removeDb(tmpDb);
+removeDb(legacyDb);
+const bulkGpu = { index: 0, uuid: 'g', name: 'X', memUsedMiB: 100, memTotalMiB: 1000, utilGpuPct: 50, tempC: 60 };
+const fillStore = (target, rows) => {
+  for (let i = 0; i < rows; i += 1) {
+    target.appendSample({ t: dbNow - 3 * 86400000 + i * 1000, gpus: [bulkGpu], processes: [], system: null });
+  }
+  target.flush();
+};
+
+// 新建库必须把增量回收写进文件头：只在连接里设一下是不够的，那样回收会静默失效
+const maintStore = await createSqliteStore({
+  file: tmpDb, nodeId: 'test-node', retentionDays: 1, storeIntervalMs: 1, now: () => dbNow,
+});
+assert.equal(maintStore.stats().autoVacuum, 2, '新建库应开启增量回收');
+fillStore(maintStore, 5000);
+maintStore.maintain();
+const sizeBeforePrune = fs.statSync(tmpDb).size;
+const prunedRows = maintStore.prune(dbNow);
+const sizeAfterPrune = fs.statSync(tmpDb).size;
+assert.equal(prunedRows, 5000);
+assert.ok(sizeAfterPrune < sizeBeforePrune, `清理过期数据后文件应缩小（${sizeBeforePrune} → ${sizeAfterPrune}）`);
+assert.equal(maintStore.stats().freelistBytes, 0, '增量回收后不应残留空闲页');
+assert.equal(maintStore.stats().lastMaintain.incremental, true);
+maintStore.close();
+
+// 老库（建库时没开增量回收）：prune 不会还空间，需要 --reclaim 整库重写一次
+const legacyStore = await createSqliteStore({
+  file: legacyDb, nodeId: 'test-node', retentionDays: 1, storeIntervalMs: 1, incrementalVacuum: false, now: () => dbNow,
+});
+assert.equal(legacyStore.stats().autoVacuum, 0, '模拟的老库不应是增量回收模式');
+fillStore(legacyStore, 5000);
+legacyStore.maintain();
+const legacySizeBefore = fs.statSync(legacyDb).size;
+legacyStore.prune(dbNow);
+assert.ok(legacyStore.stats().freelistBytes > 0, '老库删完数据会留下空闲页（不会自动还空间）');
+const legacyResult = legacyStore.maintain({ reclaim: true });
+assert.equal(legacyResult.reclaimed, true, '整库重写应被执行');
+assert.equal(legacyStore.stats().autoVacuum, 2, '重写后应转成增量回收模式');
+assert.ok(fs.statSync(legacyDb).size < legacySizeBefore, '整库重写后文件应缩小');
+legacyStore.close();
+removeDb(tmpDb);
+removeDb(legacyDb);
+
+/* ---------- 部署前自检 ---------- */
+const preflight = await runPreflight({
+  gpuBin: FAKE_SMI,
+  dbPath: path.join(os.tmpdir(), `gm-preflight-${process.pid}.db`),
+  alertsPath: '/nonexistent/alerts.json',
+  skipPortCheck: true,
+  systemDelayMs: 30,
+});
+assert.equal(preflight.blockers.length, 0, `自检不应有阻塞项：${preflight.blockers.join('；')}`);
+assert.equal(preflight.facts.gpuCount, 3, '自检应能读到 fake nvidia-smi 的 3 张卡');
+const gpuSection = preflight.sections.find((section) => section.title === 'GPU');
+assert.ok(gpuSection, '自检报告里应有 GPU 小节');
+assert.ok(gpuSection.lines.some(([, text]) => text.includes('3 张显卡')));
+for (const title of ['运行环境', 'GPU', '宿主指标', '历史库', '告警', '端口']) {
+  assert.ok(preflight.sections.some((section) => section.title === title), `自检报告缺 ${title} 小节`);
+}
+
+// 找不到 nvidia-smi 时必须如实报阻塞，而不是给出"可以启动"
+const badPreflight = await runPreflight({
+  gpuBin: '/nonexistent/nvidia-smi',
+  dbPath: path.join(os.tmpdir(), 'gm-preflight-missing.db'),
+  alertsPath: '/nonexistent/alerts.json',
+  skipPortCheck: true,
+  systemDelayMs: 30,
+});
+assert.ok(badPreflight.blockers.length > 0, '读不到显卡时应报阻塞');
+
 /* ---------- 推送订阅（SSE 底座） ---------- */
 const pushCollector = createCollector({
   options: baseOptions,
@@ -829,5 +914,6 @@ process.stdout.write(
   '冒烟测试通过：GPU 解析（基础/扩展/逗号名/CRLF）/ 字段探测与降级 / 宿主指标（Linux + Windows）/ '
   + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
   + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行 / 推送订阅 / '
-  + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发\n',
+  + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
+  + '历史库维护（增量回收·整库重写）/ 部署前自检\n',
 );

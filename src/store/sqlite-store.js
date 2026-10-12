@@ -79,6 +79,37 @@ const HOST_COLUMNS = [
 ];
 const PROCESS_COLUMNS = ['ts', 'node_id', 'uuid', 'gpu_index', 'pid', 'name', 'used_mem_mib'];
 
+function pragmaValue(db, name) {
+  try {
+    const row = db.prepare(`PRAGMA ${name}`).get();
+    return row ? Number(Object.values(row)[0]) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 从文件头读 auto_vacuum 的真实值。
+ * 当前连接里的 `PRAGMA auto_vacuum` 只是连接缓存，可能并没有落进文件头
+ * （老库、或在 WAL 等语句之后才设置时就是这样），所以这里单开一个只读连接来确认。
+ */
+function readHeaderAutoVacuum(DatabaseSync, file) {
+  if (file === ':memory:') return null;
+  let probe = null;
+  try {
+    probe = new DatabaseSync(file, { readOnly: true });
+    return pragmaValue(probe, 'auto_vacuum');
+  } catch {
+    return null;
+  } finally {
+    try {
+      probe?.close();
+    } catch {
+      // 探测连接关不掉也无所谓
+    }
+  }
+}
+
 function insertSql(table, columns) {
   return `INSERT INTO ${table} (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`;
 }
@@ -98,6 +129,11 @@ export async function createSqliteStore({
   flushRows = 400,
   flushMs = 2000,
   pageSize = 5000,
+  // 新建库时开启增量回收：删掉的历史数据会把空闲页还给文件系统，
+  // 代价远低于整库 VACUUM（清理策略每小时都会删行，长期看差别很明显）
+  incrementalVacuum = true,
+  // 启动时做一次整库重写，把老库（auto_vacuum 未开启）转成增量回收模式
+  reclaimOnStart = false,
   now = Date.now,
   maxPoints = 2000,
 } = {}) {
@@ -109,6 +145,17 @@ export async function createSqliteStore({
     await fs.mkdir(path.dirname(path.resolve(file)), { recursive: true });
   }
   const db = new DatabaseSync(file);
+
+  // auto_vacuum 必须抢在其它任何语句之前设置。
+  // journal_mode=WAL 之类会先分配头页，之后这个 pragma 就再也写不进文件头了
+  // （SQLite 只允许在空库上改），于是 incremental_vacuum 会一直静默空转。
+  if (incrementalVacuum) {
+    try {
+      db.exec('PRAGMA auto_vacuum = INCREMENTAL');
+    } catch {
+      // 设置失败不影响正确性，只是以后要靠 --reclaim 手动回收
+    }
+  }
   if (!inMemory) {
     try {
       db.exec('PRAGMA journal_mode = WAL');
@@ -118,6 +165,10 @@ export async function createSqliteStore({
   }
   db.exec('PRAGMA synchronous = NORMAL');
   db.exec(SCHEMA);
+
+  // 以文件头里的值为准，而不是当前连接缓存的值：连接里读到的可能是我们刚设的，
+  // 但没真正落盘（老库就是这样），据此决定后面走增量回收还是整库重写
+  let autoVacuumMode = readHeaderAutoVacuum(DatabaseSync, file) ?? pragmaValue(db, 'auto_vacuum') ?? 0;
 
   const insertGpu = db.prepare(insertSql('gpu_sample', GPU_COLUMNS));
   const insertHost = db.prepare(insertSql('host_sample', HOST_COLUMNS));
@@ -135,6 +186,8 @@ export async function createSqliteStore({
   let boundsCache = { oldestTs: null, newestTs: null };
   let sizeCachedAt = 0;
   let sizeCache = null;
+  let lastMaintainAt = null;
+  let lastMaintain = null;
   let closed = false;
 
   function flush() {
@@ -217,7 +270,47 @@ export async function createSqliteStore({
     }
     lastPruneDropped = dropped;
     boundsCachedAt = 0;
+    if (dropped > 0) maintain();
     return dropped;
+  }
+
+  /**
+   * 库维护：
+   * 1) 截断 WAL —— 长期只写不 checkpoint 的话，-wal 文件会一直挂在那里；
+   * 2) 增量回收空闲页 —— 删掉的历史不会自动把空间还给文件系统；
+   * 3) reclaim=true 时把老库转成增量回收模式，这需要整库重写一次（VACUUM），
+   *    代价大，所以只在显式要求时做。
+   */
+  function maintain({ reclaim = false } = {}) {
+    const result = { checkpointed: false, incremental: false, reclaimed: false, autoVacuum: autoVacuumMode, error: null };
+    try {
+      if (autoVacuumMode === 2) {
+        // 先回收再 checkpoint：反过来的话，文件真正缩小要等下一次 checkpoint 才发生
+        db.exec('PRAGMA incremental_vacuum');
+        result.incremental = true;
+      } else if (reclaim && !inMemory) {
+        db.exec('PRAGMA auto_vacuum = INCREMENTAL');
+        db.exec('VACUUM');
+        autoVacuumMode = 2;
+        result.autoVacuum = 2;
+        result.reclaimed = true;
+      }
+    } catch (error) {
+      result.error = error?.message || String(error);
+    }
+    try {
+      // 截断 WAL：长期只写不 checkpoint 的话，-wal 文件会一直挂在那里
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      result.checkpointed = true;
+    } catch {
+      // 内存库没有 WAL，这里失败是正常的
+    }
+    lastMaintainAt = now();
+    lastMaintain = result;
+    boundsCachedAt = 0;
+    sizeCachedAt = 0;
+    reclaimCachedAt = 0;
+    return result;
   }
 
   function bounds() {
@@ -244,6 +337,27 @@ export async function createSqliteStore({
     }
     sizeCachedAt = now();
     return sizeCache;
+  }
+
+  // 空闲页（可回收空间）+ WAL 体积，和 bounds 一起缓存 10 秒
+  let reclaimCachedAt = 0;
+  let reclaimCache = { freelistBytes: 0, walBytes: 0 };
+
+  function reclaimInfo() {
+    if (reclaimCachedAt && now() - reclaimCachedAt < 10000) return reclaimCache;
+    const pageSizeBytes = pragmaValue(db, 'page_size') ?? 4096;
+    const freelist = pragmaValue(db, 'freelist_count') ?? 0;
+    let walBytes = 0;
+    if (!inMemory) {
+      try {
+        walBytes = statSync(`${file}-wal`).size;
+      } catch {
+        walBytes = 0;
+      }
+    }
+    reclaimCache = { freelistBytes: freelist * pageSizeBytes, walBytes };
+    reclaimCachedAt = now();
+    return reclaimCache;
   }
 
   /**
@@ -439,11 +553,17 @@ export async function createSqliteStore({
 
   function stats() {
     const { oldestTs, newestTs } = bounds();
+    const { freelistBytes, walBytes } = reclaimInfo();
     return {
       mode: 'sqlite',
       supportsHistory: true,
       path: inMemory ? null : path.resolve(file),
       sizeBytes: fileSize(),
+      walBytes,
+      freelistBytes,
+      autoVacuum: autoVacuumMode,
+      lastMaintainAt,
+      lastMaintain,
       buffered: buffer.gpu.length + buffer.host.length + buffer.process.length,
       written: { ...counters },
       oldestTs,
@@ -459,6 +579,7 @@ export async function createSqliteStore({
   }
 
   if (retentionDays > 0) prune();
+  if (reclaimOnStart) maintain({ reclaim: true });
   const flushTimer = setInterval(() => {
     try {
       flush();
@@ -483,6 +604,7 @@ export async function createSqliteStore({
     appendSample,
     flush,
     prune,
+    maintain,
     querySamples,
     queryProcesses,
     gpuPages,

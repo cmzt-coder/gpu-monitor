@@ -67,6 +67,7 @@ const HELP = `GPU 显存负载监控服务
       --store-interval <毫秒> 落库间隔，与页面刷新间隔解耦（默认 5000）
       --retention-days <天>   历史保留天数（默认 90，0 表示永久保留）
       --no-store-processes    不把占用进程写入历史库
+      --reclaim           启动时把历史库做一次整库重写（开启增量回收，释放已删数据占用的空间）
 
       --mock              使用模拟数据，便于无 GPU 环境本地开发
   -h, --help              显示帮助
@@ -100,6 +101,7 @@ function parseArgs(argv) {
     storeIntervalMs: 5000,
     retentionDays: 90,
     storeProcesses: true,
+    reclaimOnStart: false,
     version: VERSION,
     help: false,
   };
@@ -166,6 +168,9 @@ function parseArgs(argv) {
         break;
       case '--no-store-processes':
         options.storeProcesses = false;
+        break;
+      case '--reclaim':
+        options.reclaimOnStart = true;
         break;
       case '--mock':
         options.mock = true;

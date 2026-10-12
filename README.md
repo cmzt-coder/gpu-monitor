@@ -60,6 +60,20 @@ Windows 上没有内置的网卡字节数与交换分区数据源，这两项会
 
 体积参考：8 张卡、5 秒粒度大约是 13.8 万行/天，90 天约 1200 万行、1 GB 上下。实际大小在页面「采集信息 → 历史库」里能看到，嫌大就调大 `--store-interval` 或调小 `--retention-days`。
 
+#### 库文件的长期维护
+
+新建的库默认开启 SQLite 的**增量回收**：每小时清理过期数据时，会把释放出来的页还给文件系统，同时截断 WAL 日志。所以稳态运行（写入速率恒定、保留期固定）下文件大小会自己稳定下来，不需要额外操作。
+
+需要手动处理的是"水位变化"的情况——调大了 `--store-interval`、调小了 `--retention-days`，或者曾经用 `--retention-days 0` 跑过一段时间。这时文件会停在历史最高水位，删掉的空间不会自动还回来：
+
+```bash
+node tools/db-maintenance.mjs            # 看状态：数据范围、文件大小、可回收空间、回收是否开启
+node tools/db-maintenance.mjs --prune    # 按保留期清理一次（不用启动服务）
+node tools/db-maintenance.mjs --reclaim  # 整库重写，把可回收空间还给文件系统
+```
+
+`--reclaim` 会重写整个文件，大库需要一点时间和等量磁盘空间，建议放在维护窗口做。也可以直接用 `node server.js --reclaim` 在启动时做一次同样的重写。页面「采集信息 → 历史库」里可回收空间超过 32 MB 时会把它标出来。
+
 ### 告警
 
 告警规则和通知渠道都写在同一个配置文件里，从示例复制一份开始：
@@ -103,6 +117,9 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 ```bash
 cd gpu-monitor
 
+# 先体检一遍：Node 版本、nvidia-smi、驱动支持的扩展字段、宿主指标、磁盘空间、端口
+node tools/preflight.mjs
+
 # 有 GPU 的机器
 ./start-bg.sh
 
@@ -111,6 +128,18 @@ cd gpu-monitor
 ```
 
 打开 `http://<机器IP>:8090` 即可，停止用 `./stop.sh`。也可以直接 `node server.js --port 8090` 前台跑，效果一样。
+
+### 部署前自检
+
+`node tools/preflight.mjs` 会把"这台机器能不能跑、能跑成什么样"先体检一遍。它只读为主——不会建库、不会改配置，只在判断端口占用时临时绑定一下再立刻释放。最后给出结论与建议的启动命令，有阻塞项时退出码为 1，可以直接接进部署脚本。
+
+```bash
+node tools/preflight.mjs
+node tools/preflight.mjs --port 8090 --db /opt/gpu-monitor/data/gpu-monitor.db
+node tools/preflight.mjs --nvidia-smi /usr/local/bin/nvidia-smi   # 手动指定采集命令
+```
+
+检查项：Node 版本够不够开历史库、`nvidia-smi` 在不在、**这台机器的驱动支持哪些扩展字段**（不支持的逐条列出）、显卡与占用进程能否读到、宿主 CPU/内存/磁盘/网络哪些可用、历史库目录与剩余空间（按卡数估算 90 天体积）、告警配置有没有问题、端口是否被占用。
 
 Windows 上没有 shell 脚本（`.sh` 在 Windows 上跑不了），直接在终端启动：
 
@@ -201,6 +230,7 @@ sudo systemctl enable --now gpu-monitor
 | `--store-interval` | `5000` | 落库间隔（毫秒），与页面刷新间隔解耦 |
 | `--retention-days` | `90` | 历史保留天数，`0` 表示永久保留 |
 | `--no-store-processes` | 关闭 | 不把占用进程写进历史库 |
+| `--reclaim` | 关闭 | 启动时把历史库整库重写一次，释放已删数据占用的空间（等价于 `db-maintenance --reclaim`） |
 | `--no-push` | 关闭 | 关掉 SSE 推送，页面自动回到轮询 |
 | `--alerts` | `alerts.json` | 告警配置文件路径，文件不存在则不启用告警 |
 | `--no-alerts` | 关闭 | 不启用告警 |
@@ -279,6 +309,10 @@ sudo systemctl enable --now gpu-monitor
 **切到"7 天"只有一两个点？** 那是库里确实还没有那么多数据，或者那段区间内服务没在跑。曲线副标题会写清点数与分桶粒度。
 
 **数据会不会一直涨？** 默认保留 90 天，启动时和之后每小时清理一次；要永久保留用 `--retention-days 0`，要更省空间把 `--store-interval` 调大。
+
+**库文件比预期大？** 稳态运行下文件大小会自己稳定（删除的页会被新数据复用）。如果你调过落库间隔或保留期，文件会停在历史最高水位——页面「采集信息 → 历史库」里显示有可回收空间时，跑一次 `node tools/db-maintenance.mjs --reclaim` 即可。
+
+**不确定服务器能不能跑？** 先跑 `node tools/preflight.mjs`，它会逐项给出结论和阻塞原因，比启动后看报错快。
 
 **告警为什么不发信？** 按顺序看三处：① 启动横幅那行「告警」是否显示规则条数，没配置会写「未启用（没有找到 alerts.json）」；② 页面顶部有没有出现告警条（出现了说明判定没问题，那就是发送环节）；③ 日志里有没有 `email 通知失败：…`。先用 `--alerts-dry-run` 跑一遍能快速区分"没触发"和"发不出去"。
 
