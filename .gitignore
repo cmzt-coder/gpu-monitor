@@ -7,3 +7,5 @@ data/
 *.db
 *.db-wal
 *.db-shm
+# 本地告警配置（含 SMTP 密码），只提交 alerts.example.json
+alerts.json
