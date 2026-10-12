@@ -28,6 +28,8 @@ const refs = {
   kpiProcFoot: $('kpi-proc-foot'),
   charts: $('charts'),
   chartsEmpty: $('charts-empty'),
+  chartsSub: $('charts-sub'),
+  rangePicker: $('range-picker'),
   emptyTitle: $('empty-title'),
   emptyText: $('empty-text'),
   sysSub: $('sys-sub'),
@@ -65,8 +67,30 @@ const state = {
   lastSampleAt: null,
   fetchedAt: null,
   consecutiveErrors: 0,
+  pushActive: false,
+  // 曲线时间范围：live = 实时窗口，其它值是历史区间（也直接决定导出的范围）
+  range: 'live',
+  historyPoints: null,
+  historyStep: null,
+  historyTruncated: false,
+  historyNotice: null,
   stopped: false,
 };
+
+const RANGES = [
+  { value: 'live', label: '实时' },
+  { value: '3d', label: '3 天' },
+  { value: '7d', label: '7 天' },
+  { value: '30d', label: '30 天' },
+  { value: '60d', label: '60 天' },
+  { value: '90d', label: '90 天' },
+  { value: 'all', label: '全部' },
+];
+
+let eventSource = null;
+let pollTimer = null;
+let pushRetryTimer = null;
+let pushFailures = 0;
 
 const HIGH_THRESHOLD = 90;
 const TEMP_WARN = 75;
@@ -118,6 +142,25 @@ function fmtRate(bytesPerSec) {
     unit += 1;
   }
   return `${value.toFixed(unit === 0 || value >= 100 ? 0 : 1)} ${units[unit]}`;
+}
+
+function fmtBytes(bytes) {
+  if (bytes == null) return '--';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 || value >= 100 ? 0 : 1)} ${units[unit]}`;
+}
+
+function fmtDateTime(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function fmtClock(ts) {
@@ -172,7 +215,11 @@ function trimToWindow(list) {
   return overflow;
 }
 
-function appendSample(sample) {
+function appendSample(sample, { force = false } = {}) {
+  if (sample.t) state.lastSampleAt = sample.t;
+  // 历史模式下曲线由区间数据决定，不再叠加实时采样点（否则两种时间尺度会混在一起）
+  if (!force && state.range !== 'live') return;
+
   const seen = new Set();
   for (const gpu of sample.gpus || []) {
     const key = gpuKey(gpu);
@@ -195,8 +242,6 @@ function appendSample(sample) {
   for (const key of [...state.series.keys()]) {
     if (!seen.has(key)) state.series.delete(key);
   }
-  if (sample.t) state.lastSampleAt = sample.t;
-
   // 宿主指标与 GPU 曲线共用同一条时间轴；取不到的行留 null，画图时断开
   if (sample.system) {
     const series = state.systemSeries;
@@ -217,21 +262,25 @@ async function fetchJson(url) {
   return response.json();
 }
 
+/** 轮询与 SSE 推送共用同一套状态落地逻辑，两条通道的数据结构完全一致 */
+function applyState(data) {
+  state.fetchedAt = Date.now();
+  state.consecutiveErrors = 0;
+  state.status = data.status;
+  state.intervalMs = data.intervalMs || state.intervalMs;
+  state.windowSamples = data.windowSamples || state.windowSamples;
+  state.gpus = data.gpus || [];
+  state.processes = data.processes || [];
+  state.meta = data;
+  if (state.gpus.length > 0 || data.system) {
+    appendSample({ t: data.ts || Date.now(), gpus: state.gpus, system: data.system });
+  }
+  render();
+}
+
 async function poll() {
   try {
-    const data = await fetchJson('/api/state');
-    state.fetchedAt = Date.now();
-    state.consecutiveErrors = 0;
-    state.status = data.status;
-    state.intervalMs = data.intervalMs || state.intervalMs;
-    state.windowSamples = data.windowSamples || state.windowSamples;
-    state.gpus = data.gpus || [];
-    state.processes = data.processes || [];
-    state.meta = data;
-    if (state.gpus.length > 0 || data.system) {
-      appendSample({ t: data.ts || Date.now(), gpus: state.gpus, system: data.system });
-    }
-    render();
+    applyState(await fetchJson('/api/state'));
   } catch (error) {
     state.consecutiveErrors += 1;
     state.status = 'unreachable';
@@ -240,12 +289,80 @@ async function poll() {
   }
 }
 
-function schedule() {
-  if (state.stopped) return;
-  window.setTimeout(async () => {
+/* ---------- 数据通道：优先 SSE 推送，不可用时自动退回轮询 ---------- */
+function stopPolling() {
+  if (pollTimer) window.clearTimeout(pollTimer);
+  pollTimer = null;
+}
+
+function schedulePolling() {
+  if (state.stopped || pollTimer || state.pushActive) return;
+  const tick = async () => {
+    pollTimer = null;
     if (!document.hidden) await poll();
-    schedule();
-  }, Math.max(400, state.intervalMs));
+    if (!state.stopped && !state.pushActive) {
+      pollTimer = window.setTimeout(tick, Math.max(400, state.intervalMs));
+    }
+  };
+  pollTimer = window.setTimeout(tick, Math.max(400, state.intervalMs));
+}
+
+function closePush() {
+  try {
+    eventSource?.close();
+  } catch {
+    // 已经断开就无所谓了
+  }
+  eventSource = null;
+  state.pushActive = false;
+}
+
+function startPush() {
+  if (state.stopped) return;
+  if (typeof EventSource === 'undefined') {
+    schedulePolling();
+    return;
+  }
+  try {
+    eventSource = new EventSource('/api/stream');
+  } catch {
+    eventSource = null;
+    schedulePolling();
+    return;
+  }
+
+  eventSource.onopen = () => {
+    pushFailures = 0;
+    state.pushActive = true;
+    stopPolling();
+    render();
+  };
+  eventSource.onmessage = (event) => {
+    try {
+      applyState(JSON.parse(event.data));
+    } catch {
+      // 坏帧直接跳过，等下一帧
+    }
+  };
+  eventSource.onerror = () => {
+    const wasActive = state.pushActive;
+    state.pushActive = false;
+    pushFailures += 1;
+    // 推送断掉时先用轮询兜住，保证数据不断档；浏览器自身的重连不必干预
+    schedulePolling();
+    if (!wasActive && pushFailures >= 3) {
+      // 从来没连上过（比如服务端 --no-push 或反代不支持），别再每 3 秒重试
+      closePush();
+      if (!pushRetryTimer) {
+        pushRetryTimer = window.setTimeout(() => {
+          pushRetryTimer = null;
+          pushFailures = 0;
+          startPush();
+        }, 600000);
+      }
+    }
+    render();
+  };
 }
 
 /* ---------- 渲染：状态与提示 ---------- */
@@ -362,6 +479,29 @@ function renderKpis() {
 }
 
 /* ---------- 渲染：曲线 ---------- */
+function rangeLabel() {
+  if (state.range === 'live') return '实时窗口';
+  const item = RANGES.find((entry) => entry.value === state.range);
+  return `历史区间 ${item?.label || state.range}`;
+}
+
+function describeRange() {
+  if (state.range === 'live') {
+    return `最近 ${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒的实时窗口`;
+  }
+  const item = RANGES.find((entry) => entry.value === state.range);
+  const label = item?.label || state.range;
+  if (state.historyNotice) return `${label}：${state.historyNotice}`;
+  if (!state.historyPoints) return `${label}：这段时间没有数据`;
+  const stepText = state.historyStep > 0 ? `，每 ${Math.round(state.historyStep / 1000)} 秒一点` : '';
+  return `历史区间：最近 ${label}，共 ${state.historyPoints} 个点${stepText}${state.historyTruncated ? '（已截断）' : ''}`;
+}
+
+function chartSlots() {
+  if (state.range === 'live') return state.windowSamples;
+  return Math.max(2, state.historyPoints || state.windowSamples);
+}
+
 function cssVar(name, fallback) {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
@@ -506,6 +646,7 @@ function drawLines(canvas, seriesList, windowSamples, { limit = null, times = []
 
 function renderCharts() {
   const gpus = state.gpus;
+  refs.chartsSub.textContent = describeRange();
   refs.chartsEmpty.hidden = gpus.length > 0;
   if (gpus.length === 0) {
     if (state.chartNodes.size > 0) {
@@ -558,7 +699,7 @@ function renderCharts() {
       const canvas = document.createElement('canvas');
       canvas.className = 'chart__canvas';
       canvas.setAttribute('role', 'img');
-      canvas.setAttribute('aria-label', `GPU ${gpu.index} 最近 ${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒的显存占用与利用率曲线`);
+      canvas.setAttribute('aria-label', `GPU ${gpu.index} 的显存占用与利用率曲线（${rangeLabel()}）`);
       canvasWrap.appendChild(canvas);
 
       wrap.append(head, canvasWrap);
@@ -587,7 +728,7 @@ function renderCharts() {
           { values: series.mem, color: colors.primary, width: 2, fill: true },
           { values: series.util, color: colors.signal, width: 1.5 },
         ],
-        state.windowSamples,
+        chartSlots(),
         { limit: HIGH_THRESHOLD, times: series.t },
       );
     }
@@ -651,7 +792,6 @@ function renderSystemCard() {
     refs.sysSub.textContent = '已关闭（--no-system）';
     refs.sysEmptyTitle.textContent = '宿主指标采集已关闭';
     refs.sysEmptyText.textContent = '启动参数带了 --no-system，服务只采集 GPU 指标。去掉该参数并重启即可恢复。';
-    refs.footerText.textContent = `数据来自 ${meta.mock ? '模拟数据源' : 'nvidia-smi'}，仅在内存中保留最近 ${state.windowSamples} 个采样点，不落盘、不做历史归档。`;
     return;
   }
 
@@ -752,7 +892,7 @@ function renderSystemCard() {
         { values: series.mem, color: themeColors().primary, width: 2, fill: true },
         { values: series.cpu, color: themeColors().signal, width: 1.5 },
       ],
-      state.windowSamples,
+      chartSlots(),
       { times: series.t },
     );
   }
@@ -982,6 +1122,30 @@ function describeFields(meta) {
   return `可用 ${fields.count} 项，跳过 ${fields.unsupported.length} 项`;
 }
 
+function describeChannel(meta) {
+  if (meta.push && meta.push.enabled === false) return 'HTTP 轮询（服务端已用 --no-push 关闭推送）';
+  if (state.pushActive) {
+    const subscribers = meta.push?.subscribers;
+    return `SSE 推送${subscribers ? `（${subscribers} 个页面订阅中）` : ''}`;
+  }
+  return 'HTTP 轮询（推送未连接）';
+}
+
+function describeStorage(meta) {
+  const storage = meta.storage;
+  if (!storage) return '--';
+  if (storage.mode === 'disabled') return '已关闭（--no-db）';
+  if (storage.mode !== 'sqlite') return `不可用（${storage.reason || '未知原因'}）`;
+  const parts = [];
+  if (storage.path) parts.push(storage.path);
+  if (storage.sizeBytes != null) parts.push(fmtBytes(storage.sizeBytes));
+  if (storage.written) parts.push(`本次已写入 ${storage.written.gpu} 行`);
+  if (storage.oldestTs) parts.push(`最早 ${fmtDateTime(storage.oldestTs)}`);
+  parts.push(storage.retentionDays > 0 ? `保留 ${storage.retentionDays} 天` : '永久保留');
+  if (storage.storeIntervalMs) parts.push(`每 ${Math.round(storage.storeIntervalMs / 1000)} 秒落一行`);
+  return parts.join(' · ');
+}
+
 function renderMeta() {
   const meta = state.meta || {};
   const rows = [
@@ -990,6 +1154,7 @@ function renderMeta() {
     ['驱动版本', meta.driverVersion || '--'],
     ['采集间隔', meta.intervalMs ? `${meta.intervalMs} ms` : '--'],
     ['采集模式', describeCadence(meta)],
+    ['数据通道', describeChannel(meta)],
     ['曲线窗口', meta.windowSamples ? `${meta.windowSamples} 点 / 约 ${Math.round(meta.windowSamples * (meta.intervalMs || 1000) / 1000)} 秒` : '--'],
     ['已缓存采样点', meta.samples == null ? '--' : `${meta.samples} 点`],
     ['单次采集耗时', meta.collectMs == null ? '--' : `${meta.collectMs} ms`],
@@ -1000,6 +1165,7 @@ function renderMeta() {
       : meta.system
         ? `开启${(meta.system.unsupported || []).length ? `（${meta.system.unsupported.map((key) => SYSTEM_FIELD_LABELS[key] || key).join(' / ')} 不可用）` : ''}`
         : '等待采集'],
+    ['历史库', describeStorage(meta)],
     ['数据源', meta.mock
       ? '模拟数据（--mock）'
       : meta.collector?.bin
@@ -1052,12 +1218,92 @@ function render() {
 
   const sources = [state.meta?.mock ? '模拟数据源' : 'nvidia-smi'];
   if (state.meta?.systemEnabled !== false) sources.push('宿主 /proc 与系统接口');
-  refs.footerText.textContent = `数据来自 ${sources.join(' + ')}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}），不落盘、不做历史归档。`;
+  const storage = state.meta?.storage;
+  if (storage?.mode === 'sqlite') {
+    const keep = storage.retentionDays > 0 ? `超过 ${storage.retentionDays} 天的自动清理` : '不自动清理';
+    refs.footerText.textContent = `数据来自 ${sources.join(' + ')}：实时窗口保留最近 ${state.windowSamples} 个采样点（约 ${windowText}），同时每 ${Math.round(storage.storeIntervalMs / 1000)} 秒向 ${storage.path || '历史库'} 落一行，${keep}。`;
+  } else if (storage) {
+    refs.footerText.textContent = `数据来自 ${sources.join(' + ')}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}）；未启用历史库（${storage.reason || '--no-db'}）。`;
+  } else {
+    refs.footerText.textContent = `数据来自 ${sources.join(' + ')}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}）。`;
+  }
 }
 
 /* ---------- 交互 ---------- */
+function renderRangePicker() {
+  const signature = `${RANGES.map((item) => item.value).join('|')}#${state.range}`;
+  if (refs.rangePicker.dataset.signature === signature) return;
+  refs.rangePicker.replaceChildren();
+  for (const item of RANGES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = item.label;
+    button.dataset.value = item.value;
+    button.setAttribute('aria-pressed', item.value === state.range ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      selectRange(item.value);
+    });
+    refs.rangePicker.appendChild(button);
+  }
+  refs.rangePicker.dataset.signature = signature;
+}
+
+function resetSeries() {
+  state.series.clear();
+  state.systemSeries = { t: [], cpu: [], mem: [] };
+  // 让曲线与卡片节点按新的数据重建，避免残留上一次的卡列表
+  state.chartSignature = '';
+  state.cardSignature = '';
+}
+
+async function reloadLiveWindow() {
+  resetSeries();
+  state.historyPoints = null;
+  state.historyStep = null;
+  state.historyTruncated = false;
+  state.historyNotice = null;
+  try {
+    const history = await fetchJson('/api/history');
+    state.intervalMs = history.intervalMs || state.intervalMs;
+    state.windowSamples = history.windowSamples || state.windowSamples;
+    for (const sample of history.samples || []) appendSample(sample, { force: true });
+  } catch {
+    // 回填失败不影响后续实时帧继续进来
+  }
+}
+
+async function loadHistoryRange(range) {
+  resetSeries();
+  try {
+    const data = await fetchJson(`/api/history?range=${encodeURIComponent(range)}`);
+    state.historyPoints = data.points ?? 0;
+    state.historyStep = data.step ?? null;
+    state.historyTruncated = Boolean(data.truncated);
+    // 没启用历史库时会走内存窗口，这里如实说明而不是画一条假的区间
+    state.historyNotice = data.source === 'memory' ? (data.reason || '未启用历史库') : null;
+    for (const sample of data.samples || []) appendSample(sample, { force: true });
+  } catch (error) {
+    state.historyPoints = 0;
+    state.historyNotice = `读取历史失败（${error.message}）`;
+  }
+}
+
+async function selectRange(value) {
+  if (value === state.range) return;
+  state.range = value;
+  renderRangePicker();
+  if (value === 'live') await reloadLiveWindow();
+  else await loadHistoryRange(value);
+  render();
+}
+
 function download(path) {
-  const url = `${path}?limit=${state.windowSamples}`;
+  // 导出范围跟随曲线选择：实时 → 内存窗口，历史区间 → 库里的对应区间
+  const params = new URLSearchParams();
+  if (state.range === 'live') params.set('limit', String(state.windowSamples));
+  else params.set('range', state.range);
+  const url = `${path}?${params.toString()}`;
   const link = document.createElement('a');
   link.href = url;
   link.rel = 'noopener';
@@ -1085,10 +1331,11 @@ window.addEventListener('resize', () => {
   }, 180);
 });
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) poll();
+  if (!document.hidden && !state.pushActive) poll();
 });
 
 async function boot() {
+  renderRangePicker();
   try {
     const history = await fetchJson('/api/history');
     state.intervalMs = history.intervalMs || state.intervalMs;
@@ -1098,7 +1345,9 @@ async function boot() {
     // 首次回填失败不阻塞，直接进入轮询
   }
   await poll();
-  schedule();
+  // 先用轮询兜住，再尝试升级成 SSE 推送；推送连上后会自动停掉轮询
+  schedulePolling();
+  startPush();
 }
 
 boot();

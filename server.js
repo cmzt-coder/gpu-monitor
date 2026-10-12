@@ -51,6 +51,7 @@ const HELP = `GPU 显存负载监控服务
       --no-extended       关掉扩展 GPU 指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流原因）
       --idle-after <秒>   多久没有页面访问就转入空闲降频（默认 30，0 表示不限）
       --idle-interval <毫秒> 空闲期间的采集间隔（默认 10000）
+      --no-push           关掉 SSE 推送（/api/stream），页面自动回到轮询
 
 历史库（SQLite，Node 22.5+ 内置）：
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
@@ -81,6 +82,7 @@ function parseArgs(argv) {
     extended: true,
     idleAfterMs: 30000,
     idleIntervalMs: 10000,
+    push: true,
     diskTargets: [],
     db: true,
     dbPath: process.env.GPU_MONITOR_DB || path.join('data', 'gpu-monitor.db'),
@@ -126,6 +128,9 @@ function parseArgs(argv) {
         break;
       case '--idle-interval':
         options.idleIntervalMs = Math.max(1000, Number(next()) || 10000);
+        break;
+      case '--no-push':
+        options.push = false;
         break;
       case '--db':
         options.dbPath = next() || options.dbPath;
@@ -335,6 +340,54 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/api/state') {
     sendJson(res, 200, collector.getState());
+    return;
+  }
+
+  // SSE 推送：每采集一帧就发一条，页面不必再轮询。
+  // 关掉推送时直接 404，前端收到 onerror 会自动退回轮询，不需要额外握手。
+  if (pathname === '/api/stream') {
+    if (options.push === false) {
+      sendJson(res, 404, { error: 'push_disabled' });
+      return;
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // 让 nginx 之类的反代不要缓冲，否则推送会被攒成一批才吐出来
+      'X-Accel-Buffering': 'no',
+    });
+    res.write('retry: 3000\n\n');
+
+    const sendState = (payload) => {
+      try {
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      } catch {
+        // 客户端已断开，close 事件里会清理订阅
+      }
+    };
+    sendState(collector.getState());
+
+    const unsubscribe = collector.subscribe(sendState);
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {
+        // 同上
+      }
+    }, 15000);
+    heartbeat.unref?.();
+
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    req.on('close', cleanup);
+    res.on('error', cleanup);
+    res.on('close', cleanup);
     return;
   }
 

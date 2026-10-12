@@ -453,6 +453,12 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .state-chip[data-tone="danger"] { border-color: #f0c4bc; background: #fdf4f2; color: var(--jf-color-danger); }
 .state-chip__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 
+/* ---------- 曲线时间范围 ---------- */
+.chart-head-actions { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+.range-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+.range-picker .chip { min-height: 30px; padding: 0 11px; font-size: 12.5px; }
+.chart__stat[data-tone="warning"] b { color: var(--jf-color-warning); }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 1180px) {
   .work-col { grid-column: span 12; }

@@ -463,9 +463,28 @@ const capped = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10000, po
 assert.equal(capped.truncated, true, '超过点数上限要如实标记截断');
 assert.ok(capped.points <= 3);
 
-// 超出点数上限但没指定 step 时，应自动放大步长而不是硬截断
-const autoStep = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10 * 3600 * 1000, pointLimit: 10 });
-assert.ok(autoStep.step > 0, '区间远大于点数上限时应自动分桶');
+// 行数不多时，即使区间很宽也要给原始粒度（不能按"配置间隔"高估行数，把区间压成一两个点）
+const wideRange = { from: dbNow - 1, to: dbNow + 10 * 3600 * 1000 };
+assert.equal(sqliteStore.querySamples(wideRange).step, 0, '只有 6 行数据时不该分桶');
+assert.equal(sqliteStore.querySamples(wideRange).points, 6);
+
+// 行数真的超过上限时才自动分桶
+const tinyBucketStore = await createSqliteStore({
+  file: ':memory:',
+  nodeId: 'test-node',
+  storeIntervalMs: 1000,
+  retentionDays: 0,
+  maxPoints: 3,
+  now: () => dbNow,
+});
+for (let i = 0; i < 6; i += 1) {
+  tinyBucketStore.appendSample({ t: dbNow + 1000 * i, gpus: [gpuAt(i)], processes: [], system: null });
+}
+tinyBucketStore.flush();
+const autoStep = tinyBucketStore.querySamples({ from: dbNow - 1, to: dbNow + 10000 });
+assert.ok(autoStep.step > 0, '行数超过点数上限时应自动分桶');
+assert.ok(autoStep.points <= 3, '分桶后点数应落在上限内');
+tinyBucketStore.close();
 
 // 进程只留档"身份变化"和定时快照
 const procEvents = sqliteStore.queryProcesses({ from: dbNow - 1, to: dbNow + 10000 });
@@ -523,8 +542,44 @@ assert.equal(systemRowToCsv('2026-01-01T00:00:00.000Z', systemFromRow({
 
 sqliteStore.close();
 
+/* ---------- 推送订阅（SSE 底座） ---------- */
+const pushCollector = createCollector({
+  options: baseOptions,
+  mockSource: createMockSource({ gpuCount: 1 }),
+  systemCollector: stubSystem,
+});
+const received = [];
+const unsubscribe = pushCollector.subscribe((payload) => received.push(payload));
+assert.equal(pushCollector.subscriberCount(), 1);
+await pushCollector.tick();
+assert.equal(received.length, 1, '每采集一帧就推送一次');
+assert.equal(received[0].gpus.length, 1, '推送内容与 /api/state 同构');
+assert.equal(received[0].push.enabled, true);
+unsubscribe();
+await pushCollector.tick();
+assert.equal(received.length, 1, '取消订阅后不再推送');
+assert.equal(pushCollector.subscriberCount(), 0);
+pushCollector.stop();
+
+// 订阅者会把"没人访问"的空闲降频顶掉：页面开着推送时不该降频
+let fakeTime = 1_000_000;
+const idleCollector = createCollector({
+  options: { ...baseOptions, idleAfterMs: 30000 },
+  mockSource: createMockSource({ gpuCount: 1 }),
+  systemCollector: stubSystem,
+  now: () => fakeTime,
+});
+idleCollector.noteClient();
+fakeTime += 60000;
+assert.equal(idleCollector.cadence().idle, true, '60 秒没人访问应进入空闲降频');
+const off = idleCollector.subscribe(() => {});
+assert.equal(idleCollector.cadence().idle, false, '有 SSE 订阅者时不应降频');
+off();
+assert.equal(idleCollector.cadence().idle, true, '取消订阅后恢复空闲判定');
+idleCollector.stop();
+
 process.stdout.write(
   '冒烟测试通过：GPU 解析（基础/扩展/逗号名/CRLF）/ 字段探测与降级 / 宿主指标（Linux + Windows）/ '
   + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
-  + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行\n',
+  + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行 / 推送订阅\n',
 );

@@ -43,6 +43,8 @@ export function createCollector({
   mockSource = null,
   systemCollector,
   store = null,
+  // 注入时钟：单测里要确定性地验证"空闲降频"与"订阅者会不会把它唤醒"
+  now = Date.now,
 }) {
   const history = new History(options.windowSamples);
   const system = systemCollector === undefined
@@ -50,7 +52,7 @@ export function createCollector({
     : systemCollector;
 
   const runtime = {
-    startedAt: Date.now(),
+    startedAt: now(),
     hostname: os.hostname(),
     status: 'starting',
     lastError: null,
@@ -79,16 +81,30 @@ export function createCollector({
   let timer = null;
   let lastClientAt = 0;
   let lastDelayMs = options.intervalMs;
+  // SSE 订阅者：采集完一帧就推给他们，省掉浏览器的轮询
+  const subscribers = new Set();
+
+  function notify() {
+    if (subscribers.size === 0) return;
+    const state = getState();
+    for (const listener of [...subscribers]) {
+      try {
+        listener(state);
+      } catch {
+        // 单个订阅者出错不能影响采集循环
+      }
+    }
+  }
 
   async function ensureSmi({ force = false } = {}) {
     if (runtime.smi?.ok && !force) return runtime.smi;
-    const now = Date.now();
-    if (!force && runtime.smiResolvedAt && now - runtime.smiResolvedAt < SMI_RETRY_MS) {
+    const currentTime = now();
+    if (!force && runtime.smiResolvedAt && currentTime - runtime.smiResolvedAt < SMI_RETRY_MS) {
       return runtime.smi;
     }
     if (smiPromise) return smiPromise;
 
-    runtime.smiResolvedAt = now;
+    runtime.smiResolvedAt = currentTime;
     smiPromise = resolveNvidiaSmi({ explicit: options.smiBin })
       .then((result) => {
         runtime.smi = result;
@@ -192,13 +208,17 @@ export function createCollector({
     } finally {
       runtime.collectMs = Date.now() - startedAt;
       collecting = false;
+      notify();
     }
   }
 
   function cadence() {
+    // 有 SSE 订阅者就说明确实有人在看屏幕，联网状态直接算作活跃
+    const currentTime = now();
+    const effectiveLastClientAt = subscribers.size > 0 ? currentTime : lastClientAt;
     return resolveCadence({
-      lastClientAt,
-      now: Date.now(),
+      lastClientAt: effectiveLastClientAt,
+      now: currentTime,
       intervalMs: options.intervalMs,
       idleAfterMs: options.idleAfterMs,
       idleIntervalMs: options.idleIntervalMs,
@@ -262,7 +282,12 @@ export function createCollector({
         idleAfterMs: options.idleAfterMs,
         idleIntervalMs: options.idleIntervalMs,
         currentIntervalMs: lastDelayMs,
-        lastClientAgoMs: lastClientAt ? Date.now() - lastClientAt : null,
+        lastClientAgoMs: lastClientAt ? now() - lastClientAt : null,
+      },
+      // 推送通道：enabled 由启动参数决定，subscribers 是当前挂着的 SSE 连接数
+      push: {
+        enabled: options.push !== false,
+        subscribers: subscribers.size,
       },
       systemEnabled: Boolean(system),
       systemWarning: runtime.systemWarning,
@@ -273,7 +298,7 @@ export function createCollector({
       smiBin: runtime.smi?.ok ? runtime.smi.bin : (options.smiBin || 'nvidia-smi'),
       hint: runtime.lastErrorHint,
       driverVersion: runtime.driverVersion,
-      uptimeSec: Math.round((Date.now() - runtime.startedAt) / 1000),
+      uptimeSec: Math.round((now() - runtime.startedAt) / 1000),
       collectMs: runtime.collectMs,
       samples: history.size,
       error: runtime.lastError,
@@ -307,7 +332,15 @@ export function createCollector({
     },
     // 每次 HTTP 请求都调用一次，用来判断"还有没有人在看"
     noteClient() {
-      lastClientAt = Date.now();
+      lastClientAt = now();
+    },
+    /** 订阅每一帧的推送，返回取消订阅的函数 */
+    subscribe(listener) {
+      subscribers.add(listener);
+      return () => subscribers.delete(listener);
+    },
+    subscriberCount() {
+      return subscribers.size;
     },
     tick: collectOnce,
     cadence,

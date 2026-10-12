@@ -118,11 +118,17 @@
     <main class="work-col">
       <section class="card" aria-labelledby="charts-h">
         <div class="card__head">
-          <h2 class="card__title" id="charts-h">实时曲线</h2>
-          <div class="legend" aria-hidden="true">
-            <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>显存占用</span>
-            <span class="legend__item"><span class="legend__swatch legend__swatch--util"></span>GPU 利用率</span>
-            <span class="legend__item"><span class="legend__swatch legend__swatch--limit"></span>90% 警戒线</span>
+          <div>
+            <h2 class="card__title" id="charts-h">曲线</h2>
+            <p class="card__sub" id="charts-sub">最近 5 分钟的实时窗口</p>
+          </div>
+          <div class="chart-head-actions">
+            <div class="range-picker" id="range-picker" role="group" aria-label="选择曲线时间范围"></div>
+            <div class="legend" aria-hidden="true">
+              <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>显存占用</span>
+              <span class="legend__item"><span class="legend__swatch legend__swatch--util"></span>GPU 利用率</span>
+              <span class="legend__item"><span class="legend__swatch legend__swatch--limit"></span>90% 警戒线</span>
+            </div>
           </div>
         </div>
         <div class="charts" id="charts"></div>

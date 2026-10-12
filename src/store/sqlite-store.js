@@ -247,17 +247,37 @@ export async function createSqliteStore({
   }
 
   /**
+   * 有界行数探测：最多数 maxPoints + 1 行就够判断要不要分桶了，
+   * 不在这里做全表 COUNT(*)，大库上会慢。
+   */
+  function probeRows(from, to, cap) {
+    const row = db.prepare(`
+      SELECT COUNT(*) AS n FROM (
+        SELECT 1 FROM gpu_sample WHERE ts >= ? AND ts <= ? LIMIT ?
+      )
+    `).get(from, to, cap);
+    return Number(row?.n ?? 0);
+  }
+
+  /**
    * 步长推导：既尊重调用方给的 step，也保证返回点数不至于失控。
-   * 每页查询都带 LIMIT，所以这里只管"时间轴分辨率"，不用管总量。
+   *
+   * 关键在于按"真实行数"而不是"配置的落库间隔"来估：刚建库、服务只跑了几分钟、
+   * 或者采集断断续续时，用配置间隔估算会把行数严重高估，7 天的区间会被压成一两个点。
    */
   function resolveStep(from, to, stepMs) {
     const span = Math.max(1, to - from);
     const cadence = Math.max(1, storeIntervalMs);
     let step = Number(stepMs) > 0 ? Math.ceil(Number(stepMs)) : 0;
-    const estimatedPoints = span / cadence;
-    if (step <= 0 && estimatedPoints > maxPoints) step = Math.ceil(estimatedPoints / maxPoints) * cadence;
-    if (step > 0) step = Math.max(step, Math.ceil(span / maxPoints));
-    return step;
+    if (step > 0) return Math.max(step, Math.ceil(span / maxPoints));
+
+    const rows = probeRows(from, to, maxPoints + 1);
+    if (rows <= maxPoints) return 0; // 行数本来就不多，直接给原始粒度
+
+    // 行数超了才分桶：让每个桶装 perBucket 行左右，把总点数压到 maxPoints 附近
+    const perBucket = Math.ceil(rows / maxPoints);
+    const idealBucketMs = (perBucket * span) / rows;
+    return Math.max(cadence, Math.ceil(idealBucketMs / cadence) * cadence);
   }
 
   const bucketExpr = (alias) => `CAST(ts / ${alias} AS INTEGER) * ${alias}`;
