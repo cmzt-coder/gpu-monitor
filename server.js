@@ -11,6 +11,9 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 import { createCollector } from './src/collector.js';
+import { loadAlertsConfig } from './src/alerts/config.js';
+import { createAlertEngine } from './src/alerts/engine.js';
+import { createNotifier } from './src/notify/notifier.js';
 import {
   GPU_CSV_HEADER,
   SYSTEM_CSV_HEADER,
@@ -53,6 +56,11 @@ const HELP = `GPU 显存负载监控服务
       --idle-interval <毫秒> 空闲期间的采集间隔（默认 10000）
       --no-push           关掉 SSE 推送（/api/stream），页面自动回到轮询
 
+告警（规则与渠道都写在配置文件里）：
+      --alerts <路径>     告警配置文件（默认 alerts.json，不存在则不启用）
+      --no-alerts         不启用告警
+      --alerts-dry-run    只打印"本来要发什么"，不真正发信
+
 历史库（SQLite，Node 22.5+ 内置）：
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
       --no-db             不落库，只保留内存窗口
@@ -83,6 +91,9 @@ function parseArgs(argv) {
     idleAfterMs: 30000,
     idleIntervalMs: 10000,
     push: true,
+    alerts: true,
+    alertsPath: process.env.GPU_MONITOR_ALERTS || 'alerts.json',
+    alertsDryRun: false,
     diskTargets: [],
     db: true,
     dbPath: process.env.GPU_MONITOR_DB || path.join('data', 'gpu-monitor.db'),
@@ -131,6 +142,15 @@ function parseArgs(argv) {
         break;
       case '--no-push':
         options.push = false;
+        break;
+      case '--alerts':
+        options.alertsPath = next() || options.alertsPath;
+        break;
+      case '--no-alerts':
+        options.alerts = false;
+        break;
+      case '--alerts-dry-run':
+        options.alertsDryRun = true;
         break;
       case '--db':
         options.dbPath = next() || options.dbPath;
@@ -181,7 +201,35 @@ const collector = createCollector({
     ? null
     : (options.mock ? createMockSystem() : undefined),
   store,
+  // 告警状态由服务层持有，用这个钩子挂进状态里：
+  // /api/state 与 SSE 推送共用同一份 getState()，不会出现"只有一条通道带告警"的情况
+  extraState: () => ({
+    alerts: alertEngine ? alertEngine.snapshot() : { enabled: false },
+  }),
 });
+
+/* ---------- 告警 ---------- */
+
+const alertsLoad = options.alerts
+  ? await loadAlertsConfig(options.alertsPath)
+  : { config: null, path: options.alertsPath, error: null, disabled: true };
+
+const alertEngine = alertsLoad.config
+  ? createAlertEngine({
+    // 持续时长（for）的判定基准是内存窗口，默认取 采样点数 × 采集间隔
+    config: { window: options.windowSamples * options.intervalMs, ...alertsLoad.config },
+    getSamples: () => collector.getSamples(options.windowSamples),
+    notifier: createNotifier({
+      config: alertsLoad.config,
+      dryRun: options.alertsDryRun,
+    }),
+  })
+  : null;
+
+if (alertEngine) {
+  // 内部订阅者不算"有页面在看"，否则空闲降频永远不会生效
+  collector.subscribe((state) => alertEngine.evaluate(state), { countsAsViewer: false });
+}
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -491,6 +539,15 @@ server.listen(options.port, options.host, () => {
     : (store.supportsHistory
       ? `${store.stats().path}（每 ${options.storeIntervalMs} ms 落一行，保留 ${options.retentionDays > 0 ? `${options.retentionDays} 天` : '全部'}）`
       : `不可用：${store.reason || '未知原因'}`);
+  const alertsLine = !options.alerts
+    ? '已关闭（--no-alerts）'
+    : alertEngine
+      ? `${alertsLoad.path}（${alertEngine.rules.length} 条规则${options.alertsDryRun ? '，dry-run 不实际发信' : ''}${alertEngine.problems.length ? `，${alertEngine.problems.length} 条被跳过` : ''}）`
+      : alertsLoad.error
+        ? `配置有问题：${alertsLoad.error}`
+        : alertsLoad.disabled
+          ? `已关闭（配置里 enabled=false）`
+          : `未启用（没有找到 ${options.alertsPath}）`;
   process.stdout.write(
     'GPU 显存负载监控已启动\n'
     + `  页面：   http://${shown}:${options.port}/\n`
@@ -500,7 +557,8 @@ server.listen(options.port, options.host, () => {
     + `${options.idleAfterMs > 0 ? `，空闲 ${options.idleAfterMs / 1000} 秒后降频到 ${options.idleIntervalMs} ms` : '，不降频'}\n`
     + `  宿主指标：${options.system === false ? '已关闭' : (options.mock ? '模拟数据' : '开启')}`
     + `　扩展 GPU 指标：${options.extended ? '开启（自动探测驱动支持）' : '已关闭'}\n`
-    + `  历史库： ${storageLine}\n`,
+    + `  历史库： ${storageLine}\n`
+    + `  告警：   ${alertsLine}\n`,
   );
 
   // 探测结果异步补一行，探测失败也不阻塞服务启动（采集循环每 30s 会重试）

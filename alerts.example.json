@@ -1,0 +1,28 @@
+{
+  "enabled": true,
+  "cooldown": "10m",
+  "rules": [
+    { "id": "vram-high", "metric": "memUsedPct", "op": ">=", "threshold": 90, "for": "2m", "level": "warning" },
+    { "id": "temp-high", "metric": "tempC", "op": ">=", "threshold": 85, "for": "1m", "level": "critical" },
+    { "id": "throttled", "metric": "throttled", "op": "==", "value": true, "for": "1m", "level": "warning" },
+    { "id": "util-mem-high", "metric": "utilMemPct", "op": ">=", "threshold": 95, "for": "2m", "level": "warning" },
+    { "id": "host-mem-high", "metric": "hostMemUsedPct", "op": ">=", "threshold": 92, "for": "4m", "level": "warning" },
+    { "id": "host-disk-high", "metric": "hostDiskUsedPct", "op": ">=", "threshold": 90, "for": "4m", "level": "warning" },
+    { "id": "collect-down", "metric": "collectOk", "op": "==", "value": false, "for": "1m", "level": "critical" }
+  ],
+  "email": {
+    "enabled": true,
+    "host": "smtp.example.com",
+    "port": 587,
+    "secure": false,
+    "starttls": true,
+    "user": "monitor@example.com",
+    "pass": "${SMTP_PASS}",
+    "from": "monitor@example.com",
+    "to": ["ops@example.com"]
+  },
+  "webhook": {
+    "url": "",
+    "headers": {}
+  }
+}

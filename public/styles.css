@@ -459,6 +459,31 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .range-picker .chip { min-height: 30px; padding: 0 11px; font-size: 12.5px; }
 .chart__stat[data-tone="warning"] b { color: var(--jf-color-warning); }
 
+/* ---------- 告警 ---------- */
+.alerts {
+  margin-top: 20px;
+  padding: 16px 18px;
+  border: 1px solid #e8d49b;
+  border-left: 4px solid var(--jf-color-warning);
+  border-radius: var(--jf-radius-md);
+  background: #fdf7e8;
+}
+.alerts__head { display: flex; align-items: center; gap: 9px; color: var(--jf-color-warning); }
+.alerts__title { font-weight: 600; }
+.alerts__list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.alerts__item {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  font-size: 13.5px;
+}
+.alerts__level {
+  padding: 2px 8px; border-radius: 999px;
+  background: var(--jf-color-warning); color: #fff;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.alerts__level[data-level="critical"] { background: var(--jf-color-danger); }
+.alerts__detail { color: var(--jf-color-ink); }
+.alerts__since { color: var(--jf-color-ink-muted); font-size: 12.5px; }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 1180px) {
   .work-col { grid-column: span 12; }

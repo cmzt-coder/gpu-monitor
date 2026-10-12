@@ -45,6 +45,8 @@ export function createCollector({
   store = null,
   // 注入时钟：单测里要确定性地验证"空闲降频"与"订阅者会不会把它唤醒"
   now = Date.now,
+  // 让上层往状态里补字段（比如告警）。统一走这里，/api/state 与 SSE 推送才不会各补一份、慢慢跑偏
+  extraState = null,
 }) {
   const history = new History(options.windowSamples);
   const system = systemCollector === undefined
@@ -81,19 +83,26 @@ export function createCollector({
   let timer = null;
   let lastClientAt = 0;
   let lastDelayMs = options.intervalMs;
-  // SSE 订阅者：采集完一帧就推给他们，省掉浏览器的轮询
+  // 订阅者：采集完一帧就推给他们。带 countsAsViewer 的（SSE 连接）算"有人在看"，
+  // 告警引擎这类内部订阅者不算——否则只要进程活着就永远不会进入空闲降频。
   const subscribers = new Set();
 
   function notify() {
     if (subscribers.size === 0) return;
     const state = getState();
-    for (const listener of [...subscribers]) {
+    for (const entry of [...subscribers]) {
       try {
-        listener(state);
+        entry.listener(state);
       } catch {
         // 单个订阅者出错不能影响采集循环
       }
     }
+  }
+
+  function viewerCount() {
+    let count = 0;
+    for (const entry of subscribers) if (entry.countsAsViewer) count += 1;
+    return count;
   }
 
   async function ensureSmi({ force = false } = {}) {
@@ -215,7 +224,7 @@ export function createCollector({
   function cadence() {
     // 有 SSE 订阅者就说明确实有人在看屏幕，联网状态直接算作活跃
     const currentTime = now();
-    const effectiveLastClientAt = subscribers.size > 0 ? currentTime : lastClientAt;
+    const effectiveLastClientAt = viewerCount() > 0 ? currentTime : lastClientAt;
     return resolveCadence({
       lastClientAt: effectiveLastClientAt,
       now: currentTime,
@@ -287,7 +296,8 @@ export function createCollector({
       // 推送通道：enabled 由启动参数决定，subscribers 是当前挂着的 SSE 连接数
       push: {
         enabled: options.push !== false,
-        subscribers: subscribers.size,
+        subscribers: viewerCount(),
+        listeners: subscribers.size,
       },
       systemEnabled: Boolean(system),
       systemWarning: runtime.systemWarning,
@@ -306,6 +316,7 @@ export function createCollector({
       gpus: latest ? latest.gpus : [],
       processes: latest ? latest.processes : [],
       system: latest ? latest.system : null,
+      ...(extraState ? extraState() : {}),
     };
   }
 
@@ -334,13 +345,17 @@ export function createCollector({
     noteClient() {
       lastClientAt = now();
     },
-    /** 订阅每一帧的推送，返回取消订阅的函数 */
-    subscribe(listener) {
-      subscribers.add(listener);
-      return () => subscribers.delete(listener);
+    /**
+     * 订阅每一帧的推送，返回取消订阅的函数。
+     * countsAsViewer=false 的内部订阅者（比如告警引擎）不会被当成"有页面在看"。
+     */
+    subscribe(listener, { countsAsViewer = true } = {}) {
+      const entry = { listener, countsAsViewer };
+      subscribers.add(entry);
+      return () => subscribers.delete(entry);
     },
     subscriberCount() {
-      return subscribers.size;
+      return viewerCount();
     },
     tick: collectOnce,
     cadence,

@@ -10,6 +10,9 @@ const refs = {
   noticeText: $('notice-text'),
   noticeHint: $('notice-hint'),
   noticeCode: $('notice-code'),
+  alerts: $('alerts'),
+  alertsTitle: $('alerts-title'),
+  alertsList: $('alerts-list'),
   btnRetry: $('btn-retry'),
   btnRefresh: $('btn-refresh'),
   btnCsv: $('btn-csv'),
@@ -429,6 +432,37 @@ function renderNotice(meta) {
     return;
   }
   refs.notice.hidden = true;
+}
+
+/* ---------- 渲染：告警 ---------- */
+function renderAlerts(meta) {
+  const alerts = meta?.alerts;
+  const firing = alerts?.firing || [];
+  if (firing.length === 0) {
+    refs.alerts.hidden = true;
+    refs.alertsList.replaceChildren();
+    refs.alertsTitle.textContent = '当前告警';
+    return;
+  }
+  refs.alerts.hidden = false;
+  refs.alertsTitle.textContent = `当前告警（${firing.length}）`;
+  refs.alertsList.replaceChildren();
+  for (const alert of firing) {
+    const item = document.createElement('li');
+    item.className = 'alerts__item';
+    const level = document.createElement('span');
+    level.className = 'alerts__level';
+    level.dataset.level = alert.level;
+    level.textContent = alert.level === 'critical' ? '严重' : '警告';
+    const detail = document.createElement('span');
+    detail.className = 'alerts__detail';
+    detail.textContent = alert.detail;
+    const since = document.createElement('span');
+    since.className = 'alerts__since';
+    since.textContent = alert.since ? `自 ${fmtRelative(alert.since)}` : '';
+    item.append(level, detail, since);
+    refs.alertsList.appendChild(item);
+  }
 }
 
 /* ---------- 渲染：KPI ---------- */
@@ -1146,6 +1180,19 @@ function describeStorage(meta) {
   return parts.join(' · ');
 }
 
+function describeAlerts(meta) {
+  const alerts = meta.alerts;
+  if (!alerts) return '--';
+  if (!alerts.enabled) return alerts.problems?.length ? `未启用（${alerts.problems.join('；')}）` : '未启用（没有配置规则）';
+  const parts = [`${alerts.ruleCount} 条规则`];
+  if (alerts.cooldownMs) parts.push(`抑制 ${Math.round(alerts.cooldownMs / 60000)} 分钟`);
+  parts.push(alerts.firing.length ? `当前 ${alerts.firing.length} 条触发中` : '当前无告警');
+  if (alerts.notifiedCount) parts.push(`已通知 ${alerts.notifiedCount} 次`);
+  if (alerts.problems?.length) parts.push(`${alerts.problems.length} 条规则被跳过`);
+  if (alerts.lastError) parts.push(alerts.lastError);
+  return parts.join(' · ');
+}
+
 function renderMeta() {
   const meta = state.meta || {};
   const rows = [
@@ -1166,6 +1213,7 @@ function renderMeta() {
         ? `开启${(meta.system.unsupported || []).length ? `（${meta.system.unsupported.map((key) => SYSTEM_FIELD_LABELS[key] || key).join(' / ')} 不可用）` : ''}`
         : '等待采集'],
     ['历史库', describeStorage(meta)],
+    ['告警', describeAlerts(meta)],
     ['数据源', meta.mock
       ? '模拟数据（--mock）'
       : meta.collector?.bin
@@ -1196,6 +1244,7 @@ function renderMeta() {
 function render() {
   renderStatus();
   renderNotice(state.meta);
+  renderAlerts(state.meta);
   renderKpis();
   renderCharts();
   renderSystemCard();

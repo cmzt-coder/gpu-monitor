@@ -2,6 +2,7 @@
 // 冒烟测试：不依赖网络与真实 GPU，验证 nvidia-smi 解析、字段探测、宿主指标、
 // 空闲调度、环形缓冲与 CSV 导出。
 import assert from 'node:assert/strict';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,10 +23,64 @@ import { createCollector, resolveCadence } from '../src/collector.js';
 import { createSqliteStore } from '../src/store/sqlite-store.js';
 import { createMemoryStore } from '../src/store/store.js';
 import { gpuFromRow, packThrottle, processesSignature, systemFromRow, unpackThrottle } from '../src/store/rows.js';
+import { compare, normalizeRules, parseDuration } from '../src/alerts/rules.js';
+import { createAlertEngine } from '../src/alerts/engine.js';
+import { expandEnv, loadAlertsConfig } from '../src/alerts/config.js';
+import { buildMessage, encodeHeader, sendMail } from '../src/notify/smtp.js';
+import { createNotifier } from '../src/notify/notifier.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
 const FAKE_SMI_CRLF = path.join(HERE, 'fake-nvidia-smi-crlf.mjs');
+
+/**
+ * 假的 SMTP 会话：按客户端写进来的命令给出对应回复。
+ * 这样 EHLO / AUTH LOGIN / DATA 这套协议流程在没有网络、没有真实邮件服务器的环境里也能被测到。
+ */
+function createFakeSmtpSession({ failAt = null, code = '550 5.7.1 Rejected' } = {}) {
+  const writes = [];
+  let dataHandler = null;
+  let authStep = 0;
+
+  function replyFor(command, raw) {
+    if (/^EHLO/.test(command)) return '250-fake greets you\r\n250 AUTH LOGIN PLAIN\r\n';
+    if (/^AUTH LOGIN/.test(command)) {
+      authStep = 1;
+      return '334 VXNlcm5hbWU6\r\n';
+    }
+    if (authStep === 1) {
+      authStep = 2;
+      return '334 UGFzc3dvcmQ6\r\n';
+    }
+    if (authStep === 2) {
+      authStep = 0;
+      return '235 2.7.0 Accepted\r\n';
+    }
+    if (/^MAIL FROM/.test(command)) return failAt === 'MAIL FROM' ? `${code}\r\n` : '250 2.1.0 Sender OK\r\n';
+    if (/^RCPT TO/.test(command)) return '250 2.1.5 Recipient OK\r\n';
+    if (/^DATA/.test(command)) return '354 End data with <CR><LF>.<CR><LF>\r\n';
+    if (raw.includes('\r\n.\r\n')) return '250 2.0.0 Queued\r\n';
+    if (/^QUIT/.test(command)) return '221 Bye\r\n';
+    return '500 5.5.1 Unknown command\r\n';
+  }
+
+  const socket = {
+    setEncoding() {},
+    on(event, handler) {
+      if (event === 'data') dataHandler = handler;
+    },
+    write(text) {
+      writes.push(text);
+      const command = text.split('\r\n')[0] || '';
+      queueMicrotask(() => dataHandler?.(replyFor(command, text)));
+    },
+    end() {},
+    removeAllListeners() {},
+  };
+
+  queueMicrotask(() => dataHandler?.('220 fake ESMTP ready\r\n'));
+  return { writes, connect: () => socket };
+}
 
 /* ---------- GPU 解析：基础 + 扩展字段 ---------- */
 const snapshot = await readGpuSnapshot({ bin: FAKE_SMI });
@@ -578,8 +633,201 @@ off();
 assert.equal(idleCollector.cadence().idle, true, '取消订阅后恢复空闲判定');
 idleCollector.stop();
 
+// extraState：上层挂进状态的字段（告警就是这么挂的）必须同时出现在 getState 与推送里
+const extraCollector = createCollector({
+  options: baseOptions,
+  mockSource: createMockSource({ gpuCount: 1 }),
+  systemCollector: null,
+  extraState: () => ({ alerts: { enabled: true, firing: [{ id: 'demo' }] } }),
+});
+await extraCollector.tick();
+assert.equal(extraCollector.getState().alerts.firing.length, 1);
+const pushedStates = [];
+const offExtra = extraCollector.subscribe((payload) => pushedStates.push(payload));
+await extraCollector.tick();
+assert.equal(pushedStates[0].alerts.firing.length, 1, '推送与 /api/state 用的必须是同一份状态');
+offExtra();
+extraCollector.stop();
+
+/* ---------- 告警：时长解析与规则规范化 ---------- */
+assert.equal(parseDuration('5m'), 300000);
+assert.equal(parseDuration('2h'), 7200000);
+assert.equal(parseDuration('30'), 30000, '纯数字按秒算');
+assert.equal(parseDuration('500ms'), 500);
+assert.equal(parseDuration(1500), 1500, '数字直接当毫秒');
+assert.equal(parseDuration('看不懂', 42), 42, '无法解析时用兜底值');
+
+const normalized = normalizeRules({
+  rules: [
+    { id: 'ok', metric: 'tempC', op: '>=', threshold: 85, for: '1m' },
+    { id: 'bad-metric', metric: 'nope', op: '>', threshold: 1 },
+    { id: 'bad-op', metric: 'tempC', op: '=~', threshold: 1 },
+    { id: 'no-threshold', metric: 'tempC', op: '>=' },
+    { id: 'turned-off', metric: 'tempC', op: '>=', threshold: 1, enabled: false },
+    { id: 'bool', metric: 'throttled', op: '==', value: true },
+  ],
+});
+assert.equal(normalized.rules.length, 2, '有问题和被显式关闭的规则都不进列表');
+assert.equal(normalized.problems.length, 3, '问题要逐条报出来，而不是整份配置失效');
+assert.equal(normalized.rules[0].forMs, 60000);
+assert.equal(normalized.rules[0].scope, 'gpu');
+assert.equal(normalized.rules[1].scope, 'gpu');
+assert.equal(compare(90, { op: '>=', threshold: 90 }), true);
+assert.equal(compare(89, { op: '>=', threshold: 90 }), false);
+assert.equal(compare(true, { op: '==', value: true }), true);
+assert.equal(compare(null, { op: '>=', threshold: 1 }), false, '取不到值时不应误判');
+
+/* ---------- 告警：判定、抑制与恢复 ---------- */
+let alertClock = 1_000_000;
+let alertSamples = [];
+const notifications = [];
+const alertEngine = createAlertEngine({
+  config: {
+    cooldown: '10m',
+    window: 300000,
+    rules: [
+      { id: 'vram', metric: 'memUsedPct', op: '>=', threshold: 90, for: '2s', level: 'warning' },
+      { id: 'collect-down', metric: 'collectOk', op: '==', value: false, for: '30s', level: 'critical' },
+    ],
+  },
+  getSamples: () => alertSamples,
+  notifier: { send: async (payload) => notifications.push(payload) },
+  now: () => alertClock,
+  logger: { warn() {} },
+});
+const flushTasks = () => new Promise((resolve) => setImmediate(resolve));
+
+const alertGpu = (memPct) => ({
+  index: 0,
+  uuid: 'g0',
+  name: 'X',
+  memUsedPct: memPct,
+  tempC: 60,
+  throttle: { swPowerCap: false },
+});
+
+// 只有 1 个采样点、跨度不足 for：不该触发
+alertSamples = [{ t: alertClock, gpus: [alertGpu(95)], system: null }];
+alertEngine.evaluate({ status: 'ok', lastSampleAt: alertClock, gpus: [] });
+await flushTasks();
+assert.equal(notifications.length, 0, '持续时间不足 for 时不应触发');
+
+// 条件持续 3 秒：触发一次
+alertSamples = [
+  { t: alertClock - 3000, gpus: [alertGpu(95)], system: null },
+  { t: alertClock - 1000, gpus: [alertGpu(96)], system: null },
+  { t: alertClock, gpus: [alertGpu(97)], system: null },
+];
+let result = alertEngine.evaluate({ status: 'ok', lastSampleAt: alertClock, gpus: [] });
+await flushTasks();
+assert.equal(result.firing.length, 1);
+assert.equal(notifications.length, 1, '触发时通知一次');
+assert.equal(notifications[0].kind, 'firing');
+assert.equal(notifications[0].ruleId, 'vram');
+assert.ok(notifications[0].detail.includes('GPU 0'), '告警文案要带上是哪张卡');
+
+// 仍在告警：冷却期内不再重复通知
+alertClock += 1000;
+alertSamples = alertSamples.map((sample) => ({ ...sample, t: sample.t + 1000 }));
+alertEngine.evaluate({ status: 'ok', lastSampleAt: alertClock, gpus: [] });
+await flushTasks();
+assert.equal(notifications.length, 1, '冷却期内不重复通知');
+assert.equal(alertEngine.snapshot().firing.length, 1);
+
+// 恢复：补一条 resolved，并从触发列表移除
+alertClock += 1000;
+alertSamples = [
+  { t: alertClock - 1000, gpus: [alertGpu(40)], system: null },
+  { t: alertClock, gpus: [alertGpu(35)], system: null },
+];
+result = alertEngine.evaluate({ status: 'ok', lastSampleAt: alertClock, gpus: [] });
+await flushTasks();
+assert.equal(result.firing.length, 0);
+assert.equal(result.resolved.length, 1);
+assert.equal(notifications.length, 2);
+assert.equal(notifications[1].kind, 'resolved');
+assert.ok(notifications[1].detail.includes('已恢复正常'));
+assert.equal(alertEngine.snapshot().firing.length, 0);
+
+// 采集中断：状态不是 ok 且已经静默超过 for（地板 30 秒）
+alertClock += 60000;
+alertSamples = [{ t: alertClock - 60000, gpus: [alertGpu(10)], system: null }];
+alertEngine.evaluate({ status: 'error', lastSampleAt: alertClock - 60000, gpus: [] });
+await flushTasks();
+assert.equal(notifications.length, 3);
+assert.equal(notifications[2].ruleId, 'collect-down');
+assert.equal(notifications[2].level, 'critical');
+
+/* ---------- 告警：配置加载与环境变量展开 ---------- */
+process.env.GM_TEST_SMTP_PASS = 'secret';
+assert.equal(expandEnv('${GM_TEST_SMTP_PASS}'), 'secret');
+assert.deepEqual(expandEnv({ a: ['${GM_TEST_SMTP_PASS}', 1] }), { a: ['secret', 1] });
+delete process.env.GM_TEST_SMTP_PASS;
+assert.equal((await loadAlertsConfig('/nonexistent/alerts.json')).missing, true, '没有配置文件不算错误');
+assert.ok((await loadAlertsConfig(FAKE_SMI)).error, 'JSON 解析失败要给出原因');
+
+/* ---------- 通知渠道：dry-run 不真的发信 ---------- */
+const dryRunLogs = [];
+const dryNotifier = createNotifier({
+  config: { email: { host: 'smtp.example.com', from: 'a@b.c', to: ['d@e.f'] }, webhook: { url: 'http://127.0.0.1:1/hook' } },
+  dryRun: true,
+  logger: { info: (line) => dryRunLogs.push(line), warn: (line) => dryRunLogs.push(line), error: (line) => dryRunLogs.push(line) },
+});
+assert.deepEqual(dryNotifier.channels, ['email', 'webhook', 'console']);
+await dryNotifier.send({ kind: 'firing', level: 'warning', ruleId: 'x', title: '测试', detail: '细节', at: Date.now() });
+assert.equal(dryRunLogs.filter((line) => line.includes('dry-run')).length, 2, '两个远程渠道都应走 dry-run');
+
+/* ---------- SMTP 客户端：用假 socket 验证协议流程 ---------- */
+assert.equal(encodeHeader('ASCII subject'), 'ASCII subject');
+assert.equal(encodeHeader('中文主题').startsWith('=?UTF-8?B?'), true, '非 ASCII 头要按 RFC 2047 编码');
+const builtMessage = buildMessage({ from: 'a@b.c', to: ['d@e.f'], subject: '测试', text: '第一行\n第二行' });
+assert.ok(builtMessage.includes('Content-Transfer-Encoding: base64'));
+assert.equal(
+  Buffer.from(builtMessage.split('\r\n\r\n')[1].replace(/\r\n/g, ''), 'base64').toString('utf8'),
+  '第一行\n第二行',
+  '正文用 base64 编码，解出来要和原文一致',
+);
+
+const smtpSession = createFakeSmtpSession();
+const sent = await sendMail({
+  host: 'smtp.example.com',
+  port: 587,
+  user: 'monitor@example.com',
+  pass: 'pw',
+  from: 'monitor@example.com',
+  to: ['ops@example.com', 'oncall@example.com'],
+  subject: '显存告警',
+  text: 'GPU 0 显存占用 95%',
+  connect: smtpSession.connect,
+});
+assert.equal(sent.ok, true);
+assert.deepEqual(sent.recipients, ['ops@example.com', 'oncall@example.com']);
+const commands = smtpSession.writes.map((line) => line.split('\r\n')[0]);
+assert.equal(commands[0], `EHLO ${os.hostname()}`, '先打招呼');
+assert.equal(commands[1], 'AUTH LOGIN');
+assert.equal(Buffer.from(commands[2], 'base64').toString('utf8'), 'monitor@example.com');
+assert.equal(Buffer.from(commands[3], 'base64').toString('utf8'), 'pw');
+assert.equal(commands[4], 'MAIL FROM:<monitor@example.com>');
+assert.equal(commands[5], 'RCPT TO:<ops@example.com>');
+assert.equal(commands[6], 'RCPT TO:<oncall@example.com>');
+assert.equal(commands[7], 'DATA');
+assert.ok(smtpSession.writes[8].endsWith('\r\n.\r\n'), '正文要以单独的 . 行结束');
+assert.ok(smtpSession.writes[8].includes('Subject: =?UTF-8?B?'), '中文主题要编码');
+assert.equal(commands[9], 'QUIT');
+
+// 服务器拒绝时要把错误抛出来，而不是静默成功
+const rejectingSession = createFakeSmtpSession({ failAt: 'MAIL FROM', code: '550 5.7.1 Rejected' });
+await assert.rejects(
+  () => sendMail({
+    host: 'smtp.example.com', from: 'a@b.c', to: ['d@e.f'], subject: 's', text: 't',
+    connect: rejectingSession.connect,
+  }),
+  /MAIL FROM 失败/,
+);
+
 process.stdout.write(
   '冒烟测试通过：GPU 解析（基础/扩展/逗号名/CRLF）/ 字段探测与降级 / 宿主指标（Linux + Windows）/ '
   + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
-  + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行 / 推送订阅\n',
+  + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行 / 推送订阅 / '
+  + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发\n',
 );

@@ -83,6 +83,14 @@
     <button type="button" class="btn btn--ghost btn--sm" id="btn-retry">重试</button>
   </div>
 
+  <div class="alerts" id="alerts" hidden>
+    <div class="alerts__head">
+      <svg class="icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
+      <p class="alerts__title" id="alerts-title">当前告警</p>
+    </div>
+    <ul class="alerts__list" id="alerts-list"></ul>
+  </div>
+
   <section class="kpis" aria-label="整机概览">
     <article class="kpi">
       <p class="kpi__label">GPU 数量</p>
