@@ -222,10 +222,12 @@ function renderNotice(meta) {
     return;
   }
   if (state.status === 'error') {
+    const platform = meta?.platform || {};
+    const unsupported = platform.supported === false;
     showNotice({
-      title: '采集失败：读不到 nvidia-smi 数据',
-      text: meta?.error || '未知错误',
-      hint: `${meta?.smiBin || 'nvidia-smi'} --query-gpu=index,name,memory.used,memory.total --format=csv`,
+      title: unsupported ? `当前平台无法监控显存（${platform.label || '未知系统'}）` : '采集失败：读不到 nvidia-smi 数据',
+      text: [meta?.error, meta?.hint].filter(Boolean).join('　·　') || '未知错误',
+      hint: unsupported ? null : 'nvidia-smi -L',
     });
     return;
   }
@@ -421,6 +423,9 @@ function renderCharts() {
     } else if (state.meta?.status === 'ok') {
       refs.emptyTitle.textContent = '没有检测到 GPU';
       refs.emptyText.textContent = 'nvidia-smi 执行成功但返回为空，请确认采集服务运行在有显卡的机器上。';
+    } else if (state.meta?.platform?.supported === false) {
+      refs.emptyTitle.textContent = '当前平台没有可用的显存数据';
+      refs.emptyText.textContent = state.meta.platform.note || '这个平台上没有 NVIDIA 驱动可供读取。';
     } else {
       refs.emptyTitle.textContent = '暂时读不到 GPU 数据';
       refs.emptyText.textContent = '处理完上面的采集异常后，曲线会自动出现。';
@@ -632,15 +637,26 @@ function renderMeta() {
   const meta = state.meta || {};
   const rows = [
     ['主机名', meta.hostname || '--'],
+    ['运行平台', meta.platform ? `${meta.platform.label} ${meta.platform.arch}（node ${meta.platform.nodeVersion || '--'}）` : '--'],
     ['驱动版本', meta.driverVersion || '--'],
     ['采集间隔', meta.intervalMs ? `${meta.intervalMs} ms` : '--'],
     ['曲线窗口', meta.windowSamples ? `${meta.windowSamples} 点 / 约 ${Math.round(meta.windowSamples * (meta.intervalMs || 1000) / 1000)} 秒` : '--'],
     ['已缓存采样点', meta.samples == null ? '--' : `${meta.samples} 点`],
     ['单次采集耗时', meta.collectMs == null ? '--' : `${meta.collectMs} ms`],
     ['服务运行时长', fmtDuration(meta.uptimeSec)],
-    ['数据源', meta.mock ? '模拟数据（--mock）' : meta.smiBin || '--'],
+    ['数据源', meta.mock
+      ? '模拟数据（--mock）'
+      : meta.collector?.bin
+        ? `${meta.collector.bin}（${meta.collector.source || '自定义'}）`
+        : '未找到 nvidia-smi'],
     ['最近更新', state.lastSampleAt ? `${fmtClock(state.lastSampleAt)}（${fmtRelative(state.lastSampleAt)}）` : '--'],
   ];
+  if (!meta.mock && meta.collector?.tried?.length && !meta.collector?.bin) {
+    rows.splice(rows.length - 1, 0, [
+      '探测过的位置',
+      meta.collector.tried.map((item) => `${item.bin}（${item.result}）`).join('；'),
+    ]);
+  }
   refs.metaList.replaceChildren();
   for (const [label, value] of rows) {
     const div = document.createElement('div');

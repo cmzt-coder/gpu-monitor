@@ -11,6 +11,19 @@
 - 占用进程列表：PID / 进程名 / 显存占用 / 占该卡比例，可按 GPU 过滤（点右上角的 chip）
 - 一键下载：`下载 CSV` 导出曲线原始数据，`下载 JSON` 导出当前完整状态（含进程列表）
 - 90% 警戒线、≥90% 与高温的配色告警，异常时给出可复制的排查命令
+- 跨平台：同一份代码在 Linux / Windows 上自动探测 `nvidia-smi`，macOS 上明确提示"平台不支持"而不是笼统报错
+
+## 平台支持
+
+启动时会自动判断当前系统与硬件环境，`nvidia-smi` 的探测顺序是：`--nvidia-smi` 指定 → `PATH` → 各平台常见安装位置。
+
+| 平台 | 支持情况 | 采集方式 |
+| --- | --- | --- |
+| Linux | ✅ 完整支持 | `nvidia-smi`（`PATH`、`/usr/bin`、`/usr/local/bin`，也自动识别 WSL2 的 `/usr/lib/wsl/lib`） |
+| Windows | ✅ 完整支持 | `nvidia-smi.exe`（`PATH`、`C:\Windows\System32`、`C:\Program Files\NVIDIA Corporation\NVSMI`） |
+| macOS | ❌ 不适用 | NVIDIA 官方驱动已停止支持，系统里没有 `nvidia-smi`；页面会明确提示，服务本身能正常启动 |
+
+当前只支持 NVIDIA。AMD（`rocm-smi`）、Intel（`xpu-smi`）尚未实现，探测层预留了扩展位置。
 
 ## 快速开始
 
@@ -25,6 +38,17 @@ cd gpu-monitor
 ```
 
 打开 `http://<机器IP>:8090` 即可，停止用 `./stop.sh`。也可以直接 `node server.js --port 8090` 前台跑，效果一样。
+
+Windows 上没有 shell 脚本（`.sh` 在 Windows 上跑不了），直接在终端启动：
+
+```powershell
+node server.js --port 8090
+
+# 需要后台常驻（关掉终端不退出）
+Start-Process -WindowStyle Hidden node -ArgumentList "server.js","--port","8090"
+```
+
+停止时用任务管理器结束 node 进程，或 `taskkill /F /IM node.exe`（注意会结束所有 node 进程）。
 
 ## 部署到服务器
 
@@ -95,7 +119,7 @@ sudo systemctl enable --now gpu-monitor
 | `--host` | `0.0.0.0` | 监听地址，也可用环境变量 `HOST` |
 | `--interval` | `1000` | 采集间隔（毫秒） |
 | `--window` | `300` | 内存中保留的采样点数，即页面曲线窗口 |
-| `--nvidia-smi` | `nvidia-smi` | nvidia-smi 路径，也可用环境变量 `NVIDIA_SMI_BIN` |
+| `--nvidia-smi` | 自动探测 | 手动指定 nvidia-smi；不指定时按平台依次尝试 `PATH` → `/usr/bin` → `/usr/local/bin` → WSL2 → Windows 系统目录，也可用环境变量 `NVIDIA_SMI_BIN` |
 | `--mock` | 关闭 | 用模拟数据启动，便于无 GPU 环境联调 |
 
 环境变量：`GPU_MONITOR_MOCK=1` 等价于 `--mock`；`GPU_MONITOR_MOCK_GPUS=8` 指定模拟卡数；`GPU_MONITOR_MOCK_HIGH=1` 让 0 号卡稳定在 90% 以上，用来检查告警配色。
@@ -112,9 +136,12 @@ sudo systemctl enable --now gpu-monitor
 ## 实现说明
 
 - 数据来源：`nvidia-smi --query-gpu=...` 取显卡指标，`nvidia-smi --query-compute-apps=...` 取占用进程，用 GPU UUID 关联
+- 平台探测在 `src/platform.js`：识别系统/架构，并按平台找 `nvidia-smi`；找不到时**不阻塞服务启动**，每 30 秒自动重试一次（后装驱动、挂载显卡都不用重启服务）
+- 探测结果通过 `/api/state` 的 `platform` 与 `collector` 字段暴露给页面，所以提示能区分"平台不支持"和"驱动异常"
 - 数据仅保留在内存中（环形缓冲，默认 300 点），不落盘、不做历史归档；重启服务后曲线重新开始
 - 前端零框架、零构建：原生 `fetch` 轮询，曲线用 Canvas 手绘；页面标签页隐藏时暂停轮询
 - 服务零依赖：只用 `node:http` / `node:child_process` 等内置模块，部署时不需要 `npm install`
+- 仓库带 `.gitattributes`，强制 `.sh` 用 LF 换行——在 Windows 上编辑过脚本后提交，也不会把换行符改成 CRLF 而弄坏 Linux 上的执行
 
 ## 常见问题
 
@@ -124,12 +151,14 @@ sudo systemctl enable --now gpu-monitor
 
 **脚本提示"没有找到 node"？** 那台机器还没装 Node.js 18+。装完再跑；如果 node 装在非标准路径，用 `NODE_BIN=/path/to/node ./start-bg.sh` 指定。
 
-**AMD / Intel 显卡？** 当前只支持 NVIDIA（`nvidia-smi`）。换成 `rocm-smi` 需要改 `src/nvidia.js` 里的采集与解析。
+**在 macOS 上打开？** 会提示"当前平台无法监控显存（macOS）"，这是预期行为：NVIDIA 官方驱动早已不支持 macOS，系统里没有 `nvidia-smi`。服务能正常启动，采集信息面板里会列出探测过的所有位置。
 
-**页面显示"采集失败"？** 页面会给出报错原因和一条可直接复制的 `nvidia-smi` 命令，先在服务器终端跑一次确认能出数据。
+**AMD / Intel 显卡？** 当前只支持 NVIDIA（`nvidia-smi`）。新增厂商需要按 `src/platform.js` 的接口增加一个探测分支和对应的解析，解析部分可参考 `src/nvidia.js`。
+
+**页面显示"采集失败"？** 页面会给出报错原因、平台相关的排查建议，以及"探测过的位置"清单（每个位置为什么不可用），先在服务器终端跑一次 `nvidia-smi -L` 确认能出数据。
 
 ## 本地自检
 
 ```bash
-node tools/smoke-test.mjs   # 解析 / 环形缓冲 / CSV 导出 / 模拟数据源
+node tools/smoke-test.mjs   # 解析 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / CRLF 解析
 ```

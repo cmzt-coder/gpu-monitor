@@ -151,10 +151,16 @@ read_pid() {
 
 # 确认某个 PID 真的是本项目的服务进程，避免 PID 被系统回收后误杀别的进程
 pid_is_ours() {
-  local pid="$1"
-  [ -r "/proc/$pid/cmdline" ] || return 0
-  local cmdline
-  cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  local pid="$1" cmdline=""
+  if [ -r "/proc/$pid/cmdline" ]; then
+    # Linux
+    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+  elif command -v ps >/dev/null 2>&1; then
+    # macOS / BSD
+    cmdline="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  else
+    return 0   # 拿不到进程信息就不阻断，保持原行为
+  fi
   case "$cmdline" in
     *server.js*) return 0 ;;
     *) return 1 ;;
@@ -172,10 +178,26 @@ running_pid() {
   return 1
 }
 
-# 取本机内网 IP（拿不到就留空，不报错）
+# 取本机内网 IP：Linux 用 hostname -I，macOS 用 ipconfig；拿不到就留空（不报错）
+# 这套 shell 脚本本身只在 Linux / macOS 上跑，Windows 上直接用 node server.js
 lan_ip() {
-  if command -v hostname >/dev/null 2>&1; then
-    hostname -I 2>/dev/null | awk '{print $1}'
+  local ip="" os_name
+  os_name="$(uname -s 2>/dev/null || echo unknown)"
+
+  if [ "$os_name" = "Linux" ] && command -v hostname >/dev/null 2>&1; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+
+  if [ -z "$ip" ] && [ "$os_name" = "Darwin" ] && command -v ipconfig >/dev/null 2>&1; then
+    local iface
+    for iface in en0 en1 en2 en3; do
+      ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+      if [ -n "$ip" ]; then break; fi
+    done
+  fi
+
+  if [ -n "$ip" ]; then
+    printf '%s\n' "$ip"
   fi
 }
 

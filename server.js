@@ -12,6 +12,7 @@ import { readGpuSnapshot } from './src/nvidia.js';
 import { createMockSource } from './src/mock.js';
 import { History } from './src/history.js';
 import { samplesToCsv } from './src/export.js';
+import { detectPlatform, resolveNvidiaSmi } from './src/platform.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, 'public');
@@ -34,7 +35,8 @@ const HELP = `GPU 显存负载监控服务
       --host <地址>       监听地址（默认 0.0.0.0，局域网可访问）
       --interval <毫秒>   采集间隔（默认 1000）
       --window <采样点数> 内存中保留的采样点数，也就是页面曲线的窗口（默认 300）
-      --nvidia-smi <路径> nvidia-smi 可执行文件路径（默认从 PATH 查找）
+      --nvidia-smi <路径> 手动指定 nvidia-smi，默认按平台自动探测
+                          （PATH → /usr/bin → /usr/local/bin → WSL2 → Windows 系统目录）
       --mock              使用模拟数据，便于无 GPU 环境本地开发
   -h, --help              显示帮助
 
@@ -49,7 +51,8 @@ function parseArgs(argv) {
     host: process.env.HOST || '0.0.0.0',
     intervalMs: 1000,
     windowSamples: 300,
-    smiBin: process.env.NVIDIA_SMI_BIN || 'nvidia-smi',
+    // null 表示"没显式指定"，交给 src/platform.js 按平台自动探测
+    smiBin: process.env.NVIDIA_SMI_BIN || null,
     mock: process.env.GPU_MONITOR_MOCK === '1',
     help: false,
   };
@@ -94,30 +97,70 @@ if (options.help) {
 }
 
 const history = new History(options.windowSamples);
-const readSnapshot = options.mock
-  ? createMockSource()
-  : (overrides = {}) => readGpuSnapshot({ bin: options.smiBin, ...overrides });
+const platform = detectPlatform();
+const mockSource = options.mock ? createMockSource() : null;
 
 const runtime = {
   startedAt: Date.now(),
   hostname: os.hostname(),
+  platform,
   status: 'starting',
   lastError: null,
+  lastErrorHint: null,
   lastSampleAt: null,
   processWarning: null,
   collectMs: null,
   driverVersion: null,
   latest: null,
+  // nvidia-smi 探测结果，见 src/platform.js 的 resolveNvidiaSmi
+  smi: null,
+  smiResolvedAt: 0,
 };
 
+// 探测失败后每隔这么久再试一次，这样后装驱动/挂载显卡后不用重启服务
+const SMI_RETRY_MS = 30000;
+let smiPromise = null;
 let collecting = false;
+
+async function ensureSmi({ force = false } = {}) {
+  if (runtime.smi?.ok && !force) return runtime.smi;
+  const now = Date.now();
+  if (!force && runtime.smiResolvedAt && now - runtime.smiResolvedAt < SMI_RETRY_MS) {
+    return runtime.smi;
+  }
+  if (smiPromise) return smiPromise;
+
+  runtime.smiResolvedAt = now;
+  smiPromise = resolveNvidiaSmi({ explicit: options.smiBin })
+    .then((result) => {
+      runtime.smi = result;
+      return result;
+    })
+    .finally(() => {
+      smiPromise = null;
+    });
+  return smiPromise;
+}
+
+// 真实采集：找不到 nvidia-smi 时抛出带 hint 的错误，由 collectOnce 落到状态里
+async function collectFromSmi() {
+  const smi = await ensureSmi();
+  if (!smi.ok) {
+    const error = new Error(smi.error);
+    error.hint = smi.hint;
+    throw error;
+  }
+  return readGpuSnapshot({ bin: smi.bin, timeout: Math.max(3000, options.intervalMs * 4) });
+}
 
 async function collectOnce() {
   if (collecting) return;
   collecting = true;
   const startedAt = Date.now();
   try {
-    const snapshot = await readSnapshot({ timeout: Math.max(3000, options.intervalMs * 4) });
+    const snapshot = mockSource
+      ? await mockSource()
+      : await collectFromSmi();
     // 采样点只保留曲线需要的字段，进程列表单独保留最新一份，避免内存冗余
     const gpus = snapshot.gpus.map((gpu) => ({
       index: gpu.index,
@@ -136,12 +179,14 @@ async function collectOnce() {
     runtime.latest = { ...sample, processes: snapshot.processes };
     runtime.status = 'ok';
     runtime.lastError = null;
+    runtime.lastErrorHint = null;
     runtime.lastSampleAt = sample.t;
     runtime.processWarning = snapshot.processWarning || null;
     runtime.driverVersion = snapshot.gpus[0]?.driverVersion || runtime.driverVersion;
   } catch (error) {
     runtime.status = 'error';
     runtime.lastError = error?.message || String(error);
+    runtime.lastErrorHint = error?.hint || null;
   } finally {
     runtime.collectMs = Date.now() - startedAt;
     collecting = false;
@@ -160,7 +205,25 @@ function buildState() {
     hostname: runtime.hostname,
     version: VERSION,
     mock: options.mock,
-    smiBin: options.smiBin,
+    // 运行平台：前端据此区分"平台不支持"和"驱动异常"
+    platform: {
+      id: platform.id,
+      label: platform.label,
+      arch: platform.arch,
+      nodeVersion: platform.nodeVersion,
+      supported: platform.supported,
+      note: platform.note,
+    },
+    // 采集后端：当前只有 nvidia-smi 一种
+    collector: {
+      id: 'nvidia-smi',
+      bin: runtime.smi?.ok ? runtime.smi.bin : null,
+      source: runtime.smi?.source || null,
+      deviceCount: runtime.smi?.ok ? runtime.smi.deviceCount : null,
+      tried: runtime.smi?.tried || [],
+    },
+    smiBin: runtime.smi?.ok ? runtime.smi.bin : (options.smiBin || 'nvidia-smi'),
+    hint: runtime.lastErrorHint,
     driverVersion: runtime.driverVersion,
     uptimeSec: Math.round((Date.now() - runtime.startedAt) / 1000),
     collectMs: runtime.collectMs,
@@ -297,9 +360,21 @@ server.listen(options.port, options.host, () => {
   process.stdout.write(
     'GPU 显存负载监控已启动\n'
     + `  页面：   http://${shown}:${options.port}/\n`
-    + `  数据源： ${options.mock ? '模拟数据（--mock）' : options.smiBin}\n`
+    + `  平台：   ${platform.label} ${platform.arch}（node ${platform.nodeVersion}）\n`
+    + `  数据源： ${options.mock ? '模拟数据（--mock）' : '自动探测 nvidia-smi'}\n`
     + `  采集：   每 ${options.intervalMs} ms，曲线窗口 ${options.windowSamples} 点\n`,
   );
+
+  // 探测结果异步补一行，探测失败也不阻塞服务启动（采集循环每 30s 会重试）
+  if (!options.mock) {
+    ensureSmi({ force: true }).then((smi) => {
+      if (smi.ok) {
+        process.stdout.write(`  显卡：   ${smi.bin}（${smi.source}），检测到 ${smi.deviceCount} 张卡\n`);
+      } else {
+        process.stdout.write(`  警告：   ${smi.error}\n           ${smi.hint}\n`);
+      }
+    });
+  }
 });
 
 server.on('error', (error) => {

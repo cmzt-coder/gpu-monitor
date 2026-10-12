@@ -8,9 +8,11 @@ import { readGpuSnapshot } from '../src/nvidia.js';
 import { History } from '../src/history.js';
 import { samplesToCsv } from '../src/export.js';
 import { createMockSource } from '../src/mock.js';
+import { detectPlatform, nvidiaSmiCandidates, resolveNvidiaSmi } from '../src/platform.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
+const FAKE_SMI_CRLF = path.join(HERE, 'fake-nvidia-smi-crlf.mjs');
 
 const snapshot = await readGpuSnapshot({ bin: FAKE_SMI });
 
@@ -50,4 +52,39 @@ const mock = await createMockSource({ gpuCount: 2 })();
 assert.equal(mock.gpus.length, 2);
 assert.ok(mock.gpus.every((gpu) => gpu.memUsedMiB <= gpu.memTotalMiB));
 
-process.stdout.write('冒烟测试通过：解析 / 环形缓冲 / CSV 导出 / 模拟数据源\n');
+// 平台探测：结果必须和当前进程一致
+const platform = detectPlatform();
+assert.equal(platform.id, process.platform);
+assert.equal(platform.arch, process.arch);
+assert.equal(platform.supported, process.platform === 'linux' || process.platform === 'win32');
+assert.ok(platform.label && platform.label.length > 0);
+if (process.platform === 'darwin') {
+  assert.ok(platform.note.includes('macOS'), 'macOS 上应给出平台不支持的说明');
+}
+
+// 候选列表第一个永远是 PATH 里的 nvidia-smi，且不会重复
+const candidates = nvidiaSmiCandidates();
+assert.equal(candidates[0].bin, 'nvidia-smi');
+assert.equal(new Set(candidates.map((item) => item.bin)).size, candidates.length);
+
+// 指定可用的 nvidia-smi：解析成功并报出卡数
+const resolved = await resolveNvidiaSmi({ explicit: FAKE_SMI });
+assert.equal(resolved.ok, true, '指定可用的 fake nvidia-smi 应解析成功');
+assert.equal(resolved.bin, FAKE_SMI);
+assert.equal(resolved.deviceCount, 3, '应能从 nvidia-smi -L 里数出 3 张卡');
+
+// 指定不存在的路径：失败但要有可读的排查建议
+const missing = await resolveNvidiaSmi({ explicit: '/nonexistent/nvidia-smi' });
+assert.equal(missing.ok, false);
+assert.ok(missing.error && missing.error.length > 0);
+assert.ok(missing.hint && missing.hint.length > 0, '失败时应给出平台相关的排查建议');
+assert.ok(missing.tried.some((item) => item.result === '文件不存在'), '应记录尝试过的位置');
+
+// Windows 风格的 CRLF 输出也要能正确解析（trim 掉 \r）
+const crlf = await readGpuSnapshot({ bin: FAKE_SMI_CRLF });
+assert.equal(crlf.gpus.length, 3);
+assert.equal(crlf.gpus[0].name, 'NVIDIA GeForce RTX 4090');
+assert.equal(crlf.gpus[0].memUsedMiB, 18920);
+assert.equal(crlf.processes.length, 2);
+
+process.stdout.write('冒烟测试通过：解析 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / CRLF 解析\n');
