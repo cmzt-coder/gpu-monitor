@@ -42,6 +42,7 @@ export function createCollector({
   platform = detectPlatform(),
   mockSource = null,
   systemCollector,
+  store = null,
 }) {
   const history = new History(options.windowSamples);
   const system = systemCollector === undefined
@@ -57,6 +58,7 @@ export function createCollector({
     lastSampleAt: null,
     processWarning: null,
     systemWarning: null,
+    storeWarning: null,
     collectMs: null,
     driverVersion: null,
     latest: null,
@@ -168,6 +170,21 @@ export function createCollector({
       runtime.lastSampleAt = runtime.latest.t;
       runtime.processWarning = snapshot.processWarning || null;
       runtime.driverVersion = snapshot.gpus[0]?.driverVersion || runtime.driverVersion;
+
+      // 落库失败（磁盘满、文件被删等）不能影响实时采集，只记一条提示
+      if (store) {
+        try {
+          store.appendSample({
+            t: runtime.latest.t,
+            gpus: snapshot.gpus,
+            processes: snapshot.processes,
+            system: systemSample,
+          });
+          runtime.storeWarning = null;
+        } catch (error) {
+          runtime.storeWarning = `写入历史库失败：${error?.message || error}`;
+        }
+      }
     } catch (error) {
       runtime.status = 'error';
       runtime.lastError = error?.message || String(error);
@@ -249,6 +266,10 @@ export function createCollector({
       },
       systemEnabled: Boolean(system),
       systemWarning: runtime.systemWarning,
+      storeWarning: runtime.storeWarning,
+      storage: store
+        ? store.stats()
+        : { mode: 'disabled', supportsHistory: false, reason: '未启用历史库' },
       smiBin: runtime.smi?.ok ? runtime.smi.bin : (options.smiBin || 'nvidia-smi'),
       hint: runtime.lastErrorHint,
       driverVersion: runtime.driverVersion,

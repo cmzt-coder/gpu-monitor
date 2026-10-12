@@ -7,11 +7,21 @@ import { fileURLToPath } from 'node:url';
 
 import { readGpuSnapshot, resolveGpuFields, parseGpuCsv, splitRow, defaultGpuFields } from '../src/nvidia.js';
 import { History } from '../src/history.js';
-import { samplesToCsv, samplesToSystemCsv } from '../src/export.js';
+import {
+  GPU_CSV_HEADER,
+  SYSTEM_CSV_HEADER,
+  gpuRowToCsv,
+  samplesToCsv,
+  samplesToSystemCsv,
+  systemRowToCsv,
+} from '../src/export.js';
 import { createMockSource, createMockSystem } from '../src/mock.js';
 import { detectPlatform, nvidiaSmiCandidates, resolveNvidiaSmi } from '../src/platform.js';
 import { createSystemCollector, parseMeminfo, parseNetDev, cpuUsagePct } from '../src/system.js';
 import { createCollector, resolveCadence } from '../src/collector.js';
+import { createSqliteStore } from '../src/store/sqlite-store.js';
+import { createMemoryStore } from '../src/store/store.js';
+import { gpuFromRow, packThrottle, processesSignature, systemFromRow, unpackThrottle } from '../src/store/rows.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
@@ -357,7 +367,164 @@ assert.equal(noSystemState.system, null);
 assert.equal(noSystemState.gpus.length, 1, '关掉宿主指标不影响 GPU 采集');
 noSystemCollector.stop();
 
+/* ---------- 历史库：行映射与节流位掩码 ---------- */
+assert.equal(packThrottle(null), null, '驱动没报节流信息时应存 null');
+assert.equal(packThrottle({ swPowerCap: false, hwThermal: false }), 0, '明确没有节流应存 0，与"未知"区分开');
+const roundTrip = unpackThrottle(packThrottle({ swPowerCap: true, hwThermal: true, gpuIdle: false }));
+assert.equal(roundTrip.swPowerCap, true);
+assert.equal(roundTrip.hwThermal, true);
+assert.equal(roundTrip.gpuIdle, false);
+
+// 进程签名只看身份，不看显存数值，否则每个采样点都会写一遍
+assert.equal(
+  processesSignature([{ gpuIndex: 0, pid: 7, name: 'a', usedMemMiB: 1 }]),
+  processesSignature([{ gpuIndex: 0, pid: 7, name: 'a', usedMemMiB: 999 }]),
+);
+assert.notEqual(
+  processesSignature([{ gpuIndex: 0, pid: 7, name: 'a' }]),
+  processesSignature([{ gpuIndex: 0, pid: 8, name: 'a' }]),
+);
+
+/* ---------- 历史库：写入 / 查询 / 分桶 / 保留 ---------- */
+const dbNow = 1_700_000_000_000;
+const sqliteStore = await createSqliteStore({
+  file: ':memory:',
+  nodeId: 'test-node',
+  storeIntervalMs: 1000,
+  retentionDays: 0,
+  processRefreshMs: 3000,
+  now: () => dbNow,
+});
+
+const gpuAt = (i) => ({
+  index: 0,
+  uuid: 'GPU-test',
+  name: 'RTX 4090',
+  memUsedMiB: 100 + i,
+  memTotalMiB: 1000,
+  utilGpuPct: 50 + i,
+  utilMemPct: 10,
+  tempC: 60 + i,
+  powerW: 100 + i,
+  clockSmMHz: 2000,
+  pstate: 'P2',
+  fanPct: 40,
+  throttle: { swPowerCap: i === 2, hwThermal: false, gpuIdle: false },
+});
+const procAt = (pid) => [{ gpuUuid: 'GPU-test', gpuIndex: 0, pid, name: 'train.py', usedMemMiB: 90 }];
+const hostAt = (i) => ({
+  cpu: { usagePct: 10 + i },
+  mem: { usedMiB: 500, totalMiB: 1000, usedPct: 50 },
+  swap: { usedMiB: 10, totalMiB: 100 },
+  load: { l1: 0.5, l5: 0.4, l15: 0.3 },
+  disk: [{ path: '/', usedMiB: 1, totalMiB: 2, usedPct: 50 }],
+  net: { rxBytesPerSec: 1024, txBytesPerSec: 512 },
+  uptimeSec: 42,
+});
+
+for (let i = 0; i < 6; i += 1) {
+  sqliteStore.appendSample({
+    t: dbNow + 1000 * i,
+    gpus: [gpuAt(i)],
+    processes: procAt(i === 4 ? 9 : 7),
+    system: hostAt(i),
+  });
+}
+sqliteStore.flush();
+
+const storedStats = sqliteStore.stats();
+assert.equal(storedStats.mode, 'sqlite');
+assert.equal(storedStats.supportsHistory, true);
+assert.equal(storedStats.written.gpu, 6);
+assert.equal(storedStats.written.host, 6);
+assert.equal(storedStats.oldestTs, dbNow);
+assert.equal(storedStats.newestTs, dbNow + 5000);
+
+const rawQuery = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10000 });
+assert.equal(rawQuery.points, 6, '原始粒度应返回 6 个采样点');
+assert.equal(rawQuery.step, 0);
+assert.equal(rawQuery.samples[0].gpus[0].memUsedMiB, 100);
+assert.equal(rawQuery.samples[0].gpus[0].clockSmMHz, 2000, '扩展指标应能存下来并读回');
+assert.equal(rawQuery.samples[0].gpus[0].throttle.swPowerCap, false, '节流位掩码应能往返');
+assert.equal(rawQuery.samples[2].gpus[0].throttle.swPowerCap, true);
+assert.equal(rawQuery.samples[0].gpus[0].throttled, false);
+assert.equal(rawQuery.samples[2].gpus[0].throttled, true);
+assert.equal(rawQuery.samples[0].system.cpu.usagePct, 10);
+assert.equal(rawQuery.samples[0].system.mem.usedPct, 50);
+
+const bucketed = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10000, stepMs: 2000 });
+assert.equal(bucketed.step, 2000);
+// 采样点落在 T、T+1s…T+5s，按 2 秒分桶后是 [T, T+2s, T+4s] 三个桶
+assert.equal(bucketed.points, 3, '6 秒按 2 秒分桶应得到 3 个桶');
+assert.equal(bucketed.samples[0].gpus[0].pstate, null, '分桶后 pstate 已无意义，应置空');
+assert.equal(bucketed.samples[1].gpus[0].throttled, true, '桶内出现过节流就要标记出来');
+
+const capped = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10000, pointLimit: 3 });
+assert.equal(capped.truncated, true, '超过点数上限要如实标记截断');
+assert.ok(capped.points <= 3);
+
+// 超出点数上限但没指定 step 时，应自动放大步长而不是硬截断
+const autoStep = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10 * 3600 * 1000, pointLimit: 10 });
+assert.ok(autoStep.step > 0, '区间远大于点数上限时应自动分桶');
+
+// 进程只留档"身份变化"和定时快照
+const procEvents = sqliteStore.queryProcesses({ from: dbNow - 1, to: dbNow + 10000 });
+// 6 个采样点里：首次(7) + 3 秒定时快照(7) + 切到 9 + 又切回 7
+assert.equal(procEvents.length, 4, '只写首次、定时快照与身份变化，不再逐点刷重复行');
+assert.equal(procEvents[0].pid, 7, '最新一条是切回来的进程');
+assert.ok(procEvents.some((event) => event.pid === 9), '进程切换也要留档');
+
+// 保留策略：超出保留期的行会被清掉
+const retentionStore = await createSqliteStore({
+  file: ':memory:',
+  nodeId: 'test-node',
+  storeIntervalMs: 1000,
+  retentionDays: 1,
+  now: () => dbNow,
+});
+const oldTs = dbNow - 3 * 86400000;
+retentionStore.appendSample({ t: oldTs, gpus: [gpuAt(0)], processes: [], system: hostAt(0) });
+retentionStore.appendSample({ t: dbNow, gpus: [gpuAt(1)], processes: [], system: hostAt(1) });
+retentionStore.flush();
+// 用贴近样本的窄区间查询：区间拉得太宽会触发自动分桶，两条就会被合到同一个桶里
+const nearOld = { from: oldTs - 1000, to: oldTs + 1000 };
+const nearNow = { from: dbNow - 1000, to: dbNow + 1000 };
+assert.equal(retentionStore.querySamples(nearOld).points, 1, '清理前应能查到 3 天前那条');
+const dropped = retentionStore.prune(dbNow);
+assert.equal(dropped, 2, '超过 1 天的 gpu/host 行各删一条');
+assert.equal(retentionStore.querySamples(nearOld).points, 0, '过期的那条应被清掉');
+assert.equal(retentionStore.querySamples(nearNow).points, 1, '没过期的那条要保留');
+retentionStore.close();
+
+// 空实现：没有历史库时要明确说"不支持"，而不是假装返回空历史
+const memoryStore = createMemoryStore('未启用（--no-db）');
+assert.equal(memoryStore.supportsHistory, false);
+assert.equal(memoryStore.querySamples({ from: 0, to: 1 }).unsupported, true);
+assert.equal([...memoryStore.gpuPages()].length, 0);
+assert.equal(memoryStore.stats().reason, '未启用（--no-db）');
+
+/* ---------- 导出：按行生成（流式导出的基础） ---------- */
+assert.equal(GPU_CSV_HEADER.startsWith('timestamp_iso,gpu_index'), true);
+assert.equal(SYSTEM_CSV_HEADER.startsWith('timestamp_iso,cpu_usage_pct'), true);
+assert.equal(
+  gpuRowToCsv('2026-01-01T00:00:00.000Z', gpuFromRow({
+    ts: dbNow, idx: 1, uuid: 'u', name: 'A, B', mem_used_mib: 10, mem_total_mib: 20,
+    util_gpu_pct: 30, util_mem_pct: 40, temp_c: 50, power_w: 60,
+  })),
+  '2026-01-01T00:00:00.000Z,1,"A, B",10,20,50,30,40,50,60',
+  '含逗号的名称要加引号，显存占用率按已用/总量算',
+);
+assert.equal(systemRowToCsv('2026-01-01T00:00:00.000Z', systemFromRow({
+  ts: dbNow, cpu_pct: 12.34, mem_used_mib: 500, mem_total_mib: 1000, mem_used_pct: 50,
+  swap_used_mib: null, swap_total_mib: null, load1: 0.5, load5: 0.4, load15: 0.3,
+  disk_json: JSON.stringify([{ path: '/', usedMiB: 1, totalMiB: 2, usedPct: 50 }]),
+  net_rx_bps: 0, net_tx_bps: 2048, uptime_sec: 42,
+})), '2026-01-01T00:00:00.000Z,12.3,500,1000,50,,,0.5,0.4,0.3,/,1,2,50,0,2048');
+
+sqliteStore.close();
+
 process.stdout.write(
   '冒烟测试通过：GPU 解析（基础/扩展/逗号名/CRLF）/ 字段探测与降级 / 宿主指标（Linux + Windows）/ '
-  + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端\n',
+  + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
+  + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行\n',
 );

@@ -1,5 +1,5 @@
 // 把内存中的采样窗口导出为 CSV（每张卡每一刻的显存与利用率原始数据）
-const HEADERS = [
+const GPU_HEADERS = [
   'timestamp_iso',
   'gpu_index',
   'gpu_name',
@@ -11,6 +11,8 @@ const HEADERS = [
   'temp_c',
   'power_w',
 ];
+
+export const GPU_CSV_HEADER = GPU_HEADERS.join(',');
 
 function cell(value) {
   if (value == null) return '';
@@ -25,25 +27,30 @@ function round(value, digits = 1) {
 }
 
 export function samplesToCsv(samples) {
-  const rows = [HEADERS.join(',')];
+  const rows = [GPU_CSV_HEADER];
   for (const sample of samples) {
     const ts = new Date(sample.t).toISOString();
     for (const gpu of sample.gpus) {
-      rows.push([
-        ts,
-        gpu.index,
-        cell(gpu.name),
-        gpu.memUsedMiB,
-        gpu.memTotalMiB,
-        round(gpu.memUsedPct, 2),
-        round(gpu.utilGpuPct, 1),
-        round(gpu.utilMemPct, 1),
-        gpu.tempC,
-        round(gpu.powerW, 1),
-      ].join(','));
+      rows.push(gpuRowToCsv(ts, gpu));
     }
   }
   return `${rows.join('\n')}\n`;
+}
+
+/** 单独一行 GPU 记录，供"按时间区间流式导出"复用（不必先把整段数据读进内存） */
+export function gpuRowToCsv(timestampIso, gpu) {
+  return [
+    timestampIso,
+    gpu.index,
+    cell(gpu.name),
+    gpu.memUsedMiB,
+    gpu.memTotalMiB,
+    round(gpu.memUsedPct, 2),
+    round(gpu.utilGpuPct, 1),
+    round(gpu.utilMemPct, 1),
+    gpu.tempC,
+    round(gpu.powerW, 1),
+  ].join(',');
 }
 
 // 宿主指标的导出：一行 = 一个采样点。
@@ -67,33 +74,40 @@ const SYSTEM_HEADERS = [
   'net_tx_bytes_per_sec',
 ];
 
-export function samplesToSystemCsv(samples) {
-  const rows = [SYSTEM_HEADERS.join(',')];
+export const SYSTEM_CSV_HEADER = SYSTEM_HEADERS.join(',');
+
+/** 单独一行宿主指标，供流式导出复用 */
+export function systemRowToCsv(timestampIso, system) {
   // 速率为 0 也要如实导出，所以不能用 `value || ''`
   const rate = (value) => (value == null || !Number.isFinite(value) ? '' : Math.round(value));
+  const disk = Array.isArray(system.disk) && system.disk.length ? system.disk[0] : null;
+  return [
+    timestampIso,
+    round(system.cpu?.usagePct, 1),
+    round(system.mem?.usedMiB, 1),
+    round(system.mem?.totalMiB, 1),
+    round(system.mem?.usedPct, 2),
+    round(system.swap?.usedMiB, 1),
+    round(system.swap?.totalMiB, 1),
+    round(system.load?.l1, 2),
+    round(system.load?.l5, 2),
+    round(system.load?.l15, 2),
+    cell(disk?.path),
+    round(disk?.usedMiB, 1),
+    round(disk?.totalMiB, 1),
+    round(disk?.usedPct, 2),
+    rate(system.net?.rxBytesPerSec),
+    rate(system.net?.txBytesPerSec),
+  ].join(',');
+}
+
+export function samplesToSystemCsv(samples) {
+  const rows = [SYSTEM_CSV_HEADER];
   for (const sample of samples) {
     const system = sample.system;
     // 平台取不到宿主指标时不会有这一行，避免出现一整列空值
     if (!system) continue;
-    const disk = Array.isArray(system.disk) && system.disk.length ? system.disk[0] : null;
-    rows.push([
-      new Date(sample.t).toISOString(),
-      round(system.cpu?.usagePct, 1),
-      round(system.mem?.usedMiB, 1),
-      round(system.mem?.totalMiB, 1),
-      round(system.mem?.usedPct, 2),
-      round(system.swap?.usedMiB, 1),
-      round(system.swap?.totalMiB, 1),
-      round(system.load?.l1, 2),
-      round(system.load?.l5, 2),
-      round(system.load?.l15, 2),
-      cell(disk?.path),
-      round(disk?.usedMiB, 1),
-      round(disk?.totalMiB, 1),
-      round(disk?.usedPct, 2),
-      rate(system.net?.rxBytesPerSec),
-      rate(system.net?.txBytesPerSec),
-    ].join(','));
+    rows.push(systemRowToCsv(new Date(sample.t).toISOString(), system));
   }
   return `${rows.join('\n')}\n`;
 }
