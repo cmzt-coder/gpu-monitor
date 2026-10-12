@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN" data-jf-ui="blue">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>GPU 显存负载监控</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23005BAC'/%3E%3Cpath d='M6 21l6-7 5 4 4-6 5 5' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+
+<svg class="icon-sprite" aria-hidden="true" focusable="false">
+  <symbol id="icon-activity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M3 12h3.5l2.5-7 4 14 3-7h5"/>
+  </symbol>
+  <symbol id="icon-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3v12m0 0l-4.5-4.5M12 15l4.5-4.5M4 19.5h16"/>
+  </symbol>
+  <symbol id="icon-braces" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M9 3.5C7 3.5 6.5 5 6.5 7v2.5c0 1.6-1 2.5-2.5 2.5 1.5 0 2.5.9 2.5 2.5V17c0 2 .5 3.5 2.5 3.5"/>
+    <path d="M15 3.5c2 0 2.5 1.5 2.5 3.5v2.5c0 1.6 1 2.5 2.5 2.5-1.5 0-2.5.9-2.5 2.5V17c0 2-.5 3.5-2.5 3.5"/>
+  </symbol>
+  <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 12a8 8 0 1 1-2.5-5.8M20 4v4.5h-4.5"/>
+  </symbol>
+  <symbol id="icon-chip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="7" y="7" width="10" height="10" rx="2"/>
+    <path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4"/>
+  </symbol>
+  <symbol id="icon-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.5M12 17.2v.3"/>
+  </symbol>
+  <symbol id="icon-terminal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7.5 10l2.5 2.5-2.5 2.5M13 15h4"/>
+  </symbol>
+  <symbol id="icon-stack" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 3.5l8.5 4.5-8.5 4.5L3.5 8z"/><path d="M3.5 12.5L12 17l8.5-4.5"/>
+  </symbol>
+</svg>
+
+<a class="skip-link" href="#work">跳到工作区</a>
+
+<div class="app">
+  <header class="orient">
+    <div class="orient__main">
+      <span class="title-rule" aria-hidden="true"></span>
+      <div class="orient__text">
+        <h1 class="page-title">GPU 显存负载监控</h1>
+        <p class="orient__sub" id="orient-sub">正在连接采集服务…</p>
+      </div>
+    </div>
+    <div class="orient__actions">
+      <p class="status-pill" id="status-pill" data-state="loading" role="status" aria-live="polite">
+        <span class="status-pill__dot" aria-hidden="true"></span>
+        <span class="status-pill__text" id="status-text">连接中</span>
+      </p>
+      <button type="button" class="btn btn--ghost" id="btn-refresh">
+        <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
+        立即刷新
+      </button>
+      <button type="button" class="btn btn--ghost" id="btn-json">
+        <svg class="icon" aria-hidden="true"><use href="#icon-braces"></use></svg>
+        下载 JSON
+      </button>
+      <button type="button" class="btn btn--primary" id="btn-csv">
+        <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
+        下载 CSV
+      </button>
+    </div>
+  </header>
+
+  <div class="notice" id="notice" role="alert" hidden>
+    <svg class="icon notice__icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
+    <div class="notice__body">
+      <p class="notice__title" id="notice-title">采集异常</p>
+      <p class="notice__text" id="notice-text"></p>
+      <p class="notice__hint" id="notice-hint" hidden>
+        <svg class="icon" aria-hidden="true"><use href="#icon-terminal"></use></svg>
+        <code id="notice-code"></code>
+      </p>
+    </div>
+    <button type="button" class="btn btn--ghost btn--sm" id="btn-retry">重试</button>
+  </div>
+
+  <section class="kpis" aria-label="整机概览">
+    <article class="kpi">
+      <p class="kpi__label">GPU 数量</p>
+      <p class="kpi__value" id="kpi-count">--<span class="kpi__unit">张</span></p>
+      <p class="kpi__foot" id="kpi-count-foot">等待采集</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi__label">显存已用 / 总量</p>
+      <p class="kpi__value" id="kpi-mem">--<span class="kpi__unit">/ --</span></p>
+      <div class="meter" role="img" aria-labelledby="kpi-mem-meter-label">
+        <span class="meter__fill" id="kpi-mem-fill" style="width:0%"></span>
+      </div>
+      <p class="kpi__foot" id="kpi-mem-foot">占用率 --</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi__label">平均 GPU 利用率</p>
+      <p class="kpi__value" id="kpi-util">--<span class="kpi__unit">%</span></p>
+      <p class="kpi__foot" id="kpi-util-foot">按全部显卡平均</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi__label">最高温度</p>
+      <p class="kpi__value" id="kpi-temp">--<span class="kpi__unit">°C</span></p>
+      <p class="kpi__foot" id="kpi-temp-foot">等待采集</p>
+    </article>
+    <article class="kpi">
+      <p class="kpi__label">占用进程</p>
+      <p class="kpi__value" id="kpi-proc">--<span class="kpi__unit">个</span></p>
+      <p class="kpi__foot" id="kpi-proc-foot">等待采集</p>
+    </article>
+  </section>
+
+  <div class="work-grid" id="work">
+    <main class="work-col">
+      <section class="card" aria-labelledby="charts-h">
+        <div class="card__head">
+          <h2 class="card__title" id="charts-h">实时曲线</h2>
+          <div class="legend" aria-hidden="true">
+            <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>显存占用</span>
+            <span class="legend__item"><span class="legend__swatch legend__swatch--util"></span>GPU 利用率</span>
+            <span class="legend__item"><span class="legend__swatch legend__swatch--limit"></span>90% 警戒线</span>
+          </div>
+        </div>
+        <div class="charts" id="charts"></div>
+        <div class="state-block" id="charts-empty" hidden>
+          <svg class="icon state-block__icon" aria-hidden="true"><use href="#icon-chip"></use></svg>
+          <p class="state-block__title" id="empty-title">还没有采集到 GPU 数据</p>
+          <p class="state-block__text" id="empty-text">服务正在尝试读取 nvidia-smi，结果会在一两秒后出现。</p>
+        </div>
+      </section>
+
+      <section class="card" aria-labelledby="proc-h">
+        <div class="card__head card__head--stack">
+          <div>
+            <h2 class="card__title" id="proc-h">占用进程</h2>
+            <p class="card__sub" id="proc-sub">按显存占用从高到低排列</p>
+          </div>
+          <div class="chips" id="proc-filter" role="group" aria-label="按 GPU 过滤进程"></div>
+        </div>
+        <div class="table-wrap" id="proc-table-wrap">
+          <table class="table" id="proc-table">
+            <caption class="visually-hidden">当前占用显存的进程，可按 GPU 过滤</caption>
+            <thead>
+              <tr>
+                <th scope="col">GPU</th>
+                <th scope="col">PID</th>
+                <th scope="col">进程</th>
+                <th scope="col" class="num">显存占用</th>
+                <th scope="col" class="num">占该卡比例</th>
+              </tr>
+            </thead>
+            <tbody id="proc-body"></tbody>
+          </table>
+        </div>
+        <div class="state-block" id="proc-empty" hidden>
+          <p class="state-block__title">没有检测到占用显存的进程</p>
+          <p class="state-block__text" id="proc-empty-text">显卡当前空闲，或采集服务权限不足（需要与业务进程相同的用户）。</p>
+        </div>
+      </section>
+    </main>
+
+    <aside class="evidence-col" aria-label="当前占用与采集信息">
+      <section class="card" aria-labelledby="cards-h">
+        <div class="card__head">
+          <h2 class="card__title" id="cards-h">各卡当前占用</h2>
+        </div>
+        <div class="gpu-cards" id="gpu-cards"></div>
+      </section>
+
+      <section class="card" aria-labelledby="meta-h">
+        <div class="card__head">
+          <h2 class="card__title" id="meta-h">采集信息</h2>
+        </div>
+        <dl class="meta" id="meta-list"></dl>
+      </section>
+    </aside>
+  </div>
+
+  <footer class="footer">
+    <p id="footer-text">数据来自 nvidia-smi，仅保留内存中的最近采样窗口，不落盘、不做历史归档。</p>
+  </footer>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

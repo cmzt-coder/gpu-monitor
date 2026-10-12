@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# 后台启动：用 nohup 常驻，PID 写入 .run/gpu-monitor.pid，日志追加到 gpu-monitor.log。
+# 用法：./start-bg.sh [--port 8090] [--host 0.0.0.0] [--interval 1000] [--window 300] [--node /path/to/node]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+print_usage() {
+  cat <<'USAGE'
+后台启动 GPU 显存负载监控
+
+用法：./start-bg.sh [选项]
+
+  -p, --port <端口>       监听端口（默认 8090，也可用环境变量 PORT）
+      --host <地址>       监听地址（默认 0.0.0.0，局域网可访问）
+      --interval <毫秒>   采集间隔（默认 1000）
+      --window <点数>     曲线窗口采样点数（默认 300）
+      --node <路径>       指定 node 可执行文件（默认从 PATH 查找）
+      --mock              用模拟数据启动，方便无显卡环境先看效果
+  -h, --help              显示本帮助
+
+运行时文件：
+  PID：.run/gpu-monitor.pid    日志：gpu-monitor.log
+
+示例：
+  ./start-bg.sh
+  ./start-bg.sh --port 8091
+  NODE_BIN=/usr/local/bin/node ./start-bg.sh
+USAGE
+}
+
+. "$SCRIPT_DIR/_common.sh"
+
+parse_start_args "$@"
+validate_port
+resolve_node
+
+if pid="$(running_pid)"; then
+  fail "服务已经在运行（PID ${pid}）。要重启请先执行：$SCRIPT_DIR/stop.sh"
+fi
+
+if [ -f "$PID_FILE" ]; then
+  warn "PID 文件已过期，先清理：$PID_FILE"
+  rm -f "$PID_FILE"
+fi
+
+check_port_free
+
+mkdir -p "$RUN_DIR"
+
+nohup "$NODE_BIN" "$PROJECT_DIR/server.js" \
+  --port "$PORT" \
+  --host "$LISTEN_HOST" \
+  --interval "$INTERVAL_MS" \
+  --window "$WINDOW_POINTS" \
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} >>"$LOG_FILE" 2>&1 &
+
+service_pid=$!
+printf '%s\n' "$service_pid" >"$PID_FILE"
+
+# 等一秒确认进程活着，避免端口被占用之类的启动失败被当成成功
+sleep 1
+if kill -0 "$service_pid" 2>/dev/null; then
+  info "已在后台启动，PID $service_pid"
+  print_urls
+  info "日志文件：${LOG_FILE}（tail -f ${LOG_FILE} 实时查看）"
+  info "停止服务：$SCRIPT_DIR/stop.sh"
+else
+  rm -f "$PID_FILE"
+  fail "启动失败，日志最后几行：
+$(tail -n 20 "$LOG_FILE" 2>/dev/null || true)"
+fi
