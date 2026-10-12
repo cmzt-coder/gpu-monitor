@@ -9,9 +9,12 @@
 - 一机多卡实时曲线：每张卡一条「显存占用」曲线 + 一条「GPU 利用率」曲线，窗口默认 300 点（约 5 分钟）
 - 当前占用：整机显存已用/总量、平均利用率、最高温度，以及每张卡的进度条明细
 - 占用进程列表：PID / 进程名 / 显存占用 / 占该卡比例，可按 GPU 过滤（点右上角的 chip）
-- 一键下载：`下载 CSV` 导出曲线原始数据，`下载 JSON` 导出当前完整状态（含进程列表）
+- 显卡运行状态：SM / 显存时钟、P-State、风扇转速、编解码占用，以及**节流原因**（功耗墙、温度墙、硬件降速…）。这一栏能回答"这张卡是真忙还是在降频"，驱动不支持的字段会自动隐藏
+- 宿主系统资源：CPU 使用率、内存使用率、交换分区、系统负载、磁盘容量、网络吞吐，CPU 与内存单独一条曲线
+- 一键下载：`下载 CSV` 导出 GPU 曲线原始数据，`下载系统 CSV` 导出宿主指标，`下载 JSON` 导出当前完整状态（含进程列表与宿主指标）
 - 90% 警戒线、≥90% 与高温的配色告警，异常时给出可复制的排查命令
 - 跨平台：同一份代码在 Linux / Windows 上自动探测 `nvidia-smi`，macOS 上明确提示"平台不支持"而不是笼统报错
+- 空闲降频：页面关掉之后自动把采集间隔放慢（默认 30 秒无人访问后降到 10 秒），窗口保持连续、回来时曲线不断档
 
 ## 平台支持
 
@@ -24,6 +27,24 @@
 | macOS | ❌ 不适用 | NVIDIA 官方驱动已停止支持，系统里没有 `nvidia-smi`；页面会明确提示，服务本身能正常启动 |
 
 当前只支持 NVIDIA。AMD（`rocm-smi`）、Intel（`xpu-smi`）尚未实现，探测层预留了扩展位置。
+
+最新版的 GPU 指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流原因）是**扩展字段**：不同驱动版本支持程度不一样，服务启动时会逐个探测，不支持的自动跳过并在页面「采集信息 → 扩展 GPU 指标」里说明。用 `--no-extended` 可以整个关掉，只保留基础指标。
+
+### 宿主指标的可用范围
+
+宿主指标来自 Node 内置能力加 Linux 的 `/proc`，取不到的字段会明确写「当前平台不支持」，不会用 0 冒充：
+
+| 指标 | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| CPU 使用率 | ✅ | ✅ | ✅ |
+| 内存使用率 | ✅（`/proc/meminfo`，用 `MemAvailable` 算已用） | ✅ | ✅ |
+| 交换分区 | ✅ | ❌ | ❌ |
+| 系统负载 | ✅ | ❌（Windows 没有 loadavg 语义） | ✅ |
+| 磁盘容量 | ✅ | ✅（默认系统盘，可用 `--disk` 追加） | ✅ |
+| 网络吞吐 | ✅（`/proc/net/dev`） | ❌ | ❌ |
+| 系统运行时长 | ✅ | ✅ | ✅ |
+
+Windows 上没有内置的网卡字节数与交换分区数据源，这两项会显示为「当前平台不支持」。macOS 上内存用系统接口取值，`free` 的统计口径与 Linux 不同，数字会偏保守。
 
 ## 快速开始
 
@@ -120,6 +141,11 @@ sudo systemctl enable --now gpu-monitor
 | `--interval` | `1000` | 采集间隔（毫秒） |
 | `--window` | `300` | 内存中保留的采样点数，即页面曲线窗口 |
 | `--nvidia-smi` | 自动探测 | 手动指定 nvidia-smi；不指定时按平台依次尝试 `PATH` → `/usr/bin` → `/usr/local/bin` → WSL2 → Windows 系统目录，也可用环境变量 `NVIDIA_SMI_BIN` |
+| `--disk` | 平台默认 | 额外监控的挂载点，可重复：`--disk / --disk /data`。POSIX 默认 `/`，Windows 默认系统盘 |
+| `--no-system` | 关闭 | 关掉宿主 CPU / 内存 / 磁盘 / 网络采集，只留 GPU 指标 |
+| `--no-extended` | 关闭 | 关掉扩展 GPU 指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流原因） |
+| `--idle-after` | `30` | 多久（秒）没有页面访问就转入空闲降频，`0` 表示不降频 |
+| `--idle-interval` | `10000` | 空闲期间的采集间隔（毫秒） |
 | `--mock` | 关闭 | 用模拟数据启动，便于无 GPU 环境联调 |
 
 环境变量：`GPU_MONITOR_MOCK=1` 等价于 `--mock`；`GPU_MONITOR_MOCK_GPUS=8` 指定模拟卡数；`GPU_MONITOR_MOCK_HIGH=1` 让 0 号卡稳定在 90% 以上，用来检查告警配色。
@@ -131,7 +157,17 @@ sudo systemctl enable --now gpu-monitor
 | `GET /api/state` | 当前状态：每张卡的显存/利用率/温度/功耗、进程列表、采集元信息 |
 | `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
 | `GET /api/export.csv` | 下载曲线原始数据（每行 = 一个采样点 × 一张卡） |
+| `GET /api/export.system.csv` | 下载宿主指标（每行 = 一个采样点；磁盘只导出第一个挂载点，完整明细在 JSON 里） |
 | `GET /api/export.json` | 下载当前完整状态 + 采样窗口 |
+
+`/api/state` 在原有字段之外新增了：
+
+- `system`：宿主指标快照（`cpu` / `mem` / `swap` / `load` / `disk[]` / `net` / `uptimeSec` / `unsupported[]`）
+- `fields`：扩展指标探测结果（`enabled`、`extended`、`count`、`unsupported[]`）
+- `idle`：空闲降频状态（`active`、`currentIntervalMs`、`idleAfterMs`、`idleIntervalMs`）
+- `systemEnabled`、`systemWarning`
+
+原有的 `gpus`、`processes`、`platform`、`collector`、`error` 等字段语义未变，`/api/history` 的采样点新增了 `system` 字段。
 
 ## 实现说明
 
@@ -139,6 +175,10 @@ sudo systemctl enable --now gpu-monitor
 - 平台探测在 `src/platform.js`：识别系统/架构，并按平台找 `nvidia-smi`；找不到时**不阻塞服务启动**，每 30 秒自动重试一次（后装驱动、挂载显卡都不用重启服务）
 - 探测结果通过 `/api/state` 的 `platform` 与 `collector` 字段暴露给页面，所以提示能区分"平台不支持"和"驱动异常"
 - 数据仅保留在内存中（环形缓冲，默认 300 点），不落盘、不做历史归档；重启服务后曲线重新开始
+- GPU 字段表驱动：查询构造、CSV 解析、老驱动探测都由同一张字段表生成，加一个指标只需要在 `src/nvidia.js` 的字段表里加一行
+- 扩展字段逐项探测：老驱动遇到不认识的字段会让整条查询失败，所以启动时先试一次，从报错里找出不支持的字段剔除后重试，结果缓存；基础字段缺失才会真正报错
+- 采集与 HTTP 分离：调度逻辑（`src/collector.js`）、宿主指标（`src/system.js`）、GPU 采集（`src/nvidia.js`）互相独立，HTTP 层只做路由与静态文件。环形缓冲是独立的 `History` 类，将来换成 SQL 落库只需要替换它
+- 空闲降频是按"最近一次 HTTP 请求"判断的：超过 `--idle-after` 秒没有请求就把间隔放大到 `--idle-interval`，而不是彻底停采，这样窗口不会出现空洞
 - 前端零框架、零构建：原生 `fetch` 轮询，曲线用 Canvas 手绘；页面标签页隐藏时暂停轮询
 - 服务零依赖：只用 `node:http` / `node:child_process` 等内置模块，部署时不需要 `npm install`
 - 仓库带 `.gitattributes`，强制 `.sh` 用 LF 换行——在 Windows 上编辑过脚本后提交，也不会把换行符改成 CRLF 而弄坏 Linux 上的执行
@@ -156,6 +196,14 @@ sudo systemctl enable --now gpu-monitor
 **AMD / Intel 显卡？** 当前只支持 NVIDIA（`nvidia-smi`）。新增厂商需要按 `src/platform.js` 的接口增加一个探测分支和对应的解析，解析部分可参考 `src/nvidia.js`。
 
 **页面显示"采集失败"？** 页面会给出报错原因、平台相关的排查建议，以及"探测过的位置"清单（每个位置为什么不可用），先在服务器终端跑一次 `nvidia-smi -L` 确认能出数据。
+
+**内存 / 网络显示"当前平台不支持"？** 这是预期行为：Windows 没有内置的交换分区与网卡字节数来源。CPU、内存、磁盘、运行时长仍然可用。
+
+**卡片上没有时钟 / P-State / 风扇？** 说明这台机器的驱动不支持这些扩展字段，服务已经自动跳过并在「采集信息 → 扩展 GPU 指标」里列出了被跳过的字段。驱动升级后重启服务会重新探测。
+
+**"空闲降频中"是什么？** 没有页面在访问时，服务会把采集间隔放慢到 `--idle-interval`（默认 10 秒），以降低 `nvidia-smi` 的调用开销。数据仍在采集，打开页面后会立刻恢复满速。不想降频就用 `--idle-after 0`。
+
+**想看宿主机 CPU / 内存的历史？** 用 `下载系统 CSV`，或者 `下载 JSON` 里已经包含了完整的逐盘明细。
 
 ## 本地自检
 

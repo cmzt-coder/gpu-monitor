@@ -1,22 +1,21 @@
 #!/usr/bin/env node
 // GPU 显存负载监控服务：零依赖（node:http + child_process 调用 nvidia-smi）
-// 用法：node server.js --port 8080 [--host 0.0.0.0] [--interval 1000] [--window 300] [--mock]
+// 用法：node server.js --port 8090 [--host 0.0.0.0] [--interval 1000] [--window 300] [--mock]
+// 采集与调度逻辑在 src/collector.js，这里只负责参数解析、HTTP 路由与静态文件。
 import http from 'node:http';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-import { readGpuSnapshot } from './src/nvidia.js';
-import { createMockSource } from './src/mock.js';
-import { History } from './src/history.js';
-import { samplesToCsv } from './src/export.js';
-import { detectPlatform, resolveNvidiaSmi } from './src/platform.js';
+import { createCollector } from './src/collector.js';
+import { samplesToCsv, samplesToSystemCsv } from './src/export.js';
+import { createMockSource, createMockSystem } from './src/mock.js';
+import { detectPlatform } from './src/platform.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, 'public');
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -31,18 +30,24 @@ const HELP = `GPU 显存负载监控服务
 
 用法：node server.js [选项]
 
-  -p, --port <端口>       监听端口（默认 8080，也可用环境变量 PORT）
+  -p, --port <端口>       监听端口（默认 8080，启动脚本会自动传 8090，也可用环境变量 PORT）
       --host <地址>       监听地址（默认 0.0.0.0，局域网可访问）
       --interval <毫秒>   采集间隔（默认 1000）
       --window <采样点数> 内存中保留的采样点数，也就是页面曲线的窗口（默认 300）
       --nvidia-smi <路径> 手动指定 nvidia-smi，默认按平台自动探测
                           （PATH → /usr/bin → /usr/local/bin → WSL2 → Windows 系统目录）
+      --disk <路径>       额外监控的挂载点，可重复（默认 POSIX 为 /，Windows 为系统盘）
+      --no-system         关掉宿主 CPU / 内存 / 磁盘 / 网络采集
+      --no-extended       关掉扩展 GPU 指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流原因）
+      --idle-after <秒>   多久没有页面访问就转入空闲降频（默认 30，0 表示不限）
+      --idle-interval <毫秒> 空闲期间的采集间隔（默认 10000）
       --mock              使用模拟数据，便于无 GPU 环境本地开发
   -h, --help              显示帮助
 
 示例：
-  node server.js --port 8080
-  node server.js --port 9090 --interval 2000
+  node server.js --port 8090
+  node server.js --port 8090 --interval 500 --no-extended
+  node server.js --port 8090 --mock --idle-after 0
 `;
 
 function parseArgs(argv) {
@@ -54,6 +59,12 @@ function parseArgs(argv) {
     // null 表示"没显式指定"，交给 src/platform.js 按平台自动探测
     smiBin: process.env.NVIDIA_SMI_BIN || null,
     mock: process.env.GPU_MONITOR_MOCK === '1',
+    system: true,
+    extended: true,
+    idleAfterMs: 30000,
+    idleIntervalMs: 10000,
+    diskTargets: [],
+    version: VERSION,
     help: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
@@ -76,6 +87,23 @@ function parseArgs(argv) {
       case '--nvidia-smi':
         options.smiBin = next() || options.smiBin;
         break;
+      case '--disk': {
+        const target = next();
+        if (target) options.diskTargets.push(target);
+        break;
+      }
+      case '--no-system':
+        options.system = false;
+        break;
+      case '--no-extended':
+        options.extended = false;
+        break;
+      case '--idle-after':
+        options.idleAfterMs = Math.max(0, Number(next()) || 0) * 1000;
+        break;
+      case '--idle-interval':
+        options.idleIntervalMs = Math.max(1000, Number(next()) || 10000);
+        break;
       case '--mock':
         options.mock = true;
         break;
@@ -96,144 +124,17 @@ if (options.help) {
   process.exit(0);
 }
 
-const history = new History(options.windowSamples);
 const platform = detectPlatform();
-const mockSource = options.mock ? createMockSource() : null;
-
-const runtime = {
-  startedAt: Date.now(),
-  hostname: os.hostname(),
+// --mock 下连宿主指标也用模拟数据，这样在没有 GPU、也没有可读 /proc 的机器上也能看完整界面
+const collector = createCollector({
+  options,
   platform,
-  status: 'starting',
-  lastError: null,
-  lastErrorHint: null,
-  lastSampleAt: null,
-  processWarning: null,
-  collectMs: null,
-  driverVersion: null,
-  latest: null,
-  // nvidia-smi 探测结果，见 src/platform.js 的 resolveNvidiaSmi
-  smi: null,
-  smiResolvedAt: 0,
-};
-
-// 探测失败后每隔这么久再试一次，这样后装驱动/挂载显卡后不用重启服务
-const SMI_RETRY_MS = 30000;
-let smiPromise = null;
-let collecting = false;
-
-async function ensureSmi({ force = false } = {}) {
-  if (runtime.smi?.ok && !force) return runtime.smi;
-  const now = Date.now();
-  if (!force && runtime.smiResolvedAt && now - runtime.smiResolvedAt < SMI_RETRY_MS) {
-    return runtime.smi;
-  }
-  if (smiPromise) return smiPromise;
-
-  runtime.smiResolvedAt = now;
-  smiPromise = resolveNvidiaSmi({ explicit: options.smiBin })
-    .then((result) => {
-      runtime.smi = result;
-      return result;
-    })
-    .finally(() => {
-      smiPromise = null;
-    });
-  return smiPromise;
-}
-
-// 真实采集：找不到 nvidia-smi 时抛出带 hint 的错误，由 collectOnce 落到状态里
-async function collectFromSmi() {
-  const smi = await ensureSmi();
-  if (!smi.ok) {
-    const error = new Error(smi.error);
-    error.hint = smi.hint;
-    throw error;
-  }
-  return readGpuSnapshot({ bin: smi.bin, timeout: Math.max(3000, options.intervalMs * 4) });
-}
-
-async function collectOnce() {
-  if (collecting) return;
-  collecting = true;
-  const startedAt = Date.now();
-  try {
-    const snapshot = mockSource
-      ? await mockSource()
-      : await collectFromSmi();
-    // 采样点只保留曲线需要的字段，进程列表单独保留最新一份，避免内存冗余
-    const gpus = snapshot.gpus.map((gpu) => ({
-      index: gpu.index,
-      uuid: gpu.uuid,
-      name: gpu.name,
-      memTotalMiB: gpu.memTotalMiB,
-      memUsedMiB: gpu.memUsedMiB,
-      memUsedPct: gpu.memUsedPct,
-      utilGpuPct: gpu.utilGpuPct,
-      utilMemPct: gpu.utilMemPct,
-      tempC: gpu.tempC,
-      powerW: gpu.powerW,
-    }));
-    const sample = { t: Date.now(), gpus };
-    history.push(sample);
-    runtime.latest = { ...sample, processes: snapshot.processes };
-    runtime.status = 'ok';
-    runtime.lastError = null;
-    runtime.lastErrorHint = null;
-    runtime.lastSampleAt = sample.t;
-    runtime.processWarning = snapshot.processWarning || null;
-    runtime.driverVersion = snapshot.gpus[0]?.driverVersion || runtime.driverVersion;
-  } catch (error) {
-    runtime.status = 'error';
-    runtime.lastError = error?.message || String(error);
-    runtime.lastErrorHint = error?.hint || null;
-  } finally {
-    runtime.collectMs = Date.now() - startedAt;
-    collecting = false;
-  }
-}
-
-function buildState() {
-  const latest = runtime.latest;
-  return {
-    ok: runtime.status === 'ok',
-    status: runtime.status,
-    ts: runtime.lastSampleAt || Date.now(),
-    serverTime: Date.now(),
-    intervalMs: options.intervalMs,
-    windowSamples: options.windowSamples,
-    hostname: runtime.hostname,
-    version: VERSION,
-    mock: options.mock,
-    // 运行平台：前端据此区分"平台不支持"和"驱动异常"
-    platform: {
-      id: platform.id,
-      label: platform.label,
-      arch: platform.arch,
-      nodeVersion: platform.nodeVersion,
-      supported: platform.supported,
-      note: platform.note,
-    },
-    // 采集后端：当前只有 nvidia-smi 一种
-    collector: {
-      id: 'nvidia-smi',
-      bin: runtime.smi?.ok ? runtime.smi.bin : null,
-      source: runtime.smi?.source || null,
-      deviceCount: runtime.smi?.ok ? runtime.smi.deviceCount : null,
-      tried: runtime.smi?.tried || [],
-    },
-    smiBin: runtime.smi?.ok ? runtime.smi.bin : (options.smiBin || 'nvidia-smi'),
-    hint: runtime.lastErrorHint,
-    driverVersion: runtime.driverVersion,
-    uptimeSec: Math.round((Date.now() - runtime.startedAt) / 1000),
-    collectMs: runtime.collectMs,
-    samples: history.size,
-    error: runtime.lastError,
-    processWarning: runtime.processWarning,
-    gpus: latest ? latest.gpus : [],
-    processes: latest ? latest.processes : [],
-  };
-}
+  mockSource: options.mock ? createMockSource() : null,
+  // --no-system 优先级最高：显式关掉时连模拟数据也不提供
+  systemCollector: options.system === false
+    ? null
+    : (options.mock ? createMockSystem() : undefined),
+});
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -297,7 +198,15 @@ async function serveStatic(req, res) {
   }
 }
 
+function limitFrom(url) {
+  const requested = Number(url.searchParams.get('limit')) || options.windowSamples;
+  return Math.min(options.windowSamples, requested);
+}
+
 const server = http.createServer(async (req, res) => {
+  // 任何请求都算"有人在看"，采集调度据此决定是满速还是空闲降频
+  collector.noteClient();
+
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
 
@@ -307,38 +216,42 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/api/state') {
-    sendJson(res, 200, buildState());
+    sendJson(res, 200, collector.getState());
     return;
   }
 
   if (pathname === '/api/history') {
-    const limit = Math.min(options.windowSamples, Number(url.searchParams.get('limit')) || options.windowSamples);
-    sendJson(res, 200, {
-      intervalMs: options.intervalMs,
-      windowSamples: options.windowSamples,
-      samples: history.snapshot(limit),
-    });
+    sendJson(res, 200, collector.getHistory(limitFrom(url)));
     return;
   }
 
   if (pathname === '/api/export.csv') {
-    const limit = Math.min(options.windowSamples, Number(url.searchParams.get('limit')) || options.windowSamples);
     sendDownload(
       res,
-      `gpu-monitor-${runtime.hostname}-${stamp()}.csv`,
+      `gpu-monitor-${collector.getState().hostname}-${stamp()}.csv`,
       'text/csv; charset=utf-8',
-      `\uFEFF${samplesToCsv(history.snapshot(limit))}`,
+      `\uFEFF${samplesToCsv(collector.getSamples(limitFrom(url)))}`,
+    );
+    return;
+  }
+
+  if (pathname === '/api/export.system.csv') {
+    sendDownload(
+      res,
+      `gpu-monitor-system-${collector.getState().hostname}-${stamp()}.csv`,
+      'text/csv; charset=utf-8',
+      `\uFEFF${samplesToSystemCsv(collector.getSamples(limitFrom(url)))}`,
     );
     return;
   }
 
   if (pathname === '/api/export.json') {
-    const state = buildState();
+    const state = collector.getState();
     sendDownload(
       res,
-      `gpu-monitor-${runtime.hostname}-${stamp()}.json`,
+      `gpu-monitor-${state.hostname}-${stamp()}.json`,
       'application/json; charset=utf-8',
-      JSON.stringify({ ...state, samples: history.snapshot(state.windowSamples) }, null, 2),
+      JSON.stringify({ ...state, samples: collector.getSamples(state.windowSamples) }, null, 2),
     );
     return;
   }
@@ -351,9 +264,8 @@ const server = http.createServer(async (req, res) => {
   await serveStatic(req, res);
 });
 
-collectOnce();
-const timer = setInterval(collectOnce, options.intervalMs);
-timer.unref?.();
+// 先把第一次采集发出去（页面一打开就有数据），再开始按间隔轮转
+const firstCollection = collector.start();
 
 server.listen(options.port, options.host, () => {
   const shown = options.host === '0.0.0.0' ? 'localhost' : options.host;
@@ -362,16 +274,24 @@ server.listen(options.port, options.host, () => {
     + `  页面：   http://${shown}:${options.port}/\n`
     + `  平台：   ${platform.label} ${platform.arch}（node ${platform.nodeVersion}）\n`
     + `  数据源： ${options.mock ? '模拟数据（--mock）' : '自动探测 nvidia-smi'}\n`
-    + `  采集：   每 ${options.intervalMs} ms，曲线窗口 ${options.windowSamples} 点\n`,
+    + `  采集：   每 ${options.intervalMs} ms，曲线窗口 ${options.windowSamples} 点`
+    + `${options.idleAfterMs > 0 ? `，空闲 ${options.idleAfterMs / 1000} 秒后降频到 ${options.idleIntervalMs} ms` : '，不降频'}\n`
+    + `  宿主指标：${options.system === false ? '已关闭' : (options.mock ? '模拟数据' : '开启')}`
+    + `　扩展 GPU 指标：${options.extended ? '开启（自动探测驱动支持）' : '已关闭'}\n`,
   );
 
   // 探测结果异步补一行，探测失败也不阻塞服务启动（采集循环每 30s 会重试）
   if (!options.mock) {
-    ensureSmi({ force: true }).then((smi) => {
-      if (smi.ok) {
-        process.stdout.write(`  显卡：   ${smi.bin}（${smi.source}），检测到 ${smi.deviceCount} 张卡\n`);
-      } else {
-        process.stdout.write(`  警告：   ${smi.error}\n           ${smi.hint}\n`);
+    firstCollection.then(() => {
+      const state = collector.getState();
+      if (state.collector.bin) {
+        process.stdout.write(`  显卡：   ${state.collector.bin}（${state.collector.source}），检测到 ${state.collector.deviceCount} 张卡\n`);
+      } else if (state.error) {
+        process.stdout.write(`  警告：   ${state.error}\n           ${state.hint || ''}\n`);
+      }
+      const probe = state.fields;
+      if (probe?.enabled && probe.unsupported?.length) {
+        process.stdout.write(`  提示：   ${probe.unsupported.length} 个扩展字段当前驱动不支持，已自动跳过：${probe.unsupported.join('、')}\n`);
       }
     });
   }
@@ -390,7 +310,7 @@ server.on('error', (error) => {
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
-    clearInterval(timer);
+    collector.stop();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 500).unref();
   });

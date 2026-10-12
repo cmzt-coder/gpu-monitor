@@ -41,6 +41,11 @@ export function createMockSource({
         : normal;
       const memUsedMiB = Math.round(card.memTotalMiB * usedRatio);
       const utilGpuPct = Math.round(Math.min(100, Math.max(0, usedRatio * 118 + Math.sin(elapsed / 3 + card.phase) * 6)));
+      const tempC = highLoad && card.index === 0 ? 88 : Math.round(42 + usedRatio * 38);
+      // 扩展指标也一起模拟，这样 --mock 下能看到时钟 / P-State / 风扇 / 节流这几行
+      const smClock = Math.round(1200 + usedRatio * 1350);
+      const fanPct = Math.round(Math.min(100, 25 + usedRatio * 65));
+      const thermalThrottle = tempC >= 83;
       return {
         index: card.index,
         uuid: card.uuid,
@@ -51,10 +56,26 @@ export function createMockSource({
         memFreeMiB: card.memTotalMiB - memUsedMiB,
         utilGpuPct,
         utilMemPct: Math.round(usedRatio * 100),
-        tempC: highLoad && card.index === 0 ? 88 : Math.round(42 + usedRatio * 38),
+        tempC,
         powerW: Math.round(90 + usedRatio * 260),
         powerLimitW: 450,
         memUsedPct: usedRatio * 100,
+        clockSmMHz: smClock,
+        clockMemMHz: 9000 + (card.index % 2) * 1500,
+        pstate: usedRatio > 0.5 ? 'P2' : 'P8',
+        fanPct,
+        pcieGen: 4,
+        pcieWidth: 16,
+        encUtilPct: card.index % 2 === 0 ? Math.round(usedRatio * 6) : 0,
+        decUtilPct: card.index === 2 ? Math.round(usedRatio * 4) : 0,
+        throttle: {
+          swPowerCap: usedRatio > 0.9,
+          hwSlowdown: false,
+          hwThermal: thermalThrottle,
+          hwPowerBrake: false,
+          swThermal: false,
+          gpuIdle: usedRatio < 0.1,
+        },
       };
     });
 
@@ -73,5 +94,55 @@ export function createMockSource({
 
     processes.sort((a, b) => b.usedMemMiB - a.usedMemMiB);
     return { gpus, processes, processWarning: null };
+  };
+}
+
+/**
+ * 模拟宿主指标（--mock 时使用）。
+ * 和真实采集器接口一致：返回 { sample() }，两个值都带正弦波动，
+ * 这样在没有 /proc 的机器上也能看到完整的系统资源卡片和曲线。
+ */
+export function createMockSystem({ cores = 16, totalMemMiB = 65536, diskTotalMiB = 1024000 } = {}) {
+  const startedAt = Date.now();
+  const targets = [{ path: '/', totalMiB: diskTotalMiB }];
+
+  return {
+    async sample() {
+      const elapsed = (Date.now() - startedAt) / 1000;
+      const wave = Math.sin(elapsed / 21) * 0.5 + 0.5;
+      const cpuPct = Math.min(99, Math.max(3, 24 + wave * 46));
+      const memPct = Math.min(96, Math.max(8, 41 + Math.sin(elapsed / 47) * 12));
+      const diskPct = 63 + Math.sin(elapsed / 400) * 1.5;
+      const rx = Math.round(1_200_000 + wave * 3_500_000);
+      const tx = Math.round(600_000 + (1 - wave) * 1_800_000);
+      return {
+        at: Date.now(),
+        unsupported: [],
+        cpu: { usagePct: cpuPct, cores, model: 'Mock CPU (--mock)' },
+        mem: {
+          totalMiB: totalMemMiB,
+          usedMiB: (totalMemMiB * memPct) / 100,
+          availableMiB: totalMemMiB * (1 - memPct / 100),
+          usedPct: memPct,
+        },
+        swap: { totalMiB: 8192, usedMiB: 512 + wave * 256, usedPct: ((512 + wave * 256) / 8192) * 100 },
+        load: { l1: 1.2 + wave, l5: 1.1, l15: 0.9 },
+        disk: targets.map((target) => ({
+          path: target.path,
+          totalMiB: target.totalMiB,
+          usedMiB: (target.totalMiB * diskPct) / 100,
+          freeMiB: target.totalMiB * (1 - diskPct / 100),
+          usedPct: diskPct,
+        })),
+        net: {
+          interfaces: 2,
+          rxTotalBytes: rx * elapsed,
+          txTotalBytes: tx * elapsed,
+          rxBytesPerSec: rx,
+          txBytesPerSec: tx,
+        },
+        uptimeSec: Math.round(elapsed + 86400 * 3),
+      };
+    },
   };
 }

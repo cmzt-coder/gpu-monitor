@@ -17,6 +17,11 @@ print_usage() {
       --interval <毫秒>   采集间隔（默认 1000）
       --window <点数>     曲线窗口采样点数（默认 300）
       --node <路径>       指定 node 可执行文件（默认从 PATH 查找）
+      --disk <路径>       额外监控的挂载点，可重复（如 --disk / --disk /data）
+      --no-system         只采集 GPU，不采集宿主 CPU / 内存 / 磁盘 / 网络
+      --no-extended       不采集扩展 GPU 指标（时钟 / P-State / 风扇 / 节流原因）
+      --idle-after <秒>   无人访问多久后降频（默认 30，0 表示不降频）
+      --idle-interval <毫秒> 空闲期间的采集间隔（默认 10000）
       --mock              用模拟数据启动，方便无显卡环境先看效果
   -h, --help              显示本帮助
 

@@ -14,6 +14,7 @@ const refs = {
   btnRefresh: $('btn-refresh'),
   btnCsv: $('btn-csv'),
   btnJson: $('btn-json'),
+  btnSysCsv: $('btn-sys-csv'),
   kpiCount: $('kpi-count'),
   kpiCountFoot: $('kpi-count-foot'),
   kpiMem: $('kpi-mem'),
@@ -29,6 +30,14 @@ const refs = {
   chartsEmpty: $('charts-empty'),
   emptyTitle: $('empty-title'),
   emptyText: $('empty-text'),
+  sysSub: $('sys-sub'),
+  sysMeters: $('sys-meters'),
+  sysChartWrap: $('sys-chart-wrap'),
+  sysCanvas: $('sys-canvas'),
+  sysDetail: $('sys-detail'),
+  sysEmpty: $('sys-empty'),
+  sysEmptyTitle: $('sys-empty-title'),
+  sysEmptyText: $('sys-empty-text'),
   procSub: $('proc-sub'),
   procFilter: $('proc-filter'),
   procTableWrap: $('proc-table-wrap'),
@@ -48,6 +57,7 @@ const state = {
   processes: [],
   filter: 'all',
   series: new Map(),
+  systemSeries: { t: [], cpu: [], mem: [] },
   chartNodes: new Map(),
   chartSignature: '',
   cardNodes: new Map(),
@@ -59,6 +69,27 @@ const state = {
 };
 
 const HIGH_THRESHOLD = 90;
+const TEMP_WARN = 75;
+const TEMP_DANGER = 85;
+
+// 节流原因的中文名与告警级别（gpuIdle 只是"显卡空闲"，不是故障）
+const THROTTLE_LABELS = {
+  swPowerCap: { text: '功耗墙', tone: 'warning' },
+  hwSlowdown: { text: '硬件降速', tone: 'danger' },
+  hwThermal: { text: '温度墙', tone: 'danger' },
+  hwPowerBrake: { text: '功耗刹车', tone: 'danger' },
+  swThermal: { text: '软件温度墙', tone: 'warning' },
+  gpuIdle: { text: '空闲', tone: null },
+};
+
+const SYSTEM_FIELD_LABELS = {
+  cpu: 'CPU',
+  mem: '内存',
+  swap: '交换分区',
+  load: '系统负载',
+  disk: '磁盘',
+  net: '网络',
+};
 
 /* ---------- 格式化 ---------- */
 const toGiB = (mib) => (mib == null ? null : mib / 1024);
@@ -75,6 +106,18 @@ function fmtMiB(mib) {
 
 function fmtPct(value, digits = 0) {
   return value == null ? '--' : `${value.toFixed(digits)}%`;
+}
+
+function fmtRate(bytesPerSec) {
+  if (bytesPerSec == null) return '--';
+  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  let value = bytesPerSec;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 || value >= 100 ? 0 : 1)} ${units[unit]}`;
 }
 
 function fmtClock(ts) {
@@ -115,7 +158,20 @@ function toneFor(pct) {
   return null;
 }
 
+function tempTone(temp) {
+  if (temp == null) return null;
+  if (temp >= TEMP_DANGER) return 'danger';
+  if (temp >= TEMP_WARN) return 'warning';
+  return null;
+}
+
 /* ---------- 数据接入 ---------- */
+function trimToWindow(list) {
+  const overflow = list.t.length - state.windowSamples;
+  if (overflow > 0) list.t.splice(0, overflow);
+  return overflow;
+}
+
 function appendSample(sample) {
   const seen = new Set();
   for (const gpu of sample.gpus || []) {
@@ -129,9 +185,8 @@ function appendSample(sample) {
     series.t.push(sample.t);
     series.mem.push(gpu.memUsedPct ?? 0);
     series.util.push(gpu.utilGpuPct ?? 0);
-    const overflow = series.t.length - state.windowSamples;
+    const overflow = trimToWindow(series);
     if (overflow > 0) {
-      series.t.splice(0, overflow);
       series.mem.splice(0, overflow);
       series.util.splice(0, overflow);
     }
@@ -140,7 +195,20 @@ function appendSample(sample) {
   for (const key of [...state.series.keys()]) {
     if (!seen.has(key)) state.series.delete(key);
   }
-  state.lastSampleAt = sample.t;
+  if (sample.t) state.lastSampleAt = sample.t;
+
+  // 宿主指标与 GPU 曲线共用同一条时间轴；取不到的行留 null，画图时断开
+  if (sample.system) {
+    const series = state.systemSeries;
+    series.t.push(sample.t);
+    series.cpu.push(sample.system.cpu?.usagePct ?? null);
+    series.mem.push(sample.system.mem?.usedPct ?? null);
+    const overflow = trimToWindow(series);
+    if (overflow > 0) {
+      series.cpu.splice(0, overflow);
+      series.mem.splice(0, overflow);
+    }
+  }
 }
 
 async function fetchJson(url) {
@@ -160,8 +228,8 @@ async function poll() {
     state.gpus = data.gpus || [];
     state.processes = data.processes || [];
     state.meta = data;
-    if (state.gpus.length > 0) {
-      appendSample({ t: data.ts || Date.now(), gpus: state.gpus });
+    if (state.gpus.length > 0 || data.system) {
+      appendSample({ t: data.ts || Date.now(), gpus: state.gpus, system: data.system });
     }
     render();
   } catch (error) {
@@ -191,8 +259,12 @@ function renderStatus() {
     error: ['error', '采集失败'],
     unreachable: ['error', '连接中断'],
   };
-  const [tone, text] = map[state.status] || ['loading', '连接中'];
+  let [tone, text] = map[state.status] || ['loading', '连接中'];
   const stale = state.status === 'error' || state.status === 'unreachable';
+  // 空闲降频时明确告诉用户"数据还是在采，只是慢了"，避免误以为服务卡住
+  if (!stale && tone === 'live' && state.meta?.idle?.active) {
+    text = `空闲降频中（每 ${Math.round((state.meta.idle.currentIntervalMs || 0) / 1000)} 秒）`;
+  }
   refs.statusPill.dataset.state = tone;
   refs.statusText.textContent = stale && state.lastSampleAt
     ? `${text} · 数据停留在 ${fmtRelative(state.lastSampleAt)}`
@@ -277,7 +349,7 @@ function renderKpis() {
   refs.kpiTempFoot.textContent = maxTemp == null
     ? '等待采集'
     : `最高温度来自 GPU ${gpus.find((gpu) => gpu.tempC === maxTemp)?.index ?? '--'}`;
-  refs.kpiTempFoot.dataset.tone = maxTemp != null && maxTemp >= 85 ? 'danger' : maxTemp != null && maxTemp >= 75 ? 'warning' : '';
+  refs.kpiTempFoot.dataset.tone = tempTone(maxTemp) || '';
 
   const procCount = state.processes.length;
   refs.kpiProc.innerHTML = state.meta?.status === 'ok'
@@ -302,11 +374,15 @@ function themeColors() {
     danger: cssVar('--jf-color-danger', '#cd412d'),
     border: cssVar('--jf-color-border', '#d3d7d9'),
     muted: cssVar('--jf-color-ink-muted', '#546c7d'),
-    soft: cssVar('--jf-color-signal-soft', '#aaddfd'),
   };
 }
 
-function drawChart(canvas, series, windowSamples) {
+/**
+ * 画一组 0-100% 的折线。
+ * series 里每一项是 { values, color, width, fill }；values 里的 null 表示这一段没有数据，
+ * 折线会断开、面积也不会跨越空洞——宿主指标在部分平台上取不到时就是这个样子。
+ */
+function drawLines(canvas, seriesList, windowSamples, { limit = null, times = [] } = {}) {
   const rect = canvas.getBoundingClientRect();
   const width = Math.round(rect.width);
   const height = Math.round(rect.height);
@@ -330,7 +406,6 @@ function drawChart(canvas, series, windowSamples) {
   ctx.font = '11px ' + cssVar('--jf-font-body', 'sans-serif');
   ctx.lineWidth = 1;
 
-  // 横向网格与右侧刻度
   for (const value of [0, 25, 50, 75, 100]) {
     const y = pad.top + plotH * (1 - value / 100);
     ctx.strokeStyle = colors.border;
@@ -344,66 +419,87 @@ function drawChart(canvas, series, windowSamples) {
     ctx.fillText(`${value}%`, pad.left + plotW + 8, y);
   }
 
-  const count = series.mem.length;
+  const count = seriesList[0]?.values.length || 0;
   const xAt = (i) => pad.left + plotW * (1 - (count - 1 - i) / (slots - 1));
   const yAt = (value) => pad.top + plotH * (1 - Math.min(100, Math.max(0, value)) / 100);
 
-  if (count >= 2) {
-    // 显存占用：面积 + 主线
-    const area = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
-    area.addColorStop(0, 'rgba(0, 91, 172, 0.20)');
-    area.addColorStop(1, 'rgba(0, 91, 172, 0.02)');
-    ctx.beginPath();
-    ctx.moveTo(xAt(0), yAt(series.mem[0]));
-    for (let i = 1; i < count; i += 1) ctx.lineTo(xAt(i), yAt(series.mem[i]));
-    ctx.lineTo(xAt(count - 1), pad.top + plotH);
-    ctx.lineTo(xAt(0), pad.top + plotH);
-    ctx.closePath();
-    ctx.fillStyle = area;
-    ctx.fill();
+  for (const line of seriesList) {
+    const values = line.values;
 
-    ctx.beginPath();
-    ctx.strokeStyle = colors.primary;
-    ctx.lineWidth = 2;
-    ctx.lineJoin = 'round';
-    ctx.moveTo(xAt(0), yAt(series.mem[0]));
-    for (let i = 1; i < count; i += 1) ctx.lineTo(xAt(i), yAt(series.mem[i]));
-    ctx.stroke();
+    if (line.fill && count >= 2) {
+      const gradient = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+      gradient.addColorStop(0, 'rgba(0, 91, 172, 0.20)');
+      gradient.addColorStop(1, 'rgba(0, 91, 172, 0.02)');
+      // 按连续的非空段分别填充，避免面积跨过没有数据的区间
+      let start = -1;
+      for (let i = 0; i <= count; i += 1) {
+        const valid = i < count && values[i] != null;
+        if (valid && start < 0) start = i;
+        if (!valid && start >= 0) {
+          const end = i - 1;
+          if (end > start) {
+            ctx.beginPath();
+            ctx.moveTo(xAt(start), yAt(values[start]));
+            for (let k = start + 1; k <= end; k += 1) ctx.lineTo(xAt(k), yAt(values[k]));
+            ctx.lineTo(xAt(end), pad.top + plotH);
+            ctx.lineTo(xAt(start), pad.top + plotH);
+            ctx.closePath();
+            ctx.fillStyle = gradient;
+            ctx.fill();
+          }
+          start = -1;
+        }
+      }
+    }
 
-    // GPU 利用率：细线
-    ctx.beginPath();
-    ctx.strokeStyle = colors.signal;
-    ctx.lineWidth = 1.5;
-    ctx.moveTo(xAt(0), yAt(series.util[0]));
-    for (let i = 1; i < count; i += 1) ctx.lineTo(xAt(i), yAt(series.util[i]));
-    ctx.stroke();
+    if (count >= 2) {
+      ctx.strokeStyle = line.color;
+      ctx.lineWidth = line.width || 1.5;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      let drawing = false;
+      for (let i = 0; i < count; i += 1) {
+        const value = values[i];
+        if (value == null) {
+          drawing = false;
+          continue;
+        }
+        if (drawing) ctx.lineTo(xAt(i), yAt(value));
+        else {
+          ctx.moveTo(xAt(i), yAt(value));
+          drawing = true;
+        }
+      }
+      ctx.stroke();
 
-    // 最新值端点
-    const lastX = xAt(count - 1);
-    ctx.beginPath();
-    ctx.arc(lastX, yAt(series.mem[count - 1]), 3, 0, Math.PI * 2);
-    ctx.fillStyle = colors.primary;
-    ctx.fill();
+      for (let i = count - 1; i >= 0; i -= 1) {
+        if (values[i] == null) continue;
+        ctx.beginPath();
+        ctx.arc(xAt(i), yAt(values[i]), 3, 0, Math.PI * 2);
+        ctx.fillStyle = line.color;
+        ctx.fill();
+        break;
+      }
+    }
   }
 
-  // 90% 警戒线
-  const limitY = yAt(HIGH_THRESHOLD);
-  ctx.save();
-  ctx.setLineDash([5, 4]);
-  ctx.strokeStyle = colors.danger;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(pad.left, Math.round(limitY) + 0.5);
-  ctx.lineTo(pad.left + plotW, Math.round(limitY) + 0.5);
-  ctx.stroke();
-  ctx.restore();
+  if (limit != null) {
+    const limitY = yAt(limit);
+    ctx.save();
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = colors.danger;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, Math.round(limitY) + 0.5);
+    ctx.lineTo(pad.left + plotW, Math.round(limitY) + 0.5);
+    ctx.stroke();
+    ctx.restore();
+  }
 
-  // 时间轴两端
   ctx.fillStyle = colors.muted;
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  const firstTime = count > 0 ? fmtClock(series.t[0]) : '--:--:--';
-  ctx.fillText(firstTime, pad.left, pad.top + plotH + 5);
+  ctx.fillText(count > 0 && times[0] ? fmtClock(times[0]) : '--:--:--', pad.left, pad.top + plotH + 5);
   ctx.textAlign = 'right';
   ctx.fillText('现在', pad.left + plotW, pad.top + plotH + 5);
 }
@@ -433,6 +529,7 @@ function renderCharts() {
     return;
   }
 
+  const colors = themeColors();
   const signature = gpus.map(gpuKey).join('|');
   if (signature !== state.chartSignature) {
     refs.charts.replaceChildren();
@@ -482,12 +579,215 @@ function renderCharts() {
     memStat.dataset.tone = toneFor(gpu.memUsedPct) || '';
     utilStat.querySelector('b').textContent = fmtPct(gpu.utilGpuPct, 0);
     tempStat.querySelector('b').textContent = gpu.tempC == null ? '--' : `${Math.round(gpu.tempC)}°C`;
-    tempStat.dataset.tone = gpu.tempC != null && gpu.tempC >= 85 ? 'danger' : '';
-    if (series) drawChart(node.canvas, series, state.windowSamples);
+    tempStat.dataset.tone = tempTone(gpu.tempC) || '';
+    if (series) {
+      drawLines(
+        node.canvas,
+        [
+          { values: series.mem, color: colors.primary, width: 2, fill: true },
+          { values: series.util, color: colors.signal, width: 1.5 },
+        ],
+        state.windowSamples,
+        { limit: HIGH_THRESHOLD, times: series.t },
+      );
+    }
+  }
+}
+
+/* ---------- 渲染：系统资源 ---------- */
+function sysMeter({ label, value, foot, pct = null, tone = null, available = true }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'sys-meter';
+  wrap.dataset.available = available ? 'true' : 'false';
+
+  const labelNode = document.createElement('p');
+  labelNode.className = 'sys-meter__label';
+  labelNode.textContent = label;
+
+  const valueNode = document.createElement('p');
+  valueNode.className = 'sys-meter__value';
+  valueNode.textContent = value;
+  if (tone) valueNode.dataset.tone = tone;
+
+  const meter = document.createElement('div');
+  meter.className = 'meter';
+  const fill = document.createElement('span');
+  fill.className = 'meter__fill';
+  fill.style.width = pct == null ? '0%' : `${Math.min(100, pct).toFixed(1)}%`;
+  if (tone) fill.dataset.tone = tone;
+  meter.appendChild(fill);
+
+  const footNode = document.createElement('p');
+  footNode.className = 'sys-meter__foot';
+  footNode.textContent = foot;
+
+  wrap.append(labelNode, valueNode, meter, footNode);
+  return wrap;
+}
+
+function sysDetailRow(label, value) {
+  const row = document.createElement('div');
+  row.className = 'sys-detail__row';
+  const dt = document.createElement('dt');
+  dt.className = 'sys-detail__label';
+  dt.textContent = label;
+  const dd = document.createElement('dd');
+  dd.className = 'sys-detail__value';
+  dd.textContent = value;
+  row.append(dt, dd);
+  return row;
+}
+
+function renderSystemCard() {
+  const meta = state.meta || {};
+  const enabled = meta.systemEnabled !== false;
+  const system = meta.system || null;
+  refs.sysMeters.replaceChildren();
+  refs.sysDetail.replaceChildren();
+
+  if (!enabled) {
+    refs.sysChartWrap.hidden = true;
+    refs.sysEmpty.hidden = false;
+    refs.sysSub.textContent = '已关闭（--no-system）';
+    refs.sysEmptyTitle.textContent = '宿主指标采集已关闭';
+    refs.sysEmptyText.textContent = '启动参数带了 --no-system，服务只采集 GPU 指标。去掉该参数并重启即可恢复。';
+    refs.footerText.textContent = `数据来自 ${meta.mock ? '模拟数据源' : 'nvidia-smi'}，仅在内存中保留最近 ${state.windowSamples} 个采样点，不落盘、不做历史归档。`;
+    return;
+  }
+
+  if (!system) {
+    refs.sysChartWrap.hidden = true;
+    refs.sysEmpty.hidden = false;
+    refs.sysSub.textContent = '等待采集';
+    refs.sysEmptyTitle.textContent = meta.status === 'ok' ? '还没有宿主指标' : '宿主指标暂不可用';
+    refs.sysEmptyText.textContent = meta.systemWarning || '采集服务还没有拿到宿主 CPU / 内存数据，稍后会自动重试。';
+    return;
+  }
+
+  refs.sysEmpty.hidden = true;
+  refs.sysChartWrap.hidden = false;
+
+  const cpu = system.cpu || null;
+  const mem = system.mem || null;
+  const unsupported = new Set(system.unsupported || []);
+  const missing = [...unsupported].map((key) => SYSTEM_FIELD_LABELS[key] || key);
+
+  refs.sysSub.textContent = [
+    cpu?.cores ? `${cpu.cores} 个逻辑核` : null,
+    cpu?.model || null,
+    missing.length ? `${missing.join(' / ')} 在当前平台不可用` : null,
+  ].filter(Boolean).join(' · ') || '宿主资源概览';
+
+  refs.sysMeters.appendChild(sysMeter({
+    label: 'CPU 使用率',
+    value: cpu?.usagePct == null ? '--' : `${cpu.usagePct.toFixed(0)}%`,
+    foot: cpu?.usagePct == null ? '首次采样后出现' : `整机平均，共 ${cpu.cores} 个逻辑核`,
+    pct: cpu?.usagePct ?? null,
+    tone: toneFor(cpu?.usagePct ?? null),
+  }));
+
+  refs.sysMeters.appendChild(sysMeter({
+    label: '内存使用率',
+    value: mem?.usedPct == null ? '--' : `${mem.usedPct.toFixed(0)}%`,
+    foot: mem ? `${fmtGiB(mem.usedMiB)} / ${fmtGiB(mem.totalMiB)}` : '取不到内存数据',
+    pct: mem?.usedPct ?? null,
+    tone: toneFor(mem?.usedPct ?? null),
+  }));
+
+  if (unsupported.has('swap')) {
+    refs.sysMeters.appendChild(sysMeter({
+      label: '交换分区',
+      value: '平台不支持',
+      foot: '这个系统没有可读的交换分区数据源',
+      available: false,
+    }));
+  } else if (system.swap) {
+    refs.sysMeters.appendChild(sysMeter({
+      label: '交换分区',
+      value: system.swap.usedPct == null ? '--' : `${system.swap.usedPct.toFixed(0)}%`,
+      foot: system.swap.totalMiB > 0
+        ? `${fmtGiB(system.swap.usedMiB)} / ${fmtGiB(system.swap.totalMiB)}`
+        : '未启用交换分区',
+      pct: system.swap.usedPct ?? 0,
+    }));
+  }
+
+  if (system.load) {
+    refs.sysDetail.appendChild(sysDetailRow(
+      '系统负载',
+      `${system.load.l1.toFixed(2)} / ${system.load.l5.toFixed(2)} / ${system.load.l15.toFixed(2)}（1 / 5 / 15 分钟）`,
+    ));
+  } else if (unsupported.has('load')) {
+    refs.sysDetail.appendChild(sysDetailRow('系统负载', '当前平台不支持'));
+  }
+
+  for (const disk of system.disk || []) {
+    refs.sysDetail.appendChild(sysDetailRow(
+      `磁盘 ${disk.path}`,
+      `${fmtGiB(disk.usedMiB)} / ${fmtGiB(disk.totalMiB)}（${fmtPct(disk.usedPct, 1)}）`,
+    ));
+  }
+
+  if (system.net) {
+    refs.sysDetail.appendChild(sysDetailRow(
+      '网络吞吐',
+      `↓ ${fmtRate(system.net.rxBytesPerSec)}　↑ ${fmtRate(system.net.txBytesPerSec)}（${system.net.interfaces} 个网卡）`,
+    ));
+  } else if (unsupported.has('net')) {
+    refs.sysDetail.appendChild(sysDetailRow('网络吞吐', '当前平台不支持'));
+  }
+
+  if (system.uptimeSec != null) {
+    refs.sysDetail.appendChild(sysDetailRow('系统运行时长', fmtDuration(system.uptimeSec)));
+  }
+  if (meta.systemWarning) {
+    refs.sysDetail.appendChild(sysDetailRow('采集提示', meta.systemWarning));
+  }
+
+  const series = state.systemSeries;
+  if (series.t.length > 0) {
+    drawLines(
+      refs.sysCanvas,
+      [
+        { values: series.mem, color: themeColors().primary, width: 2, fill: true },
+        { values: series.cpu, color: themeColors().signal, width: 1.5 },
+      ],
+      state.windowSamples,
+      { times: series.t },
+    );
   }
 }
 
 /* ---------- 渲染：各卡当前占用 ---------- */
+function renderThrottleChips(gpu) {
+  const wrap = document.createElement('div');
+  wrap.className = 'gpu-card__chips';
+  if (!gpu.throttle) {
+    wrap.appendChild(stateChip('节流状态未知', null));
+    return wrap;
+  }
+  const reasons = Object.entries(gpu.throttle)
+    .filter(([, value]) => value === true)
+    .map(([key]) => THROTTLE_LABELS[key] || { text: key, tone: 'warning' });
+
+  if (reasons.length === 0) {
+    wrap.appendChild(stateChip('无节流', null));
+  } else {
+    for (const reason of reasons) wrap.appendChild(stateChip(reason.text, reason.tone));
+  }
+  return wrap;
+}
+
+function stateChip(text, tone) {
+  const chip = document.createElement('span');
+  chip.className = 'state-chip';
+  if (tone) chip.dataset.tone = tone;
+  const dot = document.createElement('span');
+  dot.className = 'state-chip__dot';
+  chip.append(dot, document.createTextNode(text));
+  return chip;
+}
+
 function renderGpuCards() {
   const gpus = state.gpus;
   const signature = gpus.map(gpuKey).join('|');
@@ -512,7 +812,12 @@ function renderGpuCards() {
           <span data-role="mem-util"></span>
           <span data-role="temp"></span>
           <span data-role="power"></span>
-        </div>`;
+          <span data-role="clock" hidden></span>
+          <span data-role="pstate" hidden></span>
+          <span data-role="fan" hidden></span>
+          <span data-role="encdec" hidden></span>
+        </div>
+        <div data-role="throttle"></div>`;
       card.querySelector('.gpu-card__name').textContent = gpu.name;
       card.querySelector('.gpu-card__index').textContent = `GPU ${gpu.index}`;
       refs.gpuCards.appendChild(card);
@@ -533,10 +838,36 @@ function renderGpuCards() {
     const fill = card.querySelector('[data-role="fill"]');
     fill.style.width = pct == null ? '0%' : `${Math.min(100, pct).toFixed(1)}%`;
     fill.dataset.tone = toneFor(pct) || '';
+
     card.querySelector('[data-role="util"]').textContent = `GPU 利用率 ${fmtPct(gpu.utilGpuPct, 0)}`;
     card.querySelector('[data-role="mem-util"]').textContent = `显存带宽占用 ${fmtPct(gpu.utilMemPct, 0)}`;
-    card.querySelector('[data-role="temp"]').textContent = gpu.tempC == null ? '温度 --' : `温度 ${Math.round(gpu.tempC)}°C`;
-    card.querySelector('[data-role="power"]').textContent = gpu.powerW == null ? '功耗 --' : `功耗 ${Math.round(gpu.powerW)} W`;
+    const tempNode = card.querySelector('[data-role="temp"]');
+    tempNode.textContent = gpu.tempC == null ? '温度 --' : `温度 ${Math.round(gpu.tempC)}°C`;
+    tempNode.dataset.tone = tempTone(gpu.tempC) || '';
+    card.querySelector('[data-role="power"]').textContent = gpu.powerW == null
+      ? '功耗 --'
+      : `功耗 ${Math.round(gpu.powerW)} W${gpu.powerLimitW == null ? '' : ` / ${Math.round(gpu.powerLimitW)} W`}`;
+
+    // 扩展指标：驱动不支持时整行隐藏，而不是显示一排 "--"
+    const clockNode = card.querySelector('[data-role="clock"]');
+    const hasClock = gpu.clockSmMHz != null;
+    clockNode.hidden = !hasClock;
+    if (hasClock) clockNode.textContent = `SM 时钟 ${Math.round(gpu.clockSmMHz)} MHz`;
+
+    const pstateNode = card.querySelector('[data-role="pstate"]');
+    pstateNode.hidden = !gpu.pstate;
+    if (gpu.pstate) pstateNode.textContent = `P-State ${gpu.pstate}`;
+
+    const fanNode = card.querySelector('[data-role="fan"]');
+    fanNode.hidden = gpu.fanPct == null;
+    if (gpu.fanPct != null) fanNode.textContent = `风扇 ${Math.round(gpu.fanPct)}%`;
+
+    const encdecNode = card.querySelector('[data-role="encdec"]');
+    const hasEncdec = gpu.encUtilPct != null || gpu.decUtilPct != null;
+    encdecNode.hidden = !hasEncdec;
+    if (hasEncdec) encdecNode.textContent = `编解码 ${fmtPct(gpu.encUtilPct, 0)} / ${fmtPct(gpu.decUtilPct, 0)}`;
+
+    card.querySelector('[data-role="throttle"]').replaceChildren(renderThrottleChips(gpu));
   }
 }
 
@@ -545,7 +876,6 @@ function renderProcFilter() {
   const options = [{ value: 'all', label: '全部' }].concat(
     state.gpus.map((gpu) => ({ value: String(gpu.index), label: `GPU ${gpu.index}` })),
   );
-  const current = refs.procFilter.dataset.value || 'all';
   if (refs.procFilter.dataset.signature !== options.map((o) => o.value).join('|')) {
     refs.procFilter.replaceChildren();
     for (const option of options) {
@@ -633,6 +963,25 @@ function renderProcTable() {
 }
 
 /* ---------- 渲染：采集信息 ---------- */
+function describeCadence(meta) {
+  const idle = meta.idle;
+  if (!idle) return '--';
+  if (!idle.idleAfterMs) return '固定间隔（未启用空闲降频）';
+  const seconds = Math.round(idle.idleAfterMs / 1000);
+  if (idle.active) return `空闲降频中（每 ${idle.currentIntervalMs} ms）`;
+  return `实时（无人访问 ${seconds} 秒后降频到 ${idle.idleIntervalMs} ms）`;
+}
+
+function describeFields(meta) {
+  const fields = meta.fields;
+  if (!fields) return '--';
+  if (!fields.enabled) return '已关闭（--no-extended）';
+  if (fields.mock) return `模拟数据源（${fields.count} 项，未做驱动探测）`;
+  if (fields.extended == null) return '探测中…';
+  if (fields.extended) return `全部可用（${fields.count} 项）`;
+  return `可用 ${fields.count} 项，跳过 ${fields.unsupported.length} 项`;
+}
+
 function renderMeta() {
   const meta = state.meta || {};
   const rows = [
@@ -640,10 +989,17 @@ function renderMeta() {
     ['运行平台', meta.platform ? `${meta.platform.label} ${meta.platform.arch}（node ${meta.platform.nodeVersion || '--'}）` : '--'],
     ['驱动版本', meta.driverVersion || '--'],
     ['采集间隔', meta.intervalMs ? `${meta.intervalMs} ms` : '--'],
+    ['采集模式', describeCadence(meta)],
     ['曲线窗口', meta.windowSamples ? `${meta.windowSamples} 点 / 约 ${Math.round(meta.windowSamples * (meta.intervalMs || 1000) / 1000)} 秒` : '--'],
     ['已缓存采样点', meta.samples == null ? '--' : `${meta.samples} 点`],
     ['单次采集耗时', meta.collectMs == null ? '--' : `${meta.collectMs} ms`],
     ['服务运行时长', fmtDuration(meta.uptimeSec)],
+    ['扩展 GPU 指标', describeFields(meta)],
+    ['宿主指标', meta.systemEnabled === false
+      ? '已关闭（--no-system）'
+      : meta.system
+        ? `开启${(meta.system.unsupported || []).length ? `（${meta.system.unsupported.map((key) => SYSTEM_FIELD_LABELS[key] || key).join(' / ')} 不可用）` : ''}`
+        : '等待采集'],
     ['数据源', meta.mock
       ? '模拟数据（--mock）'
       : meta.collector?.bin
@@ -676,14 +1032,16 @@ function render() {
   renderNotice(state.meta);
   renderKpis();
   renderCharts();
+  renderSystemCard();
   renderGpuCards();
   renderProcFilter();
   renderProcTable();
   renderMeta();
 
   const windowText = `${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒`;
+  const idleNote = state.meta?.idle?.active ? ` · 空闲降频中（每 ${state.meta.idle.currentIntervalMs} ms）` : '';
   if (state.gpus.length) {
-    refs.orientSub.textContent = `${state.meta?.hostname || '--'} · ${state.gpus.length} 张卡 · 每 ${state.intervalMs} ms 采集 · 窗口最近 ${windowText} · 更新于 ${fmtClock(state.lastSampleAt)}`;
+    refs.orientSub.textContent = `${state.meta?.hostname || '--'} · ${state.gpus.length} 张卡 · 每 ${state.intervalMs} ms 采集 · 窗口最近 ${windowText}${idleNote} · 更新于 ${fmtClock(state.lastSampleAt)}`;
   } else if (state.status === 'error' || state.status === 'unreachable') {
     const host = state.meta?.hostname ? `${state.meta.hostname} · ` : '';
     const tail = state.lastSampleAt ? `数据停留在 ${fmtRelative(state.lastSampleAt)}` : '还没有采到任何数据';
@@ -691,7 +1049,10 @@ function render() {
   } else {
     refs.orientSub.textContent = '正在连接采集服务…';
   }
-  refs.footerText.textContent = `数据来自 ${state.meta?.mock ? '模拟数据源' : 'nvidia-smi'}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}），不落盘、不做历史归档。`;
+
+  const sources = [state.meta?.mock ? '模拟数据源' : 'nvidia-smi'];
+  if (state.meta?.systemEnabled !== false) sources.push('宿主 /proc 与系统接口');
+  refs.footerText.textContent = `数据来自 ${sources.join(' + ')}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}），不落盘、不做历史归档。`;
 }
 
 /* ---------- 交互 ---------- */
@@ -706,6 +1067,7 @@ function download(path) {
 }
 
 refs.btnCsv.addEventListener('click', () => download('/api/export.csv'));
+refs.btnSysCsv.addEventListener('click', () => download('/api/export.system.csv'));
 refs.btnJson.addEventListener('click', () => download('/api/export.json'));
 refs.btnRefresh.addEventListener('click', async () => {
   refs.btnRefresh.disabled = true;
@@ -717,7 +1079,10 @@ refs.btnRetry.addEventListener('click', () => poll());
 let resizeTimer = null;
 window.addEventListener('resize', () => {
   window.clearTimeout(resizeTimer);
-  resizeTimer = window.setTimeout(renderCharts, 180);
+  resizeTimer = window.setTimeout(() => {
+    renderCharts();
+    renderSystemCard();
+  }, 180);
 });
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) poll();

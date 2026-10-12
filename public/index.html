@@ -133,6 +133,34 @@
         </div>
       </section>
 
+      <section class="card" aria-labelledby="sys-h">
+        <div class="card__head">
+          <div>
+            <h2 class="card__title" id="sys-h">系统资源</h2>
+            <p class="card__sub" id="sys-sub">宿主 CPU / 内存 / 磁盘 / 网络</p>
+          </div>
+          <div class="sys-actions">
+            <span class="legend__item"><span class="legend__swatch legend__swatch--cpu"></span>CPU 使用率</span>
+            <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>内存使用率</span>
+            <button type="button" class="btn btn--ghost btn--sm" id="btn-sys-csv">
+              <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
+              下载系统 CSV
+            </button>
+          </div>
+        </div>
+        <div class="sys-meters" id="sys-meters"></div>
+        <div class="sys-chart" id="sys-chart-wrap" hidden>
+          <canvas id="sys-canvas" class="chart__canvas" role="img"
+                  aria-label="宿主 CPU 与内存使用率的实时曲线"></canvas>
+        </div>
+        <dl class="sys-detail" id="sys-detail"></dl>
+        <div class="state-block" id="sys-empty" hidden>
+          <svg class="icon state-block__icon" aria-hidden="true"><use href="#icon-stack"></use></svg>
+          <p class="state-block__title" id="sys-empty-title">宿主指标不可用</p>
+          <p class="state-block__text" id="sys-empty-text"></p>
+        </div>
+      </section>
+
       <section class="card" aria-labelledby="proc-h">
         <div class="card__head card__head--stack">
           <div>
