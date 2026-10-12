@@ -253,6 +253,9 @@ export function createCollector({
       ok: runtime.status === 'ok',
       status: runtime.status,
       ts: runtime.lastSampleAt || Date.now(),
+      // 最近一次成功采样的时间戳（没有样本时为 null）。
+      // 健康检查靠它判断"数据是不是不新鲜了"，不能用 ts——ts 在没有数据时会退化成当前时间
+      lastSampleAt: runtime.lastSampleAt,
       serverTime: Date.now(),
       intervalMs: options.intervalMs,
       windowSamples: options.windowSamples,

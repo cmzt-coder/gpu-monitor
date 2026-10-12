@@ -30,6 +30,7 @@ import { expandEnv, loadAlertsConfig } from '../src/alerts/config.js';
 import { buildMessage, encodeHeader, sendMail } from '../src/notify/smtp.js';
 import { createNotifier } from '../src/notify/notifier.js';
 import { runPreflight } from './preflight.mjs';
+import { evaluateHealth } from '../src/health.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
@@ -682,6 +683,103 @@ const badPreflight = await runPreflight({
 });
 assert.ok(badPreflight.blockers.length > 0, '读不到显卡时应报阻塞');
 
+/* ---------- 健康检查 ---------- */
+const healthBase = {
+  status: 'ok',
+  intervalMs: 1000,
+  lastSampleAt: 1_000_000,
+  gpus: [{ index: 0 }, { index: 1 }],
+  processes: [{ pid: 1 }],
+  uptimeSec: 3600,
+  hostname: 'host-a',
+};
+const healthStorage = {
+  mode: 'sqlite', path: '/data/gpu-monitor.db', sizeBytes: 1024 ** 3,
+  buffered: 0, lastFlushAt: 999_000,
+};
+const bigDisk = () => 10 * 1024 ** 3;
+
+const healthy = evaluateHealth({
+  state: healthBase, storage: healthStorage, alerts: { enabled: true, ruleCount: 3, firing: [] },
+  version: 'test', probePath: '/data', now: () => 1_000_500, freeSpace: bigDisk,
+});
+assert.equal(healthy.status, 'healthy');
+assert.equal(healthy.statusCode, 200);
+assert.equal(healthy.checks.length, 4, '检查项应为 采集 / 历史库 / 磁盘 / 告警');
+
+// 采集过期 → 503
+const staleHealth = evaluateHealth({
+  state: healthBase, storage: healthStorage, now: () => 1_060_000, freeSpace: bigDisk,
+});
+assert.equal(staleHealth.status, 'unhealthy');
+assert.equal(staleHealth.statusCode, 503);
+assert.equal(staleHealth.checks.find((check) => check.name === 'collector').level, 'fail');
+
+// 空闲降频期间采集本来就慢，阈值要跟着放宽，不能误报
+const idleHealth = evaluateHealth({
+  state: { ...healthBase, idle: { active: true, currentIntervalMs: 10000 } },
+  storage: healthStorage, now: () => 1_020_000, freeSpace: bigDisk,
+});
+assert.equal(idleHealth.checks.find((check) => check.name === 'collector').level, 'ok', '空闲降频不应误报采集过期');
+
+// 采集报错 → 503，并把原因带出来
+const brokenHealth = evaluateHealth({
+  state: { ...healthBase, status: 'error', error: '找不到 nvidia-smi' },
+  storage: healthStorage, now: () => 1_000_500, freeSpace: bigDisk,
+});
+assert.equal(brokenHealth.statusCode, 503);
+assert.ok(brokenHealth.checks.find((check) => check.name === 'collector').detail.includes('找不到 nvidia-smi'));
+
+// 磁盘：紧张只是提醒（仍 200），见底才算致命
+const diskWarnHealth = evaluateHealth({
+  state: healthBase, storage: healthStorage, probePath: '/data', now: () => 1_000_500,
+  freeSpace: () => 200 * 1024 ** 2,
+});
+assert.equal(diskWarnHealth.status, 'degraded');
+assert.equal(diskWarnHealth.statusCode, 200);
+assert.equal(diskWarnHealth.checks.find((check) => check.name === 'disk').level, 'warn');
+const diskFailHealth = evaluateHealth({
+  state: healthBase, storage: healthStorage, probePath: '/data', now: () => 1_000_500,
+  freeSpace: () => 10 * 1024 ** 2,
+});
+assert.equal(diskFailHealth.statusCode, 503);
+
+// 写库失败 → 503
+const storeBrokenHealth = evaluateHealth({
+  state: { ...healthBase, storeWarning: '写入历史库失败：disk I/O error' },
+  storage: healthStorage, now: () => 1_000_500, freeSpace: bigDisk,
+});
+assert.equal(storeBrokenHealth.statusCode, 503);
+
+// 没开历史库不算不健康；告警触发中属于"机器有事"，也不影响服务健康
+const noDbHealth = evaluateHealth({
+  state: healthBase, storage: { mode: 'memory', reason: '未启用（--no-db）' },
+  alerts: { enabled: true, ruleCount: 2, firing: [{}, {}] }, now: () => 1_000_500,
+});
+assert.equal(noDbHealth.statusCode, 200);
+assert.ok(noDbHealth.checks.find((check) => check.name === 'alerts').detail.includes('2 条触发中'));
+assert.equal(noDbHealth.checks.some((check) => check.name === 'disk'), false, '没有落库时不需要盯磁盘');
+
+/* ---------- systemd 单元模板 ---------- */
+const unitPath = path.join(HERE, '..', 'deploy', 'gpu-monitor.service');
+const unitText = fs.readFileSync(unitPath, 'utf8');
+unitText.split('\n').forEach((line, index) => {
+  const trimmed = line.trim();
+  if (trimmed === '' || trimmed.startsWith('#')) return;
+  // systemd 不支持行尾注释：井号会被当成值的一部分（这个坑踩过一次）
+  assert.equal(line.includes('#'), false, `单元文件第 ${index + 1} 行有行尾注释：${trimmed}`);
+});
+assert.ok(unitText.includes('[Service]') && unitText.includes('[Install]'));
+for (const directive of ['Description=', 'WorkingDirectory=', 'ExecStart=', 'Restart=', 'KillSignal=', 'WantedBy=']) {
+  assert.ok(unitText.includes(directive), `单元文件缺少 ${directive}`);
+}
+// ExecStart 里引用的脚本必须真实存在，避免改了文件名忘了改模板
+const referencedScripts = [...unitText.matchAll(/(\S+\.js)\b/g)].map((match) => match[1]);
+assert.ok(referencedScripts.length > 0, '单元文件里应引用到 server.js');
+for (const reference of referencedScripts) {
+  assert.ok(fs.existsSync(path.join(HERE, '..', path.basename(reference))), `模板引用的脚本不存在：${reference}`);
+}
+
 /* ---------- 推送订阅（SSE 底座） ---------- */
 const pushCollector = createCollector({
   options: baseOptions,
@@ -915,5 +1013,5 @@ process.stdout.write(
   + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
   + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行 / 推送订阅 / '
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
-  + '历史库维护（增量回收·整库重写）/ 部署前自检\n',
+  + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验\n',
 );

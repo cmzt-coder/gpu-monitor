@@ -1,0 +1,73 @@
+# GPU 显存负载监控 · systemd 单元模板
+#
+# 安装（假设代码放在 /opt/gpu-monitor）：
+#   sudo cp deploy/gpu-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gpu-monitor
+#   journalctl -u gpu-monitor -f
+#
+# 注意：systemd 不支持行尾注释，井号必须独占一行，下面所有注释都是独立行。
+# 需要按实际情况修改的地方标了 【改】。
+
+[Unit]
+Description=GPU memory load monitor
+Documentation=https://github.com/cmzt-coder/gpu-monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# 【改】代码目录
+WorkingDirectory=/opt/gpu-monitor
+
+# 默认用 root 运行是有意的：nvidia-smi 只能看到同一用户的占用进程，
+# 换成专用用户后页面上的「占用进程」会变成空的（页面会给出权限提示）。
+# 若更在意最小权限，可以把 User 改成与业务进程相同的用户，效果一样。
+User=root
+
+# 【改】node 路径用 `which node` 的结果替换；下面这行末尾的反斜杠表示续行
+ExecStart=/usr/bin/node /opt/gpu-monitor/server.js \
+  --port 8090 \
+  --db /opt/gpu-monitor/data/gpu-monitor.db \
+  --retention-days 90 \
+  --store-interval 5000
+
+# 告警邮件密码之类的东西放环境文件，别写进 alerts.json：
+#   sudo install -m 600 /dev/null /etc/gpu-monitor.env
+#   echo 'SMTP_PASS=你的密码' | sudo tee -a /etc/gpu-monitor.env
+# alerts.json 里写了 ${SMTP_PASS} 占位就必须有这一行，否则邮件发不出去。
+# 开头的减号表示"文件不存在也不报错"。
+EnvironmentFile=-/etc/gpu-monitor.env
+
+Restart=always
+RestartSec=3
+
+# 服务收到 SIGTERM 会先把缓冲区里的行落盘再退出，通常 1 秒内完成
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gpu-monitor
+
+# 基础加固：本项目只需要读 /proc、执行 nvidia-smi、读写自己的 data 目录
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# 历史库若不在 /opt/gpu-monitor 下（比如放到 /var/lib/gpu-monitor），
+# 需要取消下面这行的注释显式放行写权限，否则会被 ProtectSystem=full 拦住
+# ReadWritePaths=/var/lib/gpu-monitor
+
+# 其他常用开关：
+#   加 --no-store-processes 不把占用进程写进历史库
+#   加 --reclaim 在启动时做一次整库重写、回收空间，跑完可以删掉
+#   加 --no-push 如果公司反代不支持 SSE
+
+[Install]
+WantedBy=multi-user.target

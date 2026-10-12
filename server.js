@@ -14,6 +14,7 @@ import { createCollector } from './src/collector.js';
 import { loadAlertsConfig } from './src/alerts/config.js';
 import { createAlertEngine } from './src/alerts/engine.js';
 import { createNotifier } from './src/notify/notifier.js';
+import { evaluateHealth } from './src/health.js';
 import {
   GPU_CSV_HEADER,
   SYSTEM_CSV_HEADER,
@@ -377,11 +378,12 @@ function limitFrom(url) {
 }
 
 const server = http.createServer(async (req, res) => {
-  // 任何请求都算"有人在看"，采集调度据此决定是满速还是空闲降频
-  collector.noteClient();
-
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
+
+  // 页面请求都算"有人在看"，采集调度据此决定满速还是空闲降频。
+  // /api/health 是探针在定时打，不能算：否则探活越勤，空闲降频越永远不会生效。
+  if (pathname !== '/api/health') collector.noteClient();
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     sendJson(res, 405, { error: 'method_not_allowed' });
@@ -393,6 +395,20 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/api/state') {
     sendJson(res, 200, collector.getState());
+    return;
+  }
+
+  // 健康检查：给外部探针 / systemd watchdog 用。200 = 健康或仅有提醒，503 = 有致命项。
+  // 注意这里不调 noteClient()，否则每次探活都会把服务从空闲降频里"唤醒"。
+  if (pathname === '/api/health') {
+    const health = evaluateHealth({
+      state: collector.getState(),
+      storage: store.stats(),
+      alerts: alertEngine ? alertEngine.snapshot() : null,
+      version: VERSION,
+      probePath: options.db === false ? null : path.dirname(path.resolve(options.dbPath)),
+    });
+    sendJson(res, health.statusCode, health);
     return;
   }
 

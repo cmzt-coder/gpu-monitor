@@ -189,29 +189,35 @@ tail -f gpu-monitor.log                       # 实时看日志
 
 ### 开机自启（systemd，可选）
 
-脚本方式能扛住 SSH 断开，但服务器重启后不会自己起来。需要开机自启就用 systemd：
+脚本方式能扛住 SSH 断开，但机器重启后不会自己起来。仓库里带了单元模板 [deploy/gpu-monitor.service](deploy/gpu-monitor.service)：
 
 ```bash
-sudo tee /etc/systemd/system/gpu-monitor.service > /dev/null <<'EOF'
-[Unit]
-Description=GPU memory load monitor
-After=network.target
-
-[Service]
-Type=simple
-WorkingDirectory=/opt/gpu-monitor
-ExecStart=/usr/bin/node /opt/gpu-monitor/server.js --port 8090
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
+sudo cp deploy/gpu-monitor.service /etc/systemd/system/
+sudoedit /etc/systemd/system/gpu-monitor.service    # 按注释里标【改】的地方调整路径
 sudo systemctl daemon-reload
 sudo systemctl enable --now gpu-monitor
+journalctl -u gpu-monitor -f
 ```
 
-> `ExecStart` 里的 node 路径用 `which node` 的结果替换；如果手动启动过，先用 `./stop.sh` 停掉，避免和 systemd 抢同一个端口。
+模板里已经处理好的几件事：
+
+- **默认用 root 运行**：`nvidia-smi` 只能看到同一用户的占用进程，换成专用用户后页面上的进程列表会是空的。想最小权限就改成与业务进程相同的用户，效果一样。
+- **邮件密码走环境文件**（`EnvironmentFile=-/etc/gpu-monitor.env`），不必写进 `alerts.json`；配了 `${SMTP_PASS}` 占位就必须提供这个变量，否则邮件发不出去。
+- **停止时会把缓冲区落盘**（`KillSignal=SIGTERM` + `TimeoutStopSec=15`），不会丢最后几秒的数据。
+- 附带了基础加固（`ProtectSystem=full`、`ProtectHome=read-only` 等）；历史库若放在别处，按注释放开 `ReadWritePaths`。
+
+> 手动启动过的话，先用 `./stop.sh` 停掉再交给 systemd，避免两边抢同一个端口。
+
+### 健康检查
+
+`GET /api/health` 返回 `200`（健康，或只有提醒）或 `503`（有致命项），body 里逐项列出采集、历史库、磁盘、告警的状态：
+
+```bash
+curl -s localhost:8090/api/health
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
+```
+
+它判定的是"服务本身还能不能干活"——采集是否新鲜（阈值会跟着空闲降频自动放宽）、历史库是否可写、磁盘还剩多少；显存高、温度高这类业务告警只作为信息回报，不会让服务变成不健康。探活请求不会打断空闲降频，所以可以放心接到定时探测上（`curl -fsS` 直接接现有监控即可）。
 
 ## 启动参数
 
@@ -246,6 +252,7 @@ sudo systemctl enable --now gpu-monitor
 | 路径 | 说明 |
 | --- | --- |
 | `GET /api/state` | 当前状态：每张卡的显存/利用率/温度/功耗、进程列表、采集元信息 |
+| `GET /api/health` | 健康检查：`200` 健康或仅有提醒、`503` 有致命项；探活不会打断空闲降频 |
 | `GET /api/stream` | SSE 推送：每采集一帧推一条，内容与 `/api/state` 同构；`--no-push` 时返回 404 |
 | `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
 | `GET /api/history?range=7d` | 历史区间（`3d` / `7d` / `30d` / `60d` / `90d` / `all`，或 `from`/`to`、`step`） |
