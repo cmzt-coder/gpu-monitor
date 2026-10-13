@@ -579,7 +579,7 @@ assert.notEqual(
   processesSignature([{ gpuIndex: 0, pid: 8, name: 'a' }]),
 );
 
-// node:sqlite 要 Node 22.5+。旧版本上这之后的断言（历史库、维护、迁移）都没法跑，
+// node:sqlite 要 Node 22.13+。旧版本上这之后的断言（历史库、维护、迁移）都没法跑，
 // 这里给一句明确说明就收尾，而不是抛一个"模块不存在"的堆栈让人以为代码坏了。
 const sqliteReady = await (async () => {
   try {
@@ -591,7 +591,7 @@ const sqliteReady = await (async () => {
 })();
 if (!sqliteReady) {
   process.stdout.write(
-    '\n⚠️  当前 Node 没有 node:sqlite（需要 ≥ 22.5）：历史库相关断言跳过，'
+    '\n⚠️  当前 Node 没有 node:sqlite（需要 ≥ 22.13）：历史库相关断言跳过，'
     + '前面的解析 / 指标 / 调度 / 采集器断言已全部通过。\n'
     + '   服务本身不受影响——历史库会自动退回内存窗口，页面会明确标注。\n'
     + '   升级到 Node 22 LTS 或 24 后可以完整跑一遍。\n',
@@ -794,8 +794,11 @@ sqliteStore.close();
 const missingSqliteError = Object.assign(new Error('No such built-in module: node:sqlite'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' });
 assert.equal(
   describeStorageError(missingSqliteError, { nodeVersion: 'v18.19.1' }),
-  '当前 Node v18.19.1 没有 node:sqlite，需要升级到 22.5 或更高',
+  '当前 Node v18.19.1 用不了内置的 node:sqlite，需要升级到 22.13 或更高',
 );
+// 下限必须是 22.13 而不是 22.5：22.5-22.12 的 node:sqlite 还要 --experimental-sqlite，
+// 提示成 22.5 会让人觉得"我已经装到 22.5 了怎么还不行"
+assert.equal(describeStorageError(missingSqliteError, { nodeVersion: 'v22.5.0' }).includes('22.13'), true);
 // 界面上会把它包在"不可用（…）"里，所以这句自身不能带括号，否则读起来是双层嵌套
 assert.equal(describeStorageError(missingSqliteError).includes('（'), false);
 assert.equal(
@@ -817,10 +820,10 @@ const degradedStore = await createStore({
 });
 assert.equal(degradedStore.mode, 'memory');
 assert.equal(degradedStore.supportsHistory, false);
-assert.ok(degradedStore.reason.includes('需要升级到 22.5'), '降级原因要能直接看懂');
+assert.ok(degradedStore.reason.includes('需要升级到 22.13'), '降级原因要能直接看懂');
 assert.equal(degradedStore.reason.includes('built-in module'), false, '不应把 Node 的英文原始报错漏到界面上');
 assert.equal(storageWarnings.length, 1, '降级要留一条日志，不能静默');
-assert.ok(storageWarnings[0].includes('需要升级到 22.5'));
+assert.ok(storageWarnings[0].includes('需要升级到 22.13'));
 // 降级后行为要正常：查询返回"不支持"、写入不报错
 assert.equal(degradedStore.querySamples({ from: 0, to: 1 }).unsupported, true);
 assert.equal(degradedStore.appendSample({ t: 1, gpus: [] }), 0);
@@ -1294,7 +1297,7 @@ const serviceEngine = createAlertEngine({
 });
 svcSamples = [
   svcSample(svcClock - 2000, [{ service: '容器 vllm-embed', memMiB: 9000, sharePct: 22, processes: 3 }]),
-  svcSample(svcClock - 1000, [{ service: '容器 vllm-embed', memMiB: 9200, sharePct: 22.5, processes: 3 }]),
+  svcSample(svcClock - 1000, [{ service: '容器 vllm-embed', memMiB: 9200, sharePct: 22.13, processes: 3 }]),
   svcSample(svcClock, [{ service: '容器 vllm-embed', memMiB: 9500, sharePct: 23.2, processes: 3 }]),
 ];
 let svcResult = serviceEngine.evaluate({ status: 'ok', gpus: [] });

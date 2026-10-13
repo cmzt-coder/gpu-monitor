@@ -1,4 +1,4 @@
-// SQLite 历史库（Node 22.5+ 内置的 node:sqlite，不引入第三方依赖）。
+// SQLite 历史库（用 Node 22.13+ 默认提供的 node:sqlite，不引入第三方依赖）。
 //
 // 写入：采集线程只往内存缓冲里塞行，由定时器 / 缓冲上限 / 进程退出三种时机批量提交事务。
 // 采集节奏与磁盘 IO 解耦，一次写库慢不会卡住采样。
@@ -183,7 +183,8 @@ export async function createSqliteStore({
   now = Date.now,
   maxPoints = 2000,
 } = {}) {
-  // 动态 import：Node 22.5 以下没有 node:sqlite，这里失败由上层退回纯内存模式
+  // 动态 import：Node 22.13 以下用不了 node:sqlite（22.5-22.12 还要加 --experimental-sqlite），
+  // 这里失败由上层退回纯内存模式
   const { DatabaseSync } = await import('node:sqlite');
 
   const inMemory = file === ':memory:';

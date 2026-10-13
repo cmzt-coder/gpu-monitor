@@ -52,7 +52,7 @@ Windows 上没有内置的网卡字节数与交换分区数据源，这两项会
 
 ### 历史库
 
-历史存在 SQLite 里，用的是 Node 22.5+ 内置的 `node:sqlite`，**依然不需要 `npm install`**。Node 版本低于 22.5 或者带了 `--no-db` 时，服务照常运行，只是页面会明确写「未启用历史库」，`/api/history?range=…` 会退回内存窗口并说明原因。
+历史存在 SQLite 里，用的是 Node 22.13+ 默认提供的 `node:sqlite`，**依然不需要 `npm install`**。Node 版本低于 22.13（`node:sqlite` 在 22.5 才首次引入，而且直到 22.13 都还要额外加 `--experimental-sqlite` 参数）或者带了 `--no-db` 时，服务照常运行，只是页面会明确写「未启用历史库」，`/api/history?range=…` 会退回内存窗口并说明原因。
 
 ### 进程的「服务归属」是怎么来的
 
@@ -151,7 +151,7 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 
 几个使用要点：
 
-- **`for` 超过内存窗口时会自动改查历史库**。默认内存窗口是 300 点 × 1 秒 = 5 分钟；配 `for: 30m` 这类长周期规则时，引擎会从历史库里取这段时间的数据判定（多条长周期规则共用一次查询，默认每 30 秒刷新缓存）。只有在**没有历史库**时（`--no-db`，或 Node 低于 22.5）才会退回"夹到窗口长度"，启动日志与页面都会明确提示。
+- **`for` 超过内存窗口时会自动改查历史库**。默认内存窗口是 300 点 × 1 秒 = 5 分钟；配 `for: 30m` 这类长周期规则时，引擎会从历史库里取这段时间的数据判定（多条长周期规则共用一次查询，默认每 30 秒刷新缓存）。只有在**没有历史库**时（`--no-db`，或 Node 低于 22.13）才会退回"夹到窗口长度"，启动日志与页面都会明确提示。
 - **历史数据点数过多时会按桶平均**。查回来的区间超过约 2000 个点（按默认 5 秒落库粒度约合 2.8 小时以上）会自动分桶，平均会抹平短于桶宽的尖峰。10 分钟、30 分钟这类常用规则用的都是原始粒度，不受影响；页面「采集信息 → 告警」里会标明当前是按原始粒度还是分桶判定。
 - **抗抖动**：冷却期内不会重复通知，**包括"刚恢复又马上触发"的情况**；并且只有真的发出过"告警"，恢复正常时才会补一条"恢复"，不会出现没告警却收到恢复的怪邮件。
 - **覆盖不足会明说**：如果拿到数据的时间跨度不够规则要求的 `for`（比如服务刚上线、库里历史还不够长），告警照发，但文案会写成"仅覆盖 12 秒，不足规则要求的 5 分钟"，不会假装已经持续了那么久。
@@ -212,6 +212,56 @@ node server.js --port 8090
 ```
 
 默认监听 `0.0.0.0`，局域网内用 `http://<服务器IP>:8090` 访问。
+
+### Node 版本与升级（不动服务器上的其他项目）
+
+两条底线：
+
+- **Node 18+** 就能跑，实时监控、曲线、告警都正常；
+- **Node 22.13+** 才有内置的 `node:sqlite`，才有历史库、长时间范围曲线、进程占用历史和长周期告警。
+
+推荐**旁装**：把新版 Node 解到 `/opt` 单独给本项目用，完全不碰系统里的 `node`，因此对服务器上其他项目零影响。
+
+```bash
+# 0. 先看清现状：当前 node 在哪、是谁装的
+which -a node && node -v
+readlink -f "$(command -v node)"
+dpkg -S "$(readlink -f "$(command -v node)")" 2>/dev/null || echo "不是 apt/dpkg 装的"
+
+# 1. 下载官方二进制（x86_64；ARM 机器把 linux-x64 换成 linux-arm64）
+#    国内网络慢就把域名换成 https://npmmirror.com/mirrors/node/
+cd /tmp
+curl -fsSLO https://nodejs.org/dist/v24.21.0/node-v24.21.0-linux-x64.tar.xz
+
+# 2. 装到 /opt/node24，与系统 node 完全隔离
+sudo mkdir -p /opt/node24
+sudo tar -xJf node-v24.21.0-linux-x64.tar.xz -C /opt/node24 --strip-components=1
+/opt/node24/bin/node -v          # 应输出 v24.21.0
+
+# 3. 让 gpu-monitor 用这个 node 启动，系统 node 保持原样
+SMTP_PASS=... ./start-bg.sh --node /opt/node24/bin/node
+```
+
+`--node` 也可以写成环境变量：`NODE_BIN=/opt/node24/bin/node ./start-bg.sh`。启动横幅第一行会打印实际用的 node 路径，重启后核对一下即可。换成 systemd 常驻时，把单元里 `ExecStart=` 的 node 路径一并改掉（见 [deploy/gpu-monitor.service](deploy/gpu-monitor.service)）。
+
+**为什么不直接把系统 node 升级掉？** 那是一次全局替换，会波及服务器上所有用 node 的东西：
+
+| 影响面 | 怎么确认 |
+| --- | --- |
+| pm2 / forever 托管的应用会被新 node 重新拉起 | `pm2 list`、`which pm2` |
+| systemd 单元里写死 node 路径的服务 | `systemctl list-units --type=service`，再筛 node |
+| 编译过原生模块的项目（node-gyp、better-sqlite3 之类），Node ABI 一换就得重装依赖 | 项目里有没有 `node_modules` 下的 `.node` 文件 |
+| 依赖旧 Node 行为的老构建链（老 webpack、node-sass…） | 各项目自己的构建 |
+
+盘点一下现在到底有哪些 node 在跑：
+
+```bash
+ps -eo user,pid,cmd | grep -i '[n]ode'
+```
+
+确认没人依赖之后，再考虑原地升级。不同安装方式的升级手法不一样：`apt` 装的（Ubuntu 24.04 自带的 18.19.1 就是）通常要换 NodeSource 源再 `sudo apt-get install -y nodejs`，替换的是 `/usr/bin/node`，影响全局；`nvm` 装的用 `nvm install 24 && nvm alias default 24`，只影响 source 过 nvm 的交互式 shell，systemd 服务不受影响。
+
+还有一点要有预期：**换上带 `node:sqlite` 的 Node 之后，历史库是从零开始攒的**，刚切过去时「3 天 / 7 天 / 30 天」这些区间只有从切换那一刻起的数据。
 
 ## 启动脚本
 
@@ -362,7 +412,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 
 **想看宿主机 CPU / 内存的历史？** 用 `下载系统 CSV`，或者 `下载 JSON` 里已经包含了完整的逐盘明细。
 
-**历史库提示"不可用"？** 大概率是 Node 版本低于 22.5（没有内置 `node:sqlite`）。升级 Node 即可；不升级也不影响实时监控，只是没有历史。页面「采集信息 → 历史库」会写明具体原因。
+**历史库提示"不可用"？** 大概率是 Node 版本低于 22.13（没有内置 `node:sqlite`）。升级 Node 即可；不升级也不影响实时监控，只是没有历史。页面「采集信息 → 历史库」会写明具体原因。
 
 **切到"7 天"只有一两个点？** 那是库里确实还没有那么多数据，或者那段区间内服务没在跑。曲线副标题会写清点数与分桶粒度。
 
@@ -376,7 +426,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 
 页面顶部的告警面板在**配好规则后就常驻**，不管当前有没有触发：没有触发时它是中性配色，写着「当前无告警，N 条规则未触发」，展开「规则清单」能看到每条规则的条件、级别和实时状态。`--alerts-dry-run` 会在标题旁挂一个「dry-run：只打印不发送」的角标——**只看到这个角标没消失，就说明告警还没真正发信**。
 
-**规则里的 for 好像没生效？** 看页面「采集信息 → 告警」那一行，它会写明长周期规则当前是查历史库、按内存窗口，还是分桶判定。没有历史库时（`--no-db` 或 Node 低于 22.5）长周期的 `for` 会被夹到内存窗口长度，启动日志里也有提示。
+**规则里的 for 好像没生效？** 看页面「采集信息 → 告警」那一行，它会写明长周期规则当前是查历史库、按内存窗口，还是分桶判定。没有历史库时（`--no-db` 或 Node 低于 22.13）长周期的 `for` 会被夹到内存窗口长度，启动日志里也有提示。
 
 **SMTP 连不上？** 内置的 SMTP 客户端只覆盖明文、STARTTLS、隐式 TLS（465）与 AUTH LOGIN/PLAIN，够用于内网 relay。如果你们的邮件服务要求 OAuth 或其他认证方式，可以先把通知渠道换成 `webhook`（指向自建脚本），由脚本去发信。
 

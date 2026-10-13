@@ -1,6 +1,6 @@
 // 历史库工厂：优先用 SQLite，不可用时退化成"只有内存窗口"的空实现。
 //
-// 退化的场景有两种，都很常见：Node 版本低于 22.5（没有 node:sqlite），
+// 退化的场景有两种，都很常见：Node 版本低于 22.13（用不了 node:sqlite），
 // 或者显式带了 --no-db。这时服务照常运行，只是 /api/history 只会返回内存窗口，
 // 页面会明确提示"未启用历史库"，而不是假装有历史数据。
 import { createSqliteStore } from './sqlite-store.js';
@@ -13,10 +13,12 @@ import { createSqliteStore } from './sqlite-store.js';
 export function describeStorageError(error, { nodeVersion = process.version } = {}) {
   const message = error?.message || String(error);
   const code = error?.code || '';
-  // 最常见的一种：Node 22.5 以下没有内置的 node:sqlite
+  // 最常见的一种：Node 用不了内置的 node:sqlite
   if (code === 'ERR_UNKNOWN_BUILTIN_MODULE' || message.includes('node:sqlite')) {
     // 这条会被界面包在"不可用（…）"里，所以自身不要再带括号
-    return `当前 Node ${nodeVersion} 没有 node:sqlite，需要升级到 22.5 或更高`;
+    // 下限写 22.13 而不是 22.5：22.5 只是首次引入，直到 22.13 才不再需要 --experimental-sqlite 参数。
+    // 本项目不会给服务加实验参数，所以 22.5-22.12 上照样用不了。
+    return `当前 Node ${nodeVersion} 用不了内置的 node:sqlite，需要升级到 22.13 或更高`;
   }
   // 下面几条把 Node 的原始描述放在冒号后面：界面上本来就是"不可用（…）"，
   // 再来一层括号会变成嵌套括号，很难读

@@ -137,7 +137,7 @@ export async function runPreflight({
   envLines.push([major >= 18 ? ICONS.ok : ICONS.bad, `Node ${process.version}${major >= 18 ? '' : '（本项目要求 ≥ 18）'}`]);
   if (major < 18) blockers.push('Node 版本低于 18，无法启动服务');
 
-  // node:sqlite 是内置模块，但要 Node 22.5+ 才有
+  // node:sqlite 是内置模块，但 Node 22.13+ 才默认可用（22.5-22.12 需要 --experimental-sqlite）
   let sqliteAvailable = false;
   try {
     await import('node:sqlite');
@@ -151,7 +151,7 @@ export async function runPreflight({
     sqliteReady ? ICONS.ok : ICONS.warn,
     sqliteReady
       ? 'node:sqlite 可用（历史库功能正常）'
-      : `node:sqlite 不可用（需要 Node ≥ 22.5）→ 历史库会退回纯内存，实时监控不受影响`,
+      : `node:sqlite 不可用（需要 Node ≥ 22.13）→ 历史库会退回纯内存，实时监控不受影响`,
   ]);
   if (!sqliteReady) warnings.push('历史库不可用：当前 Node 版本偏低，页面会显示"未启用历史库"');
   envLines.push([ICONS.ok, `平台 ${platform.label} ${platform.arch}`]);
@@ -378,7 +378,7 @@ export async function runPreflight({
         alertLines.push([ICONS.ok, `${longRules.length} 条长周期规则的 for 超过内存窗口（${Math.round(memoryWindowMs / 60000)} 分钟），将查历史库判定：${list}`]);
       } else {
         alertLines.push([ICONS.warn, `${longRules.length} 条长周期规则的 for 超过内存窗口，但没有历史库可用，会被夹到 ${Math.round(memoryWindowMs / 60000)} 分钟：${list}`]);
-        warnings.push('有告警规则的 for 超过内存窗口，但历史库不可用；升级 Node 到 22.5+ 或调大 --window');
+        warnings.push('有告警规则的 for 超过内存窗口，但历史库不可用；升级 Node 到 22.13+ 或调大 --window');
       }
     }
   }

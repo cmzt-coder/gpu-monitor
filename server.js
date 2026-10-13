@@ -62,7 +62,7 @@ const HELP = `GPU 显存负载监控服务
       --alerts-dry-run    只打印"本来要发什么"，不真正发信
       --no-alerts-reload  关掉告警配置的热加载（默认改了 alerts.json 会自动重新加载）
 
-历史库（SQLite，Node 22.5+ 内置）：
+历史库（SQLite，Node 22.13+ 内置）：
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
       --no-db             不落库，只保留内存窗口
       --store-interval <毫秒> 落库间隔，与页面刷新间隔解耦（默认 5000）
@@ -515,7 +515,7 @@ const server = http.createServer(async (req, res) => {
     if (full && !store.supportsHistory) {
       sendJson(res, 400, {
         error: 'full_fields_unavailable',
-        message: '扩展字段只存在历史库里：请启用历史库（去掉 --no-db，并确保 Node ≥ 22.5）后重试',
+        message: '扩展字段只存在历史库里：请启用历史库（去掉 --no-db，并确保 Node ≥ 22.13）后重试',
       });
       return;
     }

@@ -22,7 +22,7 @@ print_usage() {
       --no-extended       不采集扩展 GPU 指标（时钟 / P-State / 风扇 / 节流原因）
       --idle-after <秒>   无人访问多久后降频（默认 30，0 表示不降频）
       --idle-interval <毫秒> 空闲期间的采集间隔（默认 10000）
-      --db <路径>         历史库文件（默认 data/gpu-monitor.db，需要 Node 22.5+）
+      --db <路径>         历史库文件（默认 data/gpu-monitor.db，需要 Node 22.13+）
       --no-db             不落库，只保留内存窗口
       --store-interval <毫秒> 落库间隔，与页面刷新解耦（默认 5000）
       --retention-days <天>   历史保留天数（默认 90，0 表示永久保留）

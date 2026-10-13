@@ -35,11 +35,11 @@ export async function runMaintenance({ dbPath, prune = false, reclaim = false, r
     return { ok: false, reason: `历史库不存在：${absolute}（服务首次启动时会自动创建）` };
   }
 
-  // node:sqlite 要 Node 22.5+：旧版本上给一句能看懂的话，而不是抛"模块不存在"的堆栈
+  // node:sqlite 要 Node 22.13+：旧版本上给一句能看懂的话，而不是抛"模块不存在"的堆栈
   try {
     await import('node:sqlite');
   } catch {
-    return { ok: false, reason: `历史库维护需要 Node ≥ 22.5（当前 ${process.version}），先升级 Node 再执行` };
+    return { ok: false, reason: `历史库维护需要 Node ≥ 22.13（当前 ${process.version}），先升级 Node 再执行` };
   }
 
   const beforeBytes = fs.statSync(absolute).size;
