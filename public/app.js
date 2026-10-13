@@ -556,10 +556,13 @@ function describeRange() {
   }
   const item = RANGES.find((entry) => entry.value === state.range);
   const label = item?.label || state.range;
+  // 曲线切到历史区间时，顶部指标、右侧卡片和系统资源里的读数是"现在"的，
+  // 不写清楚很容易把两种时间尺度混着看
+  const liveNote = '　·　其余卡片与顶部指标仍是当前实时值';
   if (state.historyNotice) return `${label}：${state.historyNotice}`;
   if (!state.historyPoints) return `${label}：这段时间没有数据`;
   const stepText = state.historyStep > 0 ? `，每 ${Math.round(state.historyStep / 1000)} 秒一点` : '';
-  return `历史区间：最近 ${label}，共 ${state.historyPoints} 个点${stepText}${state.historyTruncated ? '（已截断）' : ''}`;
+  return `历史区间：最近 ${label}，共 ${state.historyPoints} 个点${stepText}${state.historyTruncated ? '（已截断）' : ''}${liveNote}`;
 }
 
 function chartSlots() {
@@ -876,15 +879,18 @@ function renderSystemCard() {
   const mem = system.mem || null;
   const unsupported = new Set(system.unsupported || []);
   const missing = [...unsupported].map((key) => SYSTEM_FIELD_LABELS[key] || key);
+  // 曲线跟着所选区间走，读数是当前值：切到历史区间时标出来，免得两种时间尺度被混着看
+  const liveMark = state.range === 'live' ? '' : '（当前）';
 
   refs.sysSub.textContent = [
     cpu?.cores ? `${cpu.cores} 个逻辑核` : null,
     cpu?.model || null,
     missing.length ? `${missing.join(' / ')} 在当前平台不可用` : null,
+    state.range === 'live' ? null : '上方曲线为所选历史区间，下面读数是当前值',
   ].filter(Boolean).join(' · ') || '宿主资源概览';
 
   refs.sysMeters.appendChild(sysMeter({
-    label: 'CPU 使用率',
+    label: `CPU 使用率${liveMark}`,
     value: cpu?.usagePct == null ? '--' : `${cpu.usagePct.toFixed(0)}%`,
     foot: cpu?.usagePct == null ? '首次采样后出现' : `整机平均，共 ${cpu.cores} 个逻辑核`,
     pct: cpu?.usagePct ?? null,
@@ -892,7 +898,7 @@ function renderSystemCard() {
   }));
 
   refs.sysMeters.appendChild(sysMeter({
-    label: '内存使用率',
+    label: `内存使用率${liveMark}`,
     value: mem?.usedPct == null ? '--' : `${mem.usedPct.toFixed(0)}%`,
     foot: mem ? `${fmtGiB(mem.usedMiB)} / ${fmtGiB(mem.totalMiB)}` : '取不到内存数据',
     pct: mem?.usedPct ?? null,
@@ -901,14 +907,14 @@ function renderSystemCard() {
 
   if (unsupported.has('swap')) {
     refs.sysMeters.appendChild(sysMeter({
-      label: '交换分区',
+      label: `交换分区${liveMark}`,
       value: '平台不支持',
       foot: '这个系统没有可读的交换分区数据源',
       available: false,
     }));
   } else if (system.swap) {
     refs.sysMeters.appendChild(sysMeter({
-      label: '交换分区',
+      label: `交换分区${liveMark}`,
       value: system.swap.usedPct == null ? '--' : `${system.swap.usedPct.toFixed(0)}%`,
       foot: system.swap.totalMiB > 0
         ? `${fmtGiB(system.swap.usedMiB)} / ${fmtGiB(system.swap.totalMiB)}`
