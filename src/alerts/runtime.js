@@ -150,6 +150,9 @@ export function createAlertsRuntime({
         reloadedAt: runtime.reloadedAt,
         lastReloadError: runtime.lastReloadError,
         autoReload: Boolean(runtime.watcher),
+        // dry-run 与真发信在页面上必须能区分：否则容易以为"告警配好了"，
+        // 其实只打印不发送
+        dryRun: Boolean(options.alertsDryRun),
       };
     },
     close() {

@@ -8,7 +8,7 @@
 //   for 超过内存窗口 → 查历史库（可用时），按缓存周期刷新，一条 SQL 覆盖所有长周期规则。
 // 没有历史库时，长周期规则的 for 会被夹到窗口长度，并在启动日志里提示。
 import {
-  compare, normalizeRules, parseDuration, readGpuMetric, readHostMetric, readServiceMetric,
+  METRICS, compare, normalizeRules, parseDuration, readGpuMetric, readHostMetric, readServiceMetric,
 } from './rules.js';
 
 function formatValue(value, rule) {
@@ -58,6 +58,18 @@ export function createAlertEngine({
   // 需要多长的历史：取所有规则里最宽的那个 for，一次取够给所有规则共用
   const widestFor = rules.reduce((max, rule) => Math.max(max, rule.forMs), 0);
   const longRules = rules.filter((rule) => windowMs > 0 && rule.forMs > windowMs);
+  // 长周期判定到底有没有历史库可用：页面要据此区分"规则按你写的时长在跑"和"被夹到窗口长度了"
+  const historyEnabled = Boolean(history) && widestFor > 0;
+
+  /**
+   * 规则实际生效的判定时长。
+   * 没有历史库时，for 超过内存窗口的部分等不到数据，实际只能按窗口长度判定——
+   * 这个差异必须让页面看得见，否则用户会以为规则按自己写的时长在跑。
+   */
+  function effectiveForMs(rule) {
+    if (!(windowMs > 0) || rule.forMs <= windowMs) return rule.forMs;
+    return historyEnabled ? rule.forMs : windowMs;
+  }
 
   for (const problem of problems) {
     logger.warn?.(`[gpu-monitor] 告警规则被跳过：${problem}`);
@@ -342,9 +354,33 @@ export function createAlertEngine({
         problems,
         cooldownMs,
         windowMs,
+        // 规则清单：零触发时页面也要能说清"在盯什么"。
+        // 之前只给了 firing，没有触发就等于页面上看不到任何告警信息。
+        rules: rules.map((rule) => {
+          const entries = [...active.values()].filter((entry) => entry.rule.id === rule.id);
+          const effective = effectiveForMs(rule);
+          return {
+            id: rule.id,
+            label: rule.label,
+            metric: rule.metric,
+            metricLabel: METRICS[rule.metric]?.label ?? rule.metric,
+            scope: rule.scope,
+            level: rule.level,
+            unit: rule.unit,
+            op: rule.op,
+            threshold: rule.threshold ?? rule.value ?? null,
+            isBoolean: typeof (rule.threshold ?? rule.value) === 'boolean',
+            service: rule.service,
+            forMs: rule.forMs,
+            effectiveForMs: effective,
+            clamped: effective !== rule.forMs,
+            firingCount: entries.length,
+            targets: entries.map((entry) => entry.target.label),
+          };
+        }),
         // 长周期判定的数据来源与缓存状态：让页面/自检能看出"到底有没有在查库"
         history: {
-          enabled: Boolean(history) && widestFor > 0,
+          enabled: historyEnabled,
           widestForMs: widestFor,
           longRuleCount: longRules.length,
           cacheMs: historyCacheMs,

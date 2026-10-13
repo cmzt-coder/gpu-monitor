@@ -741,11 +741,11 @@ assert.equal(retentionStore.querySamples(nearNow).points, 1, '没过期的那条
 retentionStore.close();
 
 // 空实现：没有历史库时要明确说"不支持"，而不是假装返回空历史
-const memoryStore = createMemoryStore('未启用（--no-db）');
+const memoryStore = createMemoryStore('启动时加了 --no-db');
 assert.equal(memoryStore.supportsHistory, false);
 assert.equal(memoryStore.querySamples({ from: 0, to: 1 }).unsupported, true);
 assert.equal([...memoryStore.gpuPages()].length, 0);
-assert.equal(memoryStore.stats().reason, '未启用（--no-db）');
+assert.equal(memoryStore.stats().reason, '启动时加了 --no-db');
 assert.equal(memoryStore.countProcesses({ from: 0, to: 1 }), 0);
 
 /* ---------- 导出：按行生成（流式导出的基础） ---------- */
@@ -1050,7 +1050,7 @@ assert.equal(storeBrokenHealth.statusCode, 503);
 
 // 没开历史库不算不健康；告警触发中属于"机器有事"，也不影响服务健康
 const noDbHealth = evaluateHealth({
-  state: healthBase, storage: { mode: 'memory', reason: '未启用（--no-db）' },
+  state: healthBase, storage: { mode: 'memory', reason: '启动时加了 --no-db' },
   alerts: { enabled: true, ruleCount: 2, firing: [{}, {}] }, now: () => 1_000_500,
 });
 assert.equal(noDbHealth.statusCode, 200);
@@ -1238,6 +1238,41 @@ await flushTasks();
 assert.equal(notifications.length, 3);
 assert.equal(notifications[2].ruleId, 'collect-down');
 assert.equal(notifications[2].level, 'critical');
+
+// 规则清单：零触发时页面就靠它说明"在盯什么"，所以没触发的规则也必须齐全
+const ruleSnapshot = alertEngine.snapshot().rules;
+assert.equal(ruleSnapshot.length, 2, '规则清单要包含全部规则，不只是触发中的那些');
+const vramRule = ruleSnapshot.find((rule) => rule.id === 'vram');
+assert.equal(vramRule.metricLabel, '显存占用率', '指标要带上中文名，页面不该自己维护一份对照表');
+assert.equal(vramRule.threshold, 90);
+assert.equal(vramRule.unit, '%');
+assert.equal(vramRule.isBoolean, false);
+assert.equal(vramRule.forMs, 2000);
+assert.equal(vramRule.effectiveForMs, 2000, 'for 没超过窗口时不该被夹短');
+assert.equal(vramRule.clamped, false);
+assert.equal(vramRule.firingCount, 0, '已恢复的规则不该继续标记为触发中');
+const collectRule = ruleSnapshot.find((rule) => rule.id === 'collect-down');
+assert.equal(collectRule.isBoolean, true, '布尔型指标的阈值要按布尔传下去');
+assert.equal(collectRule.firingCount, 1);
+assert.deepEqual(collectRule.targets, ['采集服务'], '触发中的规则要带上目标名，页面才能说清是哪一处');
+
+// for 超过内存窗口：有历史库才能按原时长判定，没有就得如实标出"被夹短了"
+const longRuleConfig = {
+  window: 60000, rules: [{ id: 'long', metric: 'memUsedPct', op: '>=', threshold: 90, for: '10m' }],
+};
+const clampedEngine = createAlertEngine({
+  config: longRuleConfig, getSamples: () => [], logger: { warn() {} },
+});
+assert.equal(clampedEngine.snapshot().rules[0].effectiveForMs, 60000);
+assert.equal(clampedEngine.snapshot().rules[0].clamped, true, '无历史库时长周期 for 要标成已夹短');
+const historyEngine = createAlertEngine({
+  config: longRuleConfig,
+  getSamples: () => [],
+  history: () => ({ samples: [] }),
+  logger: { warn() {} },
+});
+assert.equal(historyEngine.snapshot().rules[0].effectiveForMs, 600000, '有历史库时按规则原本的 for 判定');
+assert.equal(historyEngine.snapshot().rules[0].clamped, false);
 
 /* ---------- 告警：配置加载与环境变量展开 ---------- */
 /* ---------- 告警：服务维度的指标 ---------- */
@@ -1568,6 +1603,9 @@ assert.equal(alertsRuntime.snapshot().enabled, true);
 assert.equal(alertsRuntime.snapshot().ruleCount, 1);
 assert.equal(alertsRuntime.snapshot().loaded, true, '装上规则后 loaded 必须为 true（启动横幅靠它判断）');
 assert.equal(alertsRuntime.snapshot().autoReload, false, '关掉监听时不应报告自动重载');
+// dry-run 与真发信在页面上必须能区分：否则会以为"告警配好了"，其实只打印不发送
+assert.equal(alertsRuntime.snapshot().dryRun, true);
+assert.equal(alertsRuntime.snapshot().rules.length, 1, '运行时快照要把规则清单透传给页面');
 
 // 改文件后重新加载：规则数随之变化
 writeAlerts([

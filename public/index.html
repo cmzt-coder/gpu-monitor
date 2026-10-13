@@ -86,9 +86,16 @@
   <div class="alerts" id="alerts" hidden>
     <div class="alerts__head">
       <svg class="icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
-      <p class="alerts__title" id="alerts-title">当前告警</p>
+      <p class="alerts__title" id="alerts-title">告警</p>
+      <span class="alerts__badge" id="alerts-badge" hidden></span>
     </div>
+    <p class="alerts__status" id="alerts-status"></p>
     <ul class="alerts__list" id="alerts-list"></ul>
+    <p class="alerts__empty" id="alerts-empty" hidden></p>
+    <details class="alerts__rules" id="alerts-rules" hidden>
+      <summary class="alerts__rules-summary" id="alerts-rules-summary">规则清单</summary>
+      <ul class="alerts__rule-list" id="alerts-rule-list"></ul>
+    </details>
   </div>
 
   <section class="kpis" aria-label="整机概览">

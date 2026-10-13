@@ -79,7 +79,9 @@ export function createMemoryStore(reason = null) {
 }
 
 export async function createStore({ options, nodeId, logger = console, createSqlite = createSqliteStore }) {
-  if (options.db === false) return createMemoryStore('未启用（--no-db）');
+  // 这句话会被塞进"不可用（…）""未启用历史库（…）"这类模板里，
+  // 所以自身不能再带括号，否则页面上会出现"不可用（未启用（--no-db））"
+  if (options.db === false) return createMemoryStore('启动时加了 --no-db');
   try {
     return await createSqlite({
       file: options.dbPath,

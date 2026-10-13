@@ -12,7 +12,13 @@ const refs = {
   noticeCode: $('notice-code'),
   alerts: $('alerts'),
   alertsTitle: $('alerts-title'),
+  alertsBadge: $('alerts-badge'),
+  alertsStatus: $('alerts-status'),
   alertsList: $('alerts-list'),
+  alertsEmpty: $('alerts-empty'),
+  alertsRules: $('alerts-rules'),
+  alertsRulesSummary: $('alerts-rules-summary'),
+  alertsRuleList: $('alerts-rule-list'),
   btnRetry: $('btn-retry'),
   btnRefresh: $('btn-refresh'),
   btnCsv: $('btn-csv'),
@@ -467,17 +473,77 @@ function renderNotice(meta) {
 }
 
 /* ---------- 渲染：告警 ---------- */
+const ALERT_LEVEL_LABELS = { critical: '严重', warning: '警告' };
+
+// 判定时长：秒级写秒、分钟级写分钟，避免出现"240 秒"这种要心算的写法
+function fmtForMs(ms) {
+  if (!(ms > 0)) return '';
+  if (ms < 60000) return `${Math.round(ms / 1000)} 秒`;
+  const minutes = ms / 60000;
+  if (minutes < 60) return `${Math.round(minutes * 10) / 10} 分钟`;
+  return `${Math.round((minutes / 60) * 10) / 10} 小时`;
+}
+
+// 阈值按单位渲染：显存类走 GiB/MiB，布尔量走"是/否"
+function fmtThreshold(rule) {
+  if (rule.isBoolean) return rule.threshold ? '是' : '否';
+  if (rule.threshold == null) return '--';
+  if (rule.unit === 'MiB') {
+    return rule.threshold >= 1024
+      ? `${(rule.threshold / 1024).toFixed(2)} GiB`
+      : `${Math.round(rule.threshold)} MiB`;
+  }
+  return `${Math.round(rule.threshold * 10) / 10}${rule.unit || ''}`;
+}
+
+// "vllm-embed 显存过高：服务显存 >= 12.00 GiB，只看 vllm-embed，持续 4 分钟"
+function describeRule(rule) {
+  const parts = [];
+  // 规则自己起了名字时，条件里要写出指标名，否则"显存过高"没说清盯的是哪个指标
+  const subject = rule.label === rule.metricLabel ? '' : `${rule.metricLabel} `;
+  parts.push(`${subject}${rule.op} ${fmtThreshold(rule)}`);
+  if (rule.service) parts.push(`只看 ${rule.service}`);
+  parts.push(rule.effectiveForMs > 0 ? `持续 ${fmtForMs(rule.effectiveForMs)}` : '单点即报');
+  if (rule.clamped) parts.push(`原设定 ${fmtForMs(rule.forMs)}，无历史库改按窗口判定`);
+  return parts.join('，');
+}
+
 function renderAlerts(meta) {
   const alerts = meta?.alerts;
   const firing = alerts?.firing || [];
-  if (firing.length === 0) {
+  const rules = alerts?.rules || [];
+  // 一条规则都没装上时保持安静；一旦配了规则就始终显示——
+  // "0 条触发"不该等于"页面上完全看不到告警功能还在不在"
+  if (!alerts || !alerts.enabled) {
     refs.alerts.hidden = true;
     refs.alertsList.replaceChildren();
-    refs.alertsTitle.textContent = '当前告警';
+    refs.alertsRuleList.replaceChildren();
+    refs.alertsTitle.textContent = '告警';
     return;
   }
   refs.alerts.hidden = false;
-  refs.alertsTitle.textContent = `当前告警（${firing.length}）`;
+  // 面板常驻，但只有真触发时才该整块泛黄；"没事"要看起来像没事
+  refs.alerts.dataset.state = firing.length ? 'firing' : 'idle';
+  refs.alertsTitle.textContent = firing.length ? `当前告警（${firing.length}）` : '告警';
+
+  // dry-run 必须一眼可见：只打印不发送时，页面看着"配好了"最容易误判
+  const badges = [];
+  if (alerts.dryRun) badges.push('dry-run：只打印不发送');
+  if (alerts.problems?.length) badges.push(`${alerts.problems.length} 条规则被跳过`);
+  if (alerts.lastReloadError) badges.push('配置有误，仍在用上一次的规则');
+  refs.alertsBadge.textContent = badges.join(' · ');
+  refs.alertsBadge.hidden = badges.length === 0;
+
+  const summary = [`${alerts.ruleCount} 条规则监控中`];
+  if (alerts.cooldownMs) summary.push(`抑制 ${Math.round(alerts.cooldownMs / 60000)} 分钟`);
+  summary.push(alerts.autoReload ? '改动自动生效' : '改动需重启');
+  if (alerts.lastCheckAt) summary.push(`检查于 ${fmtClock(alerts.lastCheckAt)}`);
+  if (alerts.notifiedCount) summary.push(`已通知 ${alerts.notifiedCount} 次`);
+  refs.alertsStatus.textContent = summary.join(' · ');
+
+  refs.alertsEmpty.hidden = firing.length > 0;
+  refs.alertsEmpty.textContent = `当前无告警，${rules.length || alerts.ruleCount} 条规则未触发`;
+
   refs.alertsList.replaceChildren();
   for (const alert of firing) {
     const item = document.createElement('li');
@@ -485,7 +551,7 @@ function renderAlerts(meta) {
     const level = document.createElement('span');
     level.className = 'alerts__level';
     level.dataset.level = alert.level;
-    level.textContent = alert.level === 'critical' ? '严重' : '警告';
+    level.textContent = ALERT_LEVEL_LABELS[alert.level] || alert.level;
     const detail = document.createElement('span');
     detail.className = 'alerts__detail';
     detail.textContent = alert.detail;
@@ -494,6 +560,43 @@ function renderAlerts(meta) {
     since.textContent = alert.since ? `自 ${fmtRelative(alert.since)}` : '';
     item.append(level, detail, since);
     refs.alertsList.appendChild(item);
+  }
+
+  // 规则清单：确认"到底在盯什么"。零触发时这是页面上唯一能看出告警正常工作的东西。
+  refs.alertsRules.hidden = rules.length === 0;
+  refs.alertsRulesSummary.textContent = `规则清单（${rules.length}）`;
+  refs.alertsRuleList.replaceChildren();
+  for (const rule of rules) {
+    const item = document.createElement('li');
+    item.className = 'alerts__rule';
+    item.dataset.state = rule.firingCount > 0 ? 'firing' : 'normal';
+    const level = document.createElement('span');
+    level.className = 'alerts__level';
+    level.dataset.level = rule.level;
+    level.textContent = ALERT_LEVEL_LABELS[rule.level] || rule.level;
+    const text = document.createElement('span');
+    text.className = 'alerts__rule-text';
+    const name = document.createElement('b');
+    name.textContent = rule.label;
+    const condition = document.createElement('span');
+    condition.className = 'alerts__rule-cond';
+    // 规则名就是指标名时不加冒号：读起来就是"显存占用率 >= 85%，持续 4 分钟"一句完整的话
+    condition.textContent = rule.label === rule.metricLabel
+      ? ` ${describeRule(rule)}`
+      : `：${describeRule(rule)}`;
+    text.append(name, condition);
+    const state = document.createElement('span');
+    state.className = 'alerts__rule-state';
+    state.dataset.state = rule.firingCount > 0 ? 'firing' : 'normal';
+    if (rule.firingCount > 0) {
+      state.textContent = rule.targets?.length
+        ? `触发中：${rule.targets.join('、')}`
+        : `触发中（${rule.firingCount}）`;
+    } else {
+      state.textContent = '正常';
+    }
+    item.append(level, text, state);
+    refs.alertsRuleList.appendChild(item);
   }
 }
 
@@ -1364,6 +1467,7 @@ function describeAlerts(meta) {
     return `未启用（${alerts.reason || '没有配置规则'}）`;
   }
   const parts = [`${alerts.ruleCount} 条规则`];
+  if (alerts.dryRun) parts.push('dry-run（只打印不发送）');
   if (alerts.autoReload) parts.push('改动自动生效');
   if (alerts.cooldownMs) parts.push(`抑制 ${Math.round(alerts.cooldownMs / 60000)} 分钟`);
   parts.push(alerts.firing.length ? `当前 ${alerts.firing.length} 条触发中` : '当前无告警');

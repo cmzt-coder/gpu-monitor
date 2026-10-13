@@ -486,8 +486,23 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   border-radius: var(--jf-radius-md);
   background: #fdf7e8;
 }
-.alerts__head { display: flex; align-items: center; gap: 9px; color: var(--jf-color-warning); }
+/* 面板常驻：没有触发时走中性配色，只有真出事才整块泛黄 */
+.alerts[data-state="idle"] {
+  border-color: var(--jf-color-border);
+  border-left-color: var(--jf-color-success);
+  background: var(--jf-color-surface);
+}
+.alerts__head { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; color: var(--jf-color-warning); }
+.alerts[data-state="idle"] .alerts__head { color: var(--jf-color-ink-muted); }
 .alerts__title { font-weight: 600; }
+.alerts__badge {
+  padding: 2px 9px; border-radius: 999px;
+  border: 1px solid var(--jf-color-border);
+  background: var(--jf-color-surface-muted);
+  color: var(--jf-color-warning);
+  font-size: 12px; font-weight: 600;
+}
+.alerts__status { margin-top: 6px; color: var(--jf-color-ink-muted); font-size: 12.5px; }
 .alerts__list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 .alerts__item {
   display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
@@ -501,6 +516,36 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .alerts__level[data-level="critical"] { background: var(--jf-color-danger); }
 .alerts__detail { color: var(--jf-color-ink); }
 .alerts__since { color: var(--jf-color-ink-muted); font-size: 12.5px; }
+.alerts__empty { margin-top: 8px; color: var(--jf-color-ink-muted); font-size: 13.5px; }
+.alerts__rules { margin-top: 12px; }
+.alerts__rules-summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--jf-color-primary);
+  font-size: 12.5px;
+}
+.alerts__rule-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+.alerts__rule { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 13px; }
+.alerts__rule-text { color: var(--jf-color-ink); }
+.alerts__rule-cond { color: var(--jf-color-ink-muted); }
+.alerts__rule-state { color: var(--jf-color-success); font-size: 12.5px; }
+.alerts__rule-state[data-state="firing"] { color: var(--jf-color-danger); font-weight: 600; }
+/* 规则清单里的级别标签用描边样式：整页 11 条都刷成实心色块太吵 */
+.alerts__rule .alerts__level {
+  background: transparent;
+  border: 1px solid currentColor;
+  color: var(--jf-color-warning);
+}
+.alerts__rule .alerts__level[data-level="critical"] { color: var(--jf-color-danger); }
+.alerts__rule[data-state="firing"] .alerts__level {
+  background: var(--jf-color-warning);
+  border-color: var(--jf-color-warning);
+  color: #fff;
+}
+.alerts__rule[data-state="firing"] .alerts__level[data-level="critical"] {
+  background: var(--jf-color-danger);
+  border-color: var(--jf-color-danger);
+}
 
 /* ---------- 响应式 ---------- */
 @media (max-width: 1180px) {
