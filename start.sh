@@ -22,8 +22,18 @@ print_usage() {
       --no-extended       不采集扩展 GPU 指标（时钟 / P-State / 风扇 / 节流原因）
       --idle-after <秒>   无人访问多久后降频（默认 30，0 表示不降频）
       --idle-interval <毫秒> 空闲期间的采集间隔（默认 10000）
+      --db <路径>         历史库文件（默认 data/gpu-monitor.db，需要 Node 22.5+）
+      --no-db             不落库，只保留内存窗口
+      --store-interval <毫秒> 落库间隔，与页面刷新解耦（默认 5000）
+      --retention-days <天>   历史保留天数（默认 90，0 表示永久保留）
+      --alerts <路径>     告警配置（默认 alerts.json，不存在则不启用）
+      --no-alerts         不启用告警
+      --alerts-dry-run    只打印将要发送的通知，不真正发信
+      --no-push           关掉 SSE 推送，页面自动回到轮询
       --mock              用模拟数据启动，方便无显卡环境先看效果
   -h, --help              显示本帮助
+
+其余 server.js 支持的参数会原样透传，完整列表见 node server.js --help
 
 示例：
   ./start.sh
