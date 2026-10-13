@@ -445,6 +445,26 @@ assert.notEqual(
   processesSignature([{ gpuIndex: 0, pid: 8, name: 'a' }]),
 );
 
+// node:sqlite 要 Node 22.5+。旧版本上这之后的断言（历史库、维护、迁移）都没法跑，
+// 这里给一句明确说明就收尾，而不是抛一个"模块不存在"的堆栈让人以为代码坏了。
+const sqliteReady = await (async () => {
+  try {
+    await import('node:sqlite');
+    return true;
+  } catch {
+    return false;
+  }
+})();
+if (!sqliteReady) {
+  process.stdout.write(
+    '\n⚠️  当前 Node 没有 node:sqlite（需要 ≥ 22.5）：历史库相关断言跳过，'
+    + '前面的解析 / 指标 / 调度 / 采集器断言已全部通过。\n'
+    + '   服务本身不受影响——历史库会自动退回内存窗口，页面会明确标注。\n'
+    + '   升级到 Node 22 LTS 或 24 后可以完整跑一遍。\n',
+  );
+  process.exit(0);
+}
+
 /* ---------- 历史库：写入 / 查询 / 分桶 / 保留 ---------- */
 const dbNow = 1_700_000_000_000;
 const sqliteStore = await createSqliteStore({
