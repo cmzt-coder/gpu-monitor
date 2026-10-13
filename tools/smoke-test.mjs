@@ -23,7 +23,7 @@ import { detectPlatform, nvidiaSmiCandidates, resolveNvidiaSmi } from '../src/pl
 import { createSystemCollector, parseMeminfo, parseNetDev, cpuUsagePct } from '../src/system.js';
 import { createCollector, resolveCadence } from '../src/collector.js';
 import { createSqliteStore } from '../src/store/sqlite-store.js';
-import { createMemoryStore } from '../src/store/store.js';
+import { createMemoryStore, createStore, describeStorageError } from '../src/store/store.js';
 import { gpuFromRow, packThrottle, processesSignature, systemFromRow, unpackThrottle } from '../src/store/rows.js';
 import { compare, normalizeRules, parseDuration } from '../src/alerts/rules.js';
 import { createAlertEngine } from '../src/alerts/engine.js';
@@ -739,6 +739,42 @@ assert.equal(systemRowToCsv('2026-01-01T00:00:00.000Z', systemFromRow({
 })), '2026-01-01T00:00:00.000Z,12.3,500,1000,50,,,0.5,0.4,0.3,/,1,2,50,0,2048');
 
 sqliteStore.close();
+
+/* ---------- 历史库降级：错误信息要翻成人话 ---------- */
+// 这条信息会出现在启动横幅、/api/state.storage.reason、页面上的历史库与进程历史卡片
+// 好几个地方，不能把 Node 的英文原始报错直接抛给用户
+const missingSqliteError = Object.assign(new Error('No such built-in module: node:sqlite'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' });
+assert.equal(
+  describeStorageError(missingSqliteError, { nodeVersion: 'v18.19.1' }),
+  '当前 Node v18.19.1 没有 node:sqlite（需要 ≥ 22.5）',
+);
+assert.equal(
+  describeStorageError(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })),
+  '没有权限写入历史库：EACCES: permission denied',
+);
+assert.equal(describeStorageError(Object.assign(new Error('no space left'), { code: 'ENOSPC' })), '磁盘空间不足，无法创建历史库');
+assert.equal(describeStorageError(new Error('别的错')), '别的错', '认不出来的错误原样保留，不要吞掉');
+
+// 走一遍 createStore 的降级路径（注入一个必然失败的实现）
+const storageWarnings = [];
+const degradedStore = await createStore({
+  options: { db: true, dbPath: ':memory:', storeIntervalMs: 5000, retentionDays: 90, storeProcesses: true },
+  nodeId: 'test-node',
+  logger: { warn: (line) => storageWarnings.push(line) },
+  createSqlite: async () => {
+    throw missingSqliteError;
+  },
+});
+assert.equal(degradedStore.mode, 'memory');
+assert.equal(degradedStore.supportsHistory, false);
+assert.ok(degradedStore.reason.includes('需要 ≥ 22.5'), '降级原因要能直接看懂');
+assert.equal(degradedStore.reason.includes('built-in module'), false, '不应把 Node 的英文原始报错漏到界面上');
+assert.equal(storageWarnings.length, 1, '降级要留一条日志，不能静默');
+assert.ok(storageWarnings[0].includes('需要 ≥ 22.5'));
+// 降级后行为要正常：查询返回"不支持"、写入不报错
+assert.equal(degradedStore.querySamples({ from: 0, to: 1 }).unsupported, true);
+assert.equal(degradedStore.appendSample({ t: 1, gpus: [] }), 0);
+assert.equal(degradedStore.stats().mode, 'memory');
 
 /* ---------- 历史库维护：增量回收与整库重写 ---------- */
 const tmpDb = path.join(os.tmpdir(), `gm-maint-${process.pid}.db`);
