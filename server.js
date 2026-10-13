@@ -223,8 +223,18 @@ const alertsLoad = options.alerts
 const alertEngine = alertsLoad.config
   ? createAlertEngine({
     // 持续时长（for）的判定基准是内存窗口，默认取 采样点数 × 采集间隔
-    config: { window: options.windowSamples * options.intervalMs, ...alertsLoad.config },
+    config: {
+      window: options.windowSamples * options.intervalMs,
+      intervalMs: options.intervalMs,
+      ...alertsLoad.config,
+    },
     getSamples: () => collector.getSamples(options.windowSamples),
+    // for 超过内存窗口的规则改用历史库判定：
+    // 一次取够最宽的那条规则需要的区间，由引擎按 historyCache 周期缓存复用。
+    // 没有历史库（--no-db 或 Node 版本偏低）时传 null，引擎会退回"夹到窗口长度"的老行为。
+    history: store.supportsHistory
+      ? ({ from, to }) => store.querySamples({ from, to, stepMs: 0, pointLimit: 3000 })
+      : null,
     notifier: createNotifier({
       config: alertsLoad.config,
       dryRun: options.alertsDryRun,

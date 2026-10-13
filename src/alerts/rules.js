@@ -94,7 +94,8 @@ export function normalizeRules(config = {}) {
       // for：条件需要持续多久才算触发
       forMs: parseDuration(raw.for, 0),
       level: raw.level === 'critical' ? 'critical' : 'warning',
-      minSamples: Math.max(1, Number(raw.minSamples) || 3),
+      // 判定"持续满足"至少要看两个点；只看一个点的话"持续"无从谈起
+      minSamples: Math.max(1, Number(raw.minSamples) || 2),
     });
   });
 
@@ -106,8 +107,10 @@ export function readGpuMetric(sample, gpuKeyValue, metric) {
   const gpu = (sample.gpus || []).find((item) => (item.uuid || `index-${item.index}`) === gpuKeyValue);
   if (!gpu) return undefined;
   if (metric === 'throttled') {
-    if (!gpu.throttle) return undefined;
-    return Object.values(gpu.throttle).some((value) => value === true);
+    if (gpu.throttle) return Object.values(gpu.throttle).some((value) => value === true);
+    // 从历史库分桶查回来的样本只有聚合值，没有逐项节流掩码
+    if (typeof gpu.throttled === 'boolean') return gpu.throttled;
+    return undefined;
   }
   return gpu[metric];
 }

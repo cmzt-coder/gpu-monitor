@@ -908,6 +908,7 @@ assert.equal(notifications.length, 1, '触发时通知一次');
 assert.equal(notifications[0].kind, 'firing');
 assert.equal(notifications[0].ruleId, 'vram');
 assert.ok(notifications[0].detail.includes('GPU 0'), '告警文案要带上是哪张卡');
+assert.ok(notifications[0].detail.includes('仅覆盖'), '数据不足以覆盖 for 时要如实标注覆盖时长');
 
 // 仍在告警：冷却期内不再重复通知
 alertClock += 1000;
@@ -940,6 +941,234 @@ await flushTasks();
 assert.equal(notifications.length, 3);
 assert.equal(notifications[2].ruleId, 'collect-down');
 assert.equal(notifications[2].level, 'critical');
+
+/* ---------- 告警：配置加载与环境变量展开 ---------- */
+/* ---------- 告警：长周期判定改用历史库 ---------- */
+let histClock = 2_000_000;
+const MEMORY_WINDOW_MS = 5 * 60 * 1000;
+const gpuSample = (t, tempC, extra = {}) => ({
+  t,
+  gpus: [{ index: 0, uuid: 'g0', name: 'X', tempC, memUsedPct: 50, throttle: { swPowerCap: false }, ...extra }],
+  system: null,
+});
+
+let memorySamples = [];
+let storedSamples = [];
+let historyCalls = 0;
+let historyFails = false;
+const longRunNotifications = [];
+const longEngine = createAlertEngine({
+  config: {
+    window: MEMORY_WINDOW_MS,
+    cooldown: '10m',
+    historyCache: '30s',
+    rules: [{ id: 'hot-10m', metric: 'tempC', op: '>=', threshold: 80, for: '10m', level: 'warning' }],
+  },
+  getSamples: () => memorySamples,
+  history: ({ from, to }) => {
+    historyCalls += 1;
+    if (historyFails) throw new Error('库打不开了');
+    return { samples: storedSamples.filter((sample) => sample.t >= from && sample.t <= to), step: 0 };
+  },
+  notifier: { send: async (payload) => longRunNotifications.push(payload) },
+  now: () => histClock,
+  logger: { warn() {} },
+});
+
+// 内存窗口（最近 5 分钟）全都在阈值之上，但历史库里 10 分钟前有一段正常温度
+memorySamples = [gpuSample(histClock - 240000, 85), gpuSample(histClock - 60000, 88), gpuSample(histClock, 86)];
+storedSamples = [
+  gpuSample(histClock - 570000, 60),
+  gpuSample(histClock - 480000, 62),
+  gpuSample(histClock - 300000, 85),
+  gpuSample(histClock - 240000, 85),
+  gpuSample(histClock - 60000, 88),
+  gpuSample(histClock, 86),
+];
+let longResult = longEngine.evaluate({ status: 'ok', lastSampleAt: histClock, gpus: [{ index: 0, uuid: 'g0' }] });
+await flushTasks();
+assert.equal(longResult.firing.length, 0, '10 分钟里早期温度正常，长周期规则不该触发（只看内存窗口会误报）');
+assert.equal(historyCalls, 1, '应该去查了历史库');
+
+// 缓存周期内不重复查库
+longEngine.evaluate({ status: 'ok', lastSampleAt: histClock, gpus: [{ index: 0, uuid: 'g0' }] });
+await flushTasks();
+assert.equal(historyCalls, 1, '缓存周期内不应重复查库');
+
+// 过了缓存周期，历史库里整段都超阈值：触发
+histClock += 40000;
+memorySamples = memorySamples.map((sample) => ({ ...sample, t: sample.t + 40000 }));
+storedSamples = Array.from({ length: 12 }, (_, i) => gpuSample(histClock - (11 - i) * 60000, 85));
+longResult = longEngine.evaluate({ status: 'ok', lastSampleAt: histClock, gpus: [{ index: 0, uuid: 'g0' }] });
+await flushTasks();
+assert.equal(historyCalls, 2, '缓存过期后应重新查库');
+assert.equal(longResult.firing.length, 1, '整段区间都满足条件时应触发');
+assert.equal(longRunNotifications.length, 1);
+const longSnapshot = longEngine.snapshot();
+assert.equal(longSnapshot.history.enabled, true);
+assert.equal(longSnapshot.history.longRuleCount, 1);
+assert.equal(longSnapshot.history.queries, 2);
+
+// 查库失败时不能把采集带崩：沿用旧缓存，并记录错误
+historyFails = true;
+histClock += 40000;
+longEngine.evaluate({ status: 'ok', lastSampleAt: histClock, gpus: [{ index: 0, uuid: 'g0' }] });
+await flushTasks();
+assert.equal(historyCalls, 3, '失败也说明尝试过了');
+assert.ok(longEngine.snapshot().history.lastError.includes('库打不开了'));
+historyFails = false;
+
+// 分桶查回来的历史样本没有逐项节流掩码，只有聚合后的 throttled
+const throttleEngine = createAlertEngine({
+  config: {
+    window: MEMORY_WINDOW_MS,
+    rules: [{ id: 'throttled-10m', metric: 'throttled', op: '==', value: true, for: '10m', level: 'warning' }],
+  },
+  getSamples: () => [],
+  history: () => ({
+    samples: [
+      { t: histClock - 600000, gpus: [{ index: 0, uuid: 'g0', throttle: null, throttled: true }], system: null },
+      { t: histClock - 300000, gpus: [{ index: 0, uuid: 'g0', throttle: null, throttled: true }], system: null },
+      { t: histClock, gpus: [{ index: 0, uuid: 'g0', throttle: null, throttled: true }], system: null },
+    ],
+    step: 60000,
+  }),
+  notifier: { send: async () => {} },
+  now: () => histClock,
+  logger: { warn() {} },
+});
+assert.equal(throttleEngine.evaluate({ status: 'ok', lastSampleAt: histClock, gpus: [] }).firing.length, 1, '分桶后的节流聚合值也要能被识别');
+
+// 内存窗口里的节流信息：曾经因为环形缓冲裁剪掉了 throttle 字段，throttled 规则永不触发
+process.env.GPU_MONITOR_MOCK_HIGH = '1';
+const curveCollector = createCollector({
+  options: baseOptions,
+  mockSource: createMockSource({ gpuCount: 1 }),
+  systemCollector: null,
+});
+delete process.env.GPU_MONITOR_MOCK_HIGH;
+await curveCollector.tick();
+await curveCollector.tick();
+const curveSamples = curveCollector.getSamples();
+assert.equal('throttled' in curveSamples[0].gpus[0], true, '曲线样本要带上节流状态，否则 throttled 规则永远不会触发');
+assert.equal(curveSamples[0].gpus[0].throttled, true, '高负载模拟数据应处于节流状态');
+const throttledEngine = createAlertEngine({
+  config: { window: 300000, rules: [{ id: 'thr', metric: 'throttled', op: '==', value: true, for: '1s' }] },
+  getSamples: () => curveSamples,
+  notifier: { send: async () => {} },
+  logger: { warn() {} },
+});
+assert.ok(
+  throttledEngine.evaluate({ status: 'ok', lastSampleAt: Date.now(), gpus: [] }).firing.length >= 1,
+  '内存窗口路径下 throttled 规则应能触发',
+);
+curveCollector.stop();
+
+// for=0 表示"当下满足就报"：不能被更早的正常样本挡住
+const instantEngine = createAlertEngine({
+  config: { window: 300000, rules: [{ id: 'hot-now', metric: 'tempC', op: '>=', threshold: 80, for: 0 }] },
+  getSamples: () => [
+    { t: 1000, gpus: [{ index: 0, uuid: 'g0', tempC: 20, throttle: { swPowerCap: false } }], system: null },
+    { t: 2000, gpus: [{ index: 0, uuid: 'g0', tempC: 85, throttle: { swPowerCap: false } }], system: null },
+  ],
+  notifier: { send: async () => {} },
+  logger: { warn() {} },
+});
+assert.equal(instantEngine.evaluate({ status: 'ok', gpus: [] }).firing.length, 1, 'for=0 应只看最新一个采样点');
+
+// for 比采集间隔还短（for:1s + 每秒采集）时不该被"至少两个点"挡住
+const shortForEngine = createAlertEngine({
+  config: {
+    window: 60000,
+    intervalMs: 1000,
+    rules: [{ id: 'brief', metric: 'tempC', op: '>=', threshold: 80, for: '1s' }],
+  },
+  getSamples: () => [
+    { t: 1000, gpus: [{ index: 0, uuid: 'g0', tempC: 85, throttle: { swPowerCap: false } }], system: null },
+    { t: 2000, gpus: [{ index: 0, uuid: 'g0', tempC: 86, throttle: { swPowerCap: false } }], system: null },
+  ],
+  notifier: { send: async () => {} },
+  now: () => 2100,
+  logger: { warn() {} },
+});
+assert.equal(
+  shortForEngine.evaluate({ status: 'ok', gpus: [] }).firing.length,
+  1,
+  'for 与采集间隔相同时，窗口内只有一个点也应判定（并标注覆盖时长）',
+);
+
+// 抖动抑制：恢复之后马上又触发，冷却期内不该再发一封（否则状态横跳时会刷屏）
+let flapClock = 5_000_000;
+let flapSamples = [];
+const flapNotifications = [];
+const flapGpu = (tempC) => ({
+  index: 0, uuid: 'g0', name: 'X', memUsedPct: 50, tempC, throttle: { swPowerCap: false },
+});
+const flapEngine = createAlertEngine({
+  config: {
+    window: 60000,
+    cooldown: '10m',
+    intervalMs: 1000,
+    rules: [{ id: 'flap', metric: 'tempC', op: '>=', threshold: 80, for: '2s' }],
+  },
+  getSamples: () => flapSamples,
+  notifier: { send: async (payload) => flapNotifications.push(payload) },
+  now: () => flapClock,
+  logger: { warn() {} },
+});
+const hotSamples = () => [
+  { t: flapClock - 2000, gpus: [flapGpu(85)], system: null },
+  { t: flapClock - 1000, gpus: [flapGpu(85)], system: null },
+  { t: flapClock, gpus: [flapGpu(85)], system: null },
+];
+flapSamples = hotSamples();
+flapEngine.evaluate({ status: 'ok', gpus: [] });
+await flushTasks();
+assert.equal(flapNotifications.length, 1, '首次触发通知一次');
+
+// 恢复正常 → 补一条"恢复"
+flapClock += 1000;
+flapSamples = [
+  { t: flapClock - 1000, gpus: [flapGpu(30)], system: null },
+  { t: flapClock, gpus: [flapGpu(30)], system: null },
+];
+flapEngine.evaluate({ status: 'ok', gpus: [] });
+await flushTasks();
+assert.equal(flapNotifications.length, 2);
+assert.equal(flapNotifications[1].kind, 'resolved');
+
+// 马上又触发：状态回到告警中，但冷却期内不再发信
+flapClock += 1000;
+flapSamples = hotSamples();
+const flapResult = flapEngine.evaluate({ status: 'ok', gpus: [] });
+await flushTasks();
+assert.equal(flapResult.firing.length, 1, '状态仍应标记为告警中');
+assert.equal(flapNotifications.length, 2, '冷却期内不重复发信，包括"刚恢复又触发"的抖动');
+
+// 历史与内存合并：内存里的新点要算进来，同一时间戳以历史版本为准（字段更全）
+let mergedClock = 3000;
+const mergedEngine = createAlertEngine({
+  config: { window: 60000, cooldown: '10m', rules: [{ id: 'hot', metric: 'tempC', op: '>=', threshold: 90, for: '10m' }] },
+  getSamples: () => [
+    { t: 2000, gpus: [{ index: 0, uuid: 'g0', tempC: 20, throttle: { swPowerCap: false } }], system: null },
+    { t: 3000, gpus: [{ index: 0, uuid: 'g0', tempC: 95, throttle: { swPowerCap: false } }], system: null },
+  ],
+  history: () => ({
+    samples: [
+      { t: 1000, gpus: [{ index: 0, uuid: 'g0', tempC: 95, throttle: null, throttled: false }], system: null },
+      { t: 2000, gpus: [{ index: 0, uuid: 'g0', tempC: 95, throttle: null, throttled: false }], system: null },
+    ],
+    step: 0,
+  }),
+  notifier: { send: async () => {} },
+  now: () => mergedClock,
+  logger: { warn() {} },
+});
+assert.equal(
+  mergedEngine.evaluate({ status: 'ok', gpus: [] }).firing.length,
+  1,
+  '同一时间戳应保留历史版本（温度 95），内存里更新的点也要合并进来',
+);
 
 /* ---------- 告警：配置加载与环境变量展开 ---------- */
 process.env.GM_TEST_SMTP_PASS = 'secret';
@@ -1013,5 +1242,6 @@ process.stdout.write(
   + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
   + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行 / 推送订阅 / '
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
-  + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验\n',
+  + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
+  + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应\n',
 );

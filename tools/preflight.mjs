@@ -118,6 +118,9 @@ export async function runPreflight({
   alertsPath = 'alerts.json',
   gpuBin = null,
   storeIntervalMs = DEFAULT_STORE_INTERVAL_MS,
+  // 用来判断告警的 for 有没有超出内存窗口：等价于 --window / --interval
+  windowSamples = 300,
+  intervalMs = 1000,
   skipPortCheck = false,
   systemDelayMs = 1200,
 } = {}) {
@@ -365,6 +368,19 @@ export async function runPreflight({
       alertLines.push([ICONS.skip, '未配置邮件渠道，通知只会打到控制台日志']);
     }
     if (alertsLoad.config.webhook?.url) alertLines.push([ICONS.ok, `Webhook 渠道：${alertsLoad.config.webhook.url}`]);
+
+    // for 超过内存窗口的规则要靠历史库判定；没有库就只能夹到窗口长度
+    const memoryWindowMs = windowSamples * intervalMs;
+    const longRules = rules.filter((rule) => rule.forMs > memoryWindowMs);
+    if (longRules.length > 0) {
+      const list = longRules.map((rule) => `${rule.id}(${Math.round(rule.forMs / 60000)}m)`).join('、');
+      if (sqliteReady) {
+        alertLines.push([ICONS.ok, `${longRules.length} 条长周期规则的 for 超过内存窗口（${Math.round(memoryWindowMs / 60000)} 分钟），将查历史库判定：${list}`]);
+      } else {
+        alertLines.push([ICONS.warn, `${longRules.length} 条长周期规则的 for 超过内存窗口，但没有历史库可用，会被夹到 ${Math.round(memoryWindowMs / 60000)} 分钟：${list}`]);
+        warnings.push('有告警规则的 for 超过内存窗口，但历史库不可用；升级 Node 到 22.5+ 或调大 --window');
+      }
+    }
   }
   sections.push({ title: '告警', lines: alertLines });
 
@@ -451,6 +467,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         break;
       case '--skip-port-check':
         options.skipPortCheck = true;
+        break;
+      case '--window':
+        options.windowSamples = Math.max(30, Number(next()) || 300);
+        break;
+      case '--interval':
+        options.intervalMs = Math.max(200, Number(next()) || 1000);
         break;
       default:
         break;

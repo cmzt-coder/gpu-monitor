@@ -1191,6 +1191,16 @@ function describeAlerts(meta) {
   const parts = [`${alerts.ruleCount} 条规则`];
   if (alerts.cooldownMs) parts.push(`抑制 ${Math.round(alerts.cooldownMs / 60000)} 分钟`);
   parts.push(alerts.firing.length ? `当前 ${alerts.firing.length} 条触发中` : '当前无告警');
+  // 长周期（for 超过内存窗口）规则的判定数据来自哪里，值得写清楚
+  const history = alerts.history;
+  if (history?.enabled) {
+    const granularity = history.step > 0 ? `按 ${Math.round(history.step / 60000)} 分钟分桶` : '原始粒度';
+    parts.push(`${history.longRuleCount} 条长周期规则查历史库（${granularity}）`);
+    if (history.truncated) parts.push('历史区间被截断');
+    if (history.lastError) parts.push(`取历史失败：${history.lastError}`);
+  } else if (history?.longRuleCount > 0) {
+    parts.push(`${history.longRuleCount} 条长周期规则只能按内存窗口判定（未启用历史库）`);
+  }
   if (alerts.notifiedCount) parts.push(`已通知 ${alerts.notifiedCount} 次`);
   if (alerts.problems?.length) parts.push(`${alerts.problems.length} 条规则被跳过`);
   if (alerts.lastError) parts.push(alerts.lastError);

@@ -24,6 +24,10 @@ function toCurveGpu(gpu) {
     utilMemPct: gpu.utilMemPct,
     tempC: gpu.tempC,
     powerW: gpu.powerW,
+    // 告警里有个 throttled 指标，曲线样本也得带上它。
+    // 之前只留了画曲线要用的字段，导致这个指标在内存窗口里永远是 undefined，
+    // 规则一次都不会触发（长周期走历史库才碰巧没受影响）。
+    throttled: gpu.throttle ? Object.values(gpu.throttle).some((value) => value === true) : null,
   };
 }
 
