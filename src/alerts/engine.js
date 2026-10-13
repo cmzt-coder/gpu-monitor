@@ -7,11 +7,17 @@
 //   for 不超过内存窗口（默认 5 分钟）→ 直接用内存里的采样点，零成本；
 //   for 超过内存窗口 → 查历史库（可用时），按缓存周期刷新，一条 SQL 覆盖所有长周期规则。
 // 没有历史库时，长周期规则的 for 会被夹到窗口长度，并在启动日志里提示。
-import { compare, normalizeRules, parseDuration, readGpuMetric, readHostMetric } from './rules.js';
+import {
+  compare, normalizeRules, parseDuration, readGpuMetric, readHostMetric, readServiceMetric,
+} from './rules.js';
 
 function formatValue(value, rule) {
   if (typeof value === 'boolean') return value ? '是' : '否';
   if (value == null) return '--';
+  // 显存类指标按 GiB 显示更直观（10240MiB 不如 10.00 GiB 好读）
+  if (rule.unit === 'MiB') {
+    return value >= 1024 ? `${(value / 1024).toFixed(2)} GiB` : `${Math.round(value)} MiB`;
+  }
   return `${Math.round(value * 10) / 10}${rule.unit || ''}`;
 }
 
@@ -112,7 +118,7 @@ export function createAlertEngine({
 
   /** 列出这条规则要评估的"目标"：每张卡、整机、或服务本身 */
   function enumerateTargets(rule, samples, state) {
-    if (rule.scope === 'service') {
+    if (rule.scope === 'collector') {
       const ok = state?.status === 'ok';
       if (rule.value === false) {
         // 采集失败：用"多久没有新样本"衡量持续时间。内存窗口里没有失败样本可数，
@@ -137,6 +143,38 @@ export function createAlertEngine({
         current: true,
         firstTs: samples[0]?.t ?? now(),
       }];
+    }
+    // 服务维度：按"占卡的服务"（容器 / systemd 单元 / 用户会话）分别判定
+    if (rule.scope === 'service') {
+      const filter = rule.service ? rule.service.toLowerCase() : null;
+      const names = new Set();
+      for (const sample of samples) {
+        for (const entry of sample.services || []) {
+          if (!entry?.service) continue;
+          if (filter && !String(entry.service).toLowerCase().includes(filter)) continue;
+          names.add(entry.service);
+        }
+      }
+      const targets = [];
+      for (const name of names) {
+        // 服务中途消失（容器停了）时按 0 处理，这样"占用过高"的告警会自动恢复，
+        // 而不是停在上一次的值上一直响
+        const values = samples
+          .map((sample) => {
+            const value = readServiceMetric(sample, name, rule.metric);
+            return value === undefined ? 0 : value;
+          })
+          .filter((value) => value !== null);
+        if (values.length === 0) continue;
+        targets.push({
+          key: name,
+          label: name,
+          values,
+          current: values[values.length - 1],
+          firstTs: samples[0]?.t ?? now(),
+        });
+      }
+      return targets;
     }
     if (rule.scope === 'host') {
       const values = samples.map((sample) => readHostMetric(sample, rule.metric)).filter((v) => v !== undefined);
@@ -190,7 +228,7 @@ export function createAlertEngine({
     const value = formatValue(entry.value, rule);
     const threshold = rule.value !== undefined
       ? (rule.value ? '是' : '否')
-      : `${rule.threshold}${rule.unit}`;
+      : formatValue(rule.threshold, rule);
     const coverage = entry.coverageShort
       ? `　·　仅覆盖 ${formatMinutes(entry.coverageMs)}，不足规则要求的 ${formatMinutes(rule.forMs)}`
       : '';

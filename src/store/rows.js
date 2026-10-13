@@ -100,6 +100,17 @@ export function processRows(nodeId, ts, processes) {
   }));
 }
 
+/** 服务维度的汇总 → service_sample 表的行 */
+export function serviceRows(nodeId, ts, services) {
+  return (services || []).map((entry) => ({
+    ts,
+    node_id: nodeId,
+    service: entry.service ?? null,
+    mem_mib: entry.memMiB ?? null,
+    processes: entry.processes ?? null,
+  }));
+}
+
 /**
  * 进程列表的签名：只反映"身份"（哪张卡上是哪个进程），不含显存数值。
  * 显存数值每秒都在变，放进签名等于每个采样点都要写一遍，历史库里会被重复行淹没。

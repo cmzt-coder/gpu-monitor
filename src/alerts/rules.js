@@ -14,7 +14,11 @@ export const METRICS = {
   hostMemUsedPct: { scope: 'host', label: '宿主内存使用率', unit: '%' },
   hostSwapUsedPct: { scope: 'host', label: '交换分区使用率', unit: '%' },
   hostDiskUsedPct: { scope: 'host', label: '磁盘使用率', unit: '%' },
-  collectOk: { scope: 'service', label: '采集状态', unit: '' },
+  // 服务维度：一张卡被多个服务共享时，只看"整卡用了多少"没有意义
+  serviceMemMiB: { scope: 'service', label: '服务显存', unit: 'MiB' },
+  serviceSharePct: { scope: 'service', label: '服务显存占比', unit: '%' },
+  // 注意：这里的 "collector" 指的是监控服务自身，和上面按"占卡服务"聚合的 service 作用域不是一回事
+  collectOk: { scope: 'collector', label: '采集状态', unit: '' },
 };
 
 const OPERATORS = {
@@ -96,6 +100,8 @@ export function normalizeRules(config = {}) {
       level: raw.level === 'critical' ? 'critical' : 'warning',
       // 判定"持续满足"至少要看两个点；只看一个点的话"持续"无从谈起
       minSamples: Math.max(1, Number(raw.minSamples) || 2),
+      // 可选：把规则限定到某个服务（子串匹配，"vllm-embed" 能匹配到"容器 vllm-embed"）
+      service: raw.service ? String(raw.service) : null,
     });
   });
 
@@ -126,5 +132,14 @@ export function readHostMetric(sample, metric) {
     if (disks.length === 0) return undefined;
     return Math.max(...disks.map((disk) => disk.usedPct));
   }
+  return undefined;
+}
+
+/** 取某个服务在某次采样里的指标 */
+export function readServiceMetric(sample, serviceName, metric) {
+  const entry = (sample.services || []).find((item) => item.service === serviceName);
+  if (!entry) return undefined;
+  if (metric === 'serviceMemMiB') return entry.memMiB ?? null;
+  if (metric === 'serviceSharePct') return entry.sharePct ?? null;
   return undefined;
 }

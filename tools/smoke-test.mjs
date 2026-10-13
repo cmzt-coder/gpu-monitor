@@ -26,6 +26,8 @@ import { createSqliteStore } from '../src/store/sqlite-store.js';
 import { createMemoryStore, createStore, describeStorageError } from '../src/store/store.js';
 import { gpuFromRow, packThrottle, processesSignature, systemFromRow, unpackThrottle } from '../src/store/rows.js';
 import { compare, normalizeRules, parseDuration } from '../src/alerts/rules.js';
+import { readServiceMetric } from '../src/alerts/rules.js';
+import { serviceSharePct, summarizeServices } from '../src/services.js';
 import { createAlertEngine } from '../src/alerts/engine.js';
 import { createAlertsRuntime } from '../src/alerts/runtime.js';
 import {
@@ -389,6 +391,10 @@ assert.equal(state.status, 'ok', '采集应成功');
 assert.equal(state.gpus.length, 3);
 assert.equal(state.gpus[0].clockSmMHz, 2520, '/api/state 应带上扩展指标');
 assert.equal(state.processes.length, 2);
+assert.ok(Array.isArray(state.services) && state.services.length >= 1, '状态里应带服务维度汇总');
+assert.ok(state.services[0].memMiB > 0, '服务汇总应包含占用显存');
+assert.equal(typeof state.services[0].sharePct, 'number', '服务占比按整机显存算');
+assert.ok(state.services.every((entry, index, list) => index === 0 || list[index - 1].memMiB >= entry.memMiB), '服务汇总按占用从大到小');
 assert.equal(state.fields.extended, true);
 assert.equal(state.system.mem.usedPct, 40, '/api/state 应带上宿主指标');
 assert.equal(state.idle.active, false);
@@ -398,6 +404,7 @@ const historyOut = collector.getHistory();
 assert.equal(historyOut.samples.length, 1);
 assert.equal(historyOut.samples[0].gpus[0].name, 'NVIDIA GeForce RTX 4090');
 assert.equal(historyOut.samples[0].system.mem.usedPct, 40);
+assert.ok(Array.isArray(historyOut.samples[0].services), '曲线样本要带上服务汇总（短窗口的持续判定靠它）');
 assert.equal(
   'clockSmMHz' in historyOut.samples[0].gpus[0],
   false,
@@ -434,6 +441,27 @@ assert.equal(noSystemState.systemEnabled, false);
 assert.equal(noSystemState.system, null);
 assert.equal(noSystemState.gpus.length, 1, '关掉宿主指标不影响 GPU 采集');
 noSystemCollector.stop();
+
+/* ---------- 服务维度：把进程汇总成"哪个服务占了多少" ---------- */
+const svcSummary = summarizeServices([
+  { pid: 1, service: '容器 vllm-embed', usedMemMiB: 8502, user: 'root' },
+  { pid: 2, service: '容器 vllm-embed', usedMemMiB: 1000, user: 'root' },
+  { pid: 3, service: '用户会话', usedMemMiB: 568, user: 'jklei' },
+  { pid: 4, service: null, usedMemMiB: 1666, user: 'root' },
+], [{ memTotalMiB: 40960 }]);
+assert.equal(svcSummary.length, 3);
+assert.equal(svcSummary[0].service, '容器 vllm-embed', '按占用从大到小排序');
+assert.equal(svcSummary[0].memMiB, 9502, '同一个服务的多个进程要合并');
+assert.equal(svcSummary[0].processes, 2);
+assert.deepEqual(svcSummary[0].users, ['root']);
+assert.ok(Math.abs(svcSummary[0].sharePct - (9502 / 40960) * 100) < 1e-6, '占比按整机显存总量算');
+assert.equal(svcSummary[1].service, '未识别', '服务身份拿不到的归到"未识别"，不丢掉');
+assert.equal(svcSummary[2].service, '用户会话');
+// 拿不到总量时占比是 null，而不是 0 或 NaN
+assert.equal(summarizeServices([{ service: 'x', usedMemMiB: 1 }], []).find((entry) => entry.service === 'x').sharePct, null);
+assert.equal(serviceSharePct(1024, [{ memTotalMiB: 4096 }]), 25);
+assert.equal(serviceSharePct(1024, []), null);
+assert.deepEqual(summarizeServices([], []), []);
 
 /* ---------- 进程归属：cgroup / 用户 / 命令行的解析 ---------- */
 // 用例取自真实服务器（一台跑着 vLLM 容器与 Schrödinger 作业的 A100 机器）
@@ -737,6 +765,26 @@ assert.equal(systemRowToCsv('2026-01-01T00:00:00.000Z', systemFromRow({
   disk_json: JSON.stringify([{ path: '/', usedMiB: 1, totalMiB: 2, usedPct: 50 }]),
   net_rx_bps: 0, net_tx_bps: 2048, uptime_sec: 42,
 })), '2026-01-01T00:00:00.000Z,12.3,500,1000,50,,,0.5,0.4,0.3,/,1,2,50,0,2048');
+
+// 服务维度的汇总要能落库、读回来（占比按当时的整机显存重算）
+sqliteStore.appendSample({
+  t: dbNow + 6000,
+  gpus: [{ index: 0, uuid: 'GPU-test', name: 'X', memUsedMiB: 100, memTotalMiB: 40960 }],
+  processes: [],
+  system: null,
+  services: [
+    { service: '容器 vllm-embed', memMiB: 9502, processes: 3 },
+    { service: '用户会话', memMiB: 568, processes: 2 },
+  ],
+});
+sqliteStore.flush();
+const storedServices = sqliteStore.querySamples({ from: dbNow + 5000, to: dbNow + 7000 })
+  .samples.find((sample) => sample.t === dbNow + 6000);
+assert.equal(storedServices.services.length, 2);
+assert.equal(storedServices.services[0].service, '容器 vllm-embed', '按占用从大到小');
+assert.equal(storedServices.services[0].memMiB, 9502);
+assert.ok(Math.abs(storedServices.services[0].sharePct - (9502 / 40960) * 100) < 1e-6, '占比按当时的整机显存算');
+assert.equal(storedServices.services[1].processes, 2);
 
 sqliteStore.close();
 
@@ -1192,6 +1240,74 @@ assert.equal(notifications[2].ruleId, 'collect-down');
 assert.equal(notifications[2].level, 'critical');
 
 /* ---------- 告警：配置加载与环境变量展开 ---------- */
+/* ---------- 告警：服务维度的指标 ---------- */
+let svcClock = 6_000_000;
+let svcSamples = [];
+const svcNotifications = [];
+const svcSample = (t, entries) => ({ t, gpus: [{ index: 0, uuid: 'g0', memTotalMiB: 40960 }], system: null, services: entries });
+const serviceEngine = createAlertEngine({
+  config: {
+    window: 60000,
+    intervalMs: 1000,
+    cooldown: '10m',
+    rules: [{ id: 'svc-vram', metric: 'serviceMemMiB', service: 'vllm-embed', op: '>=', threshold: 8192, for: '2s', level: 'critical' }],
+  },
+  getSamples: () => svcSamples,
+  notifier: { send: async (payload) => svcNotifications.push(payload) },
+  now: () => svcClock,
+  logger: { warn() {} },
+});
+svcSamples = [
+  svcSample(svcClock - 2000, [{ service: '容器 vllm-embed', memMiB: 9000, sharePct: 22, processes: 3 }]),
+  svcSample(svcClock - 1000, [{ service: '容器 vllm-embed', memMiB: 9200, sharePct: 22.5, processes: 3 }]),
+  svcSample(svcClock, [{ service: '容器 vllm-embed', memMiB: 9500, sharePct: 23.2, processes: 3 }]),
+];
+let svcResult = serviceEngine.evaluate({ status: 'ok', gpus: [] });
+await flushTasks();
+assert.equal(svcResult.firing.length, 1, '服务维度的规则应按服务分别判定');
+assert.equal(svcResult.firing[0].target.label, '容器 vllm-embed');
+assert.ok(svcNotifications[0].detail.includes('9.28 GiB'), `显存按 GiB 显示更直观：${svcNotifications[0].detail}`);
+assert.ok(svcNotifications[0].detail.includes('8.00 GiB'), '阈值同样按 GiB 显示');
+
+// service 过滤：没命中的服务不参与判定
+const filteredEngine = createAlertEngine({
+  config: { window: 60000, intervalMs: 1000, rules: [{ id: 'f', metric: 'serviceMemMiB', service: 'mineru', op: '>=', threshold: 100, for: '1s' }] },
+  getSamples: () => svcSamples,
+  notifier: { send: async () => {} },
+  now: () => svcClock,
+  logger: { warn() {} },
+});
+assert.equal(filteredEngine.evaluate({ status: 'ok', gpus: [] }).firing.length, 0, 'service 过滤没命中时不应触发');
+
+// 不带过滤：每个服务各自判定
+const allServicesEngine = createAlertEngine({
+  config: { window: 60000, intervalMs: 1000, rules: [{ id: 'all', metric: 'serviceMemMiB', op: '>=', threshold: 100, for: '2s' }] },
+  getSamples: () => [
+    svcSample(svcClock - 2000, [{ service: '容器 vllm-embed', memMiB: 9000 }, { service: '容器 mineru-api', memMiB: 8000 }]),
+    svcSample(svcClock - 1000, [{ service: '容器 vllm-embed', memMiB: 9100 }, { service: '容器 mineru-api', memMiB: 8100 }]),
+    svcSample(svcClock, [{ service: '容器 vllm-embed', memMiB: 9200 }, { service: '容器 mineru-api', memMiB: 8200 }]),
+  ],
+  notifier: { send: async () => {} },
+  now: () => svcClock,
+  logger: { warn() {} },
+});
+assert.equal(allServicesEngine.evaluate({ status: 'ok', gpus: [] }).firing.length, 2, '不带过滤时每个服务各自一条告警');
+
+// 服务消失（容器停了）要自动恢复，而不是停在上一次的值上一直响
+svcClock += 3000;
+svcSamples = [
+  svcSample(svcClock - 2000, [{ service: '容器 vllm-embed', memMiB: 9000 }]),
+  svcSample(svcClock - 1000, [{ service: '容器 vllm-embed', memMiB: 9200 }]),
+  svcSample(svcClock, []),
+];
+svcResult = serviceEngine.evaluate({ status: 'ok', gpus: [] });
+await flushTasks();
+assert.equal(svcResult.firing.length, 0, '服务不在了就不该继续告警');
+assert.equal(svcResult.resolved.length, 1);
+assert.ok(svcNotifications.some((payload) => payload.kind === 'resolved'));
+assert.equal(readServiceMetric(svcSamples[0], '容器 vllm-embed', 'serviceMemMiB'), 9000);
+assert.equal(readServiceMetric(svcSamples[0], '不存在的服务', 'serviceMemMiB'), undefined);
+
 /* ---------- 告警：长周期判定改用历史库 ---------- */
 let histClock = 2_000_000;
 const MEMORY_WINDOW_MS = 5 * 60 * 1000;

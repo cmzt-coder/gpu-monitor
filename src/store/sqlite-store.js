@@ -12,7 +12,8 @@ import { statSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { gpuFromRow, gpuRow, hostRow, processRows, processesSignature, systemFromRow } from './rows.js';
+import { serviceSharePct } from '../services.js';
+import { gpuFromRow, gpuRow, hostRow, processRows, processesSignature, serviceRows, systemFromRow } from './rows.js';
 
 // 表结构写成数据结构而不是一整段 SQL：建表、补列迁移、以及"哪些列要写要读"都从这一份生成，
 // 避免加了字段却忘了改另一个地方。新增字段只要在这里加一行。
@@ -77,6 +78,17 @@ const TABLES = [
       ['user_name', 'TEXT'],
     ],
   },
+  {
+    // 服务维度的汇总：一行 = 某个服务在某个采样点的合计占用
+    name: 'service_sample',
+    columns: [
+      ['ts', 'INTEGER NOT NULL'],
+      ['node_id', 'TEXT NOT NULL'],
+      ['service', 'TEXT'],
+      ['mem_mib', 'REAL'],
+      ['processes', 'INTEGER'],
+    ],
+  },
 ];
 
 const INDEXES = [
@@ -84,12 +96,14 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS gpu_sample_uuid_ts_idx ON gpu_sample (uuid, ts)',
   'CREATE INDEX IF NOT EXISTS host_sample_ts_idx ON host_sample (ts)',
   'CREATE INDEX IF NOT EXISTS gpu_process_ts_idx ON gpu_process (ts)',
+  'CREATE INDEX IF NOT EXISTS service_sample_ts_idx ON service_sample (ts)',
 ];
 
 const columnsOf = (table) => TABLES.find((item) => item.name === table).columns.map(([name]) => name);
 const GPU_COLUMNS = columnsOf('gpu_sample');
 const HOST_COLUMNS = columnsOf('host_sample');
 const PROCESS_COLUMNS = columnsOf('gpu_process');
+const SERVICE_COLUMNS = columnsOf('service_sample');
 
 /**
  * 建表 + 补列迁移。
@@ -205,9 +219,10 @@ export async function createSqliteStore({
   const insertGpu = db.prepare(insertSql('gpu_sample', GPU_COLUMNS));
   const insertHost = db.prepare(insertSql('host_sample', HOST_COLUMNS));
   const insertProcess = db.prepare(insertSql('gpu_process', PROCESS_COLUMNS));
+  const insertService = db.prepare(insertSql('service_sample', SERVICE_COLUMNS));
 
-  const buffer = { gpu: [], host: [], process: [] };
-  const counters = { gpu: 0, host: 0, process: 0 };
+  const buffer = { gpu: [], host: [], process: [], service: [] };
+  const counters = { gpu: 0, host: 0, process: 0, service: 0 };
   let lastStoreTs = 0;
   let lastProcessSignature = null;
   let lastProcessAt = 0;
@@ -223,13 +238,14 @@ export async function createSqliteStore({
   let closed = false;
 
   function flush() {
-    const count = buffer.gpu.length + buffer.host.length + buffer.process.length;
+    const count = buffer.gpu.length + buffer.host.length + buffer.process.length + buffer.service.length;
     if (count === 0) return 0;
     db.exec('BEGIN');
     try {
       for (const row of buffer.gpu) insertGpu.run(...rowValues(GPU_COLUMNS, row));
       for (const row of buffer.host) insertHost.run(...rowValues(HOST_COLUMNS, row));
       for (const row of buffer.process) insertProcess.run(...rowValues(PROCESS_COLUMNS, row));
+      for (const row of buffer.service) insertService.run(...rowValues(SERVICE_COLUMNS, row));
       db.exec('COMMIT');
     } catch (error) {
       try {
@@ -242,9 +258,11 @@ export async function createSqliteStore({
     counters.gpu += buffer.gpu.length;
     counters.host += buffer.host.length;
     counters.process += buffer.process.length;
+    counters.service += buffer.service.length;
     buffer.gpu = [];
     buffer.host = [];
     buffer.process = [];
+    buffer.service = [];
     lastFlushAt = now();
     boundsCachedAt = 0;
     return count;
@@ -259,6 +277,8 @@ export async function createSqliteStore({
     for (const gpu of sample.gpus || []) buffer.gpu.push(gpuRow(nodeId, sample.t, gpu));
     const host = hostRow(nodeId, sample.t, sample.system);
     if (host) buffer.host.push(host);
+    // 服务维度的汇总每个采样点都写（一行一个服务），这样长窗口的持续判定能查到
+    for (const row of serviceRows(nodeId, sample.t, sample.services)) buffer.service.push(row);
 
     if (storeProcesses) {
       // 进程列表：身份变化时写（相当于"谁在什么时候占上了卡"的事件记录），
@@ -273,7 +293,7 @@ export async function createSqliteStore({
       }
     }
 
-    if (buffer.gpu.length + buffer.host.length + buffer.process.length >= flushRows) return flush();
+    if (buffer.gpu.length + buffer.host.length + buffer.process.length + buffer.service.length >= flushRows) return flush();
     return 0;
   }
 
@@ -287,7 +307,7 @@ export async function createSqliteStore({
     let dropped = 0;
     db.exec('BEGIN');
     try {
-      for (const table of ['gpu_sample', 'host_sample', 'gpu_process']) {
+      for (const table of ['gpu_sample', 'host_sample', 'gpu_process', 'service_sample']) {
         const result = db.prepare(`DELETE FROM ${table} WHERE ts < ?`).run(cutoff);
         dropped += Number(result.changes ?? 0);
       }
@@ -533,6 +553,28 @@ export async function createSqliteStore({
     }
   }
 
+  /** 服务维度的行：一个桶里取平均占用、进程数取峰值 */
+  function queryServiceRows(from, to, step, limit) {
+    if (step > 0) {
+      return db.prepare(`
+        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket, service,
+               AVG(mem_mib) AS mem_mib, MAX(processes) AS processes
+        FROM service_sample
+        WHERE ts >= ? AND ts <= ?
+        GROUP BY bucket, service
+        ORDER BY bucket ASC
+        LIMIT ?
+      `).all(step, step, from, to, limit).map((row) => ({ ...row, ts: row.bucket }));
+    }
+    return db.prepare(`
+      SELECT ts, service, mem_mib, processes
+      FROM service_sample
+      WHERE ts >= ? AND ts <= ?
+      ORDER BY ts ASC
+      LIMIT ?
+    `).all(from, to, limit);
+  }
+
   /**
    * 区间查询，返回与 /api/history 一致的采样点结构，
    * 这样前端切到历史模式时能复用同一套画图逻辑。
@@ -557,6 +599,28 @@ export async function createSqliteStore({
         buckets.set(row.ts, { t: row.ts, gpus: [], system: null });
       }
       buckets.get(row.ts).system = systemFromRow(row);
+    }
+
+    // 服务维度：占比要按"当时的整机显存总量"算，所以放在 gpus 归拢完之后再补
+    const serviceRowsByTs = new Map();
+    for (const row of queryServiceRows(from, to, step, cap * 16)) {
+      if (!serviceRowsByTs.has(row.ts)) serviceRowsByTs.set(row.ts, []);
+      serviceRowsByTs.get(row.ts).push(row);
+    }
+    for (const [ts, rows] of serviceRowsByTs) {
+      if (!buckets.has(ts)) {
+        if (buckets.size >= cap) continue;
+        buckets.set(ts, { t: ts, gpus: [], system: null });
+      }
+      const sample = buckets.get(ts);
+      sample.services = rows
+        .map((row) => ({
+          service: row.service,
+          memMiB: row.mem_mib,
+          sharePct: serviceSharePct(row.mem_mib, sample.gpus),
+          processes: row.processes,
+        }))
+        .sort((a, b) => (b.memMiB || 0) - (a.memMiB || 0));
     }
 
     const samples = [...buckets.values()].sort((a, b) => a.t - b.t);

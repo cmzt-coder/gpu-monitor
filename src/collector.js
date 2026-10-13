@@ -7,6 +7,7 @@ import { History } from './history.js';
 import { detectPlatform, resolveNvidiaSmi } from './platform.js';
 import { BASE_FIELDS, defaultGpuFields, readGpuSnapshot, resolveGpuFields } from './nvidia.js';
 import { createProcessInfoReader } from './procinfo.js';
+import { summarizeServices } from './services.js';
 import { createSystemCollector } from './system.js';
 
 // 探测失败后每隔这么久再试一次，这样后装驱动/挂载显卡后不用重启服务
@@ -198,12 +199,20 @@ export function createCollector({
       }
 
       // 曲线样本只保留必要字段；最新的完整指标（含时钟/节流等）单独留在 runtime.latest
-      history.push({ t: Date.now(), gpus: snapshot.gpus.map(toCurveGpu), system: systemSample });
+      // 服务维度的汇总跟着每个采样点走：短窗口的持续判定用内存里的这份，长窗口查历史库
+      const services = summarizeServices(snapshot.processes, snapshot.gpus);
+      history.push({
+        t: Date.now(),
+        gpus: snapshot.gpus.map(toCurveGpu),
+        system: systemSample,
+        services,
+      });
       runtime.latest = {
         t: Date.now(),
         gpus: snapshot.gpus,
         processes: snapshot.processes,
         system: systemSample,
+        services,
       };
       runtime.status = 'ok';
       runtime.lastError = null;
@@ -335,6 +344,8 @@ export function createCollector({
       gpus: latest ? latest.gpus : [],
       processes: latest ? latest.processes : [],
       system: latest ? latest.system : null,
+      // 服务维度的汇总（哪个服务占了多少显存），告警与页面都可以直接用
+      services: latest?.services || [],
       ...(extraState ? extraState() : {}),
     };
   }
