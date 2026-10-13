@@ -49,6 +49,13 @@ const refs = {
   procBody: $('proc-body'),
   procEmpty: $('proc-empty'),
   procEmptyText: $('proc-empty-text'),
+  procHistSub: $('proc-hist-sub'),
+  procHistRange: $('proc-hist-range'),
+  procHistWrap: $('proc-hist-wrap'),
+  procHistBody: $('proc-hist-body'),
+  procHistEmpty: $('proc-hist-empty'),
+  procHistEmptyTitle: $('proc-hist-empty-title'),
+  procHistEmptyText: $('proc-hist-empty-text'),
   gpuCards: $('gpu-cards'),
   metaList: $('meta-list'),
   footerText: $('footer-text'),
@@ -77,6 +84,14 @@ const state = {
   historyStep: null,
   historyTruncated: false,
   historyNotice: null,
+  // 进程占用历史：与曲线的时间范围互相独立（曲线可能停在实时，这里仍想看一天）
+  processHistory: {
+    range: '24h',
+    rows: [],
+    total: 0,
+    loading: false,
+    notice: null,
+  },
   stopped: false,
 };
 
@@ -89,6 +104,14 @@ const RANGES = [
   { value: '90d', label: '90 天' },
   { value: 'all', label: '全部' },
 ];
+
+const PROC_HIST_RANGES = [
+  { value: '1h', label: '1 小时' },
+  { value: '24h', label: '24 小时' },
+  { value: '7d', label: '7 天' },
+  { value: '30d', label: '30 天' },
+];
+const PROC_HIST_LIMIT = 200;
 
 let eventSource = null;
 let pollTimer = null;
@@ -164,6 +187,14 @@ function fmtDateTime(ts) {
   const d = new Date(ts);
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// 进程事件可能密集发生在同一分钟里，精确到秒才分得清先后
+function fmtDateTimeFull(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function fmtClock(ts) {
@@ -1137,6 +1168,117 @@ function renderProcTable() {
 }
 
 /* ---------- 渲染：采集信息 ---------- */
+/* ---------- 渲染：进程占用历史 ---------- */
+function textCell(text, className) {
+  const td = document.createElement('td');
+  td.textContent = text;
+  if (className) td.className = className;
+  return td;
+}
+
+function gpuTagCell(index) {
+  const td = document.createElement('td');
+  const tag = document.createElement('span');
+  tag.className = 'gpu-tag';
+  tag.textContent = index == null ? '未知' : `GPU ${index}`;
+  td.appendChild(tag);
+  return td;
+}
+
+function procNameCell(name) {
+  const td = document.createElement('td');
+  const span = document.createElement('span');
+  span.className = 'proc-name';
+  span.textContent = name || '未知进程';
+  td.appendChild(span);
+  td.title = name || '';
+  return td;
+}
+
+function renderProcHistRange() {
+  const history = state.processHistory;
+  const signature = `${PROC_HIST_RANGES.map((item) => item.value).join('|')}#${history.range}`;
+  if (refs.procHistRange.dataset.signature === signature) return;
+  refs.procHistRange.replaceChildren();
+  for (const item of PROC_HIST_RANGES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = item.label;
+    button.dataset.value = item.value;
+    button.setAttribute('aria-pressed', item.value === history.range ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      if (state.processHistory.range === item.value) return;
+      state.processHistory.range = item.value;
+      renderProcHistRange();
+      loadProcessHistory();
+    });
+    refs.procHistRange.appendChild(button);
+  }
+  refs.procHistRange.dataset.signature = signature;
+}
+
+async function loadProcessHistory() {
+  const history = state.processHistory;
+  history.loading = true;
+  history.error = null;
+  renderProcHistory();
+  try {
+    const data = await fetchJson(`/api/processes?range=${encodeURIComponent(history.range)}&limit=${PROC_HIST_LIMIT}`);
+    history.rows = data.processes || [];
+    history.total = data.total ?? history.rows.length;
+    // 没启用历史库时后端会明确说原因，这里如实显示，而不是给个空表让人以为"这段时间没进程"
+    history.notice = data.source === 'memory' ? (data.reason || '未启用历史库') : null;
+  } catch (error) {
+    history.rows = [];
+    history.total = 0;
+    history.notice = null;
+    history.error = `读取失败（${error.message}）`;
+  } finally {
+    history.loading = false;
+  }
+  renderProcHistory();
+}
+
+function renderProcHistory() {
+  const history = state.processHistory;
+  const label = PROC_HIST_RANGES.find((item) => item.value === history.range)?.label || history.range;
+  const rows = history.rows || [];
+
+  if (history.loading) refs.procHistSub.textContent = `最近 ${label}：读取中…`;
+  else if (history.error) refs.procHistSub.textContent = history.error;
+  else if (history.notice) refs.procHistSub.textContent = `最近 ${label}：${history.notice}`;
+  else if (history.total === 0) refs.procHistSub.textContent = `最近 ${label}没有进程占用记录`;
+  else {
+    const shown = history.total > rows.length ? `，显示最近 ${rows.length} 条` : '';
+    refs.procHistSub.textContent = `最近 ${label}共 ${history.total} 条记录${shown}`;
+  }
+
+  refs.procHistBody.replaceChildren();
+  const empty = rows.length === 0;
+  refs.procHistWrap.hidden = empty;
+  refs.procHistEmpty.hidden = !empty;
+  if (empty) {
+    refs.procHistEmptyTitle.textContent = (history.error || history.notice) ? '进程历史不可用' : '这段时间没有进程记录';
+    refs.procHistEmptyText.textContent = history.error
+      || history.notice
+      || '进程只在身份变化（或每 5 分钟补一次快照）时留档，这段时间没有新的占用出现。';
+    return;
+  }
+
+  for (const event of rows) {
+    const tr = document.createElement('tr');
+    tr.append(
+      textCell(fmtDateTimeFull(event.t)),
+      gpuTagCell(event.gpuIndex),
+      textCell(event.pid == null ? '--' : String(event.pid)),
+      procNameCell(event.name),
+      textCell(fmtMiB(event.usedMemMiB), 'num mem-strong'),
+    );
+    refs.procHistBody.appendChild(tr);
+  }
+}
+
 function describeCadence(meta) {
   const idle = meta.idle;
   if (!idle) return '--';
@@ -1380,7 +1522,8 @@ refs.btnSysCsv.addEventListener('click', () => download('/api/export.system.csv'
 refs.btnJson.addEventListener('click', () => download('/api/export.json'));
 refs.btnRefresh.addEventListener('click', async () => {
   refs.btnRefresh.disabled = true;
-  await poll();
+  // 手动刷新时连历史数据一起刷：进程历史是独立拉取的，不随实时帧更新
+  await Promise.all([poll(), loadProcessHistory()]);
   refs.btnRefresh.disabled = false;
 });
 refs.btnRetry.addEventListener('click', () => poll());
@@ -1399,6 +1542,7 @@ document.addEventListener('visibilitychange', () => {
 
 async function boot() {
   renderRangePicker();
+  renderProcHistRange();
   try {
     const history = await fetchJson('/api/history');
     state.intervalMs = history.intervalMs || state.intervalMs;
@@ -1408,6 +1552,8 @@ async function boot() {
     // 首次回填失败不阻塞，直接进入轮询
   }
   await poll();
+  // 进程历史是独立的一次性拉取，不参与每秒的实时更新
+  loadProcessHistory();
   // 先用轮询兜住，再尝试升级成 SSE 推送；推送连上后会自动停掉轮询
   schedulePolling();
   startPush();

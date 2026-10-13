@@ -496,17 +496,31 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/api/processes') {
-    const to = parseTimeParam(url.searchParams.get('to')) ?? Date.now();
-    const from = parseTimeParam(url.searchParams.get('from')) ?? (to - 3600000);
+    // 支持和 /api/history 一样的区间写法（range=24h / from+to），默认看最近一小时
+    const resolved = range ?? { from: Date.now() - 3600000, to: Date.now() };
+    const limit = Math.max(1, Math.min(2000, Number(url.searchParams.get('limit')) || 200));
     if (!store.supportsHistory) {
-      sendJson(res, 200, { source: 'memory', from, to, processes: [], reason: store.reason || '未启用历史库' });
+      sendJson(res, 200, {
+        source: 'memory',
+        from: resolved.from,
+        to: resolved.to,
+        limit,
+        count: 0,
+        total: 0,
+        processes: [],
+        reason: store.reason || '未启用历史库',
+      });
       return;
     }
+    const processes = store.queryProcesses({ from: resolved.from, to: resolved.to, limit });
     sendJson(res, 200, {
       source: 'db',
-      from,
-      to,
-      processes: store.queryProcesses({ from, to, limit: Number(url.searchParams.get('limit')) || 5000 }),
+      from: resolved.from,
+      to: resolved.to,
+      limit,
+      count: processes.length,
+      total: store.countProcesses({ from: resolved.from, to: resolved.to }),
+      processes,
     });
     return;
   }

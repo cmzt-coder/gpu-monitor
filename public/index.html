@@ -203,6 +203,35 @@
           <p class="state-block__text" id="proc-empty-text">显卡当前空闲，或采集服务权限不足（需要与业务进程相同的用户）。</p>
         </div>
       </section>
+
+      <section class="card" aria-labelledby="proc-hist-h">
+        <div class="card__head">
+          <div>
+            <h2 class="card__title" id="proc-hist-h">进程占用历史</h2>
+            <p class="card__sub" id="proc-hist-sub">按进程身份变化留档</p>
+          </div>
+          <div class="range-picker" id="proc-hist-range" role="group" aria-label="选择进程历史的时间范围"></div>
+        </div>
+        <div class="table-wrap" id="proc-hist-wrap" hidden>
+          <table class="table" id="proc-hist-table">
+            <caption class="visually-hidden">历史进程占用记录，按时间从新到旧</caption>
+            <thead>
+              <tr>
+                <th scope="col">时间</th>
+                <th scope="col">GPU</th>
+                <th scope="col">PID</th>
+                <th scope="col">进程</th>
+                <th scope="col" class="num">显存</th>
+              </tr>
+            </thead>
+            <tbody id="proc-hist-body"></tbody>
+          </table>
+        </div>
+        <div class="state-block" id="proc-hist-empty" hidden>
+          <p class="state-block__title" id="proc-hist-empty-title">暂无进程记录</p>
+          <p class="state-block__text" id="proc-hist-empty-text"></p>
+        </div>
+      </section>
     </main>
 
     <aside class="evidence-col" aria-label="当前占用与采集信息">

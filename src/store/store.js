@@ -32,6 +32,9 @@ export function createMemoryStore(reason = null) {
     queryProcesses() {
       return [];
     },
+    countProcesses() {
+      return 0;
+    },
     gpuPages: emptyPages,
     hostPages: emptyPages,
     resolveStep() {

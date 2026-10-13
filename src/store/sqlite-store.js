@@ -551,6 +551,12 @@ export async function createSqliteStore({
     }));
   }
 
+  /** 区间内的进程事件总数：表格只展示最近若干条，但要能告诉用户一共有多少 */
+  function countProcesses({ from, to } = {}) {
+    const row = db.prepare('SELECT COUNT(*) AS n FROM gpu_process WHERE ts >= ? AND ts <= ?').get(from, to);
+    return Number(row?.n ?? 0);
+  }
+
   function stats() {
     const { oldestTs, newestTs } = bounds();
     const { freelistBytes, walBytes } = reclaimInfo();
@@ -607,6 +613,7 @@ export async function createSqliteStore({
     maintain,
     querySamples,
     queryProcesses,
+    countProcesses,
     gpuPages,
     hostPages,
     resolveStep,

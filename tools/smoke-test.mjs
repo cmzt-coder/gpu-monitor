@@ -550,6 +550,12 @@ const procEvents = sqliteStore.queryProcesses({ from: dbNow - 1, to: dbNow + 100
 assert.equal(procEvents.length, 4, '只写首次、定时快照与身份变化，不再逐点刷重复行');
 assert.equal(procEvents[0].pid, 7, '最新一条是切回来的进程');
 assert.ok(procEvents.some((event) => event.pid === 9), '进程切换也要留档');
+assert.equal(
+  sqliteStore.countProcesses({ from: dbNow - 1, to: dbNow + 10000 }),
+  procEvents.length,
+  '总数统计应与查询结果一致（界面要显示"共 N 条 / 显示最近 M 条"）',
+);
+assert.equal(sqliteStore.countProcesses({ from: 0, to: dbNow - 1 }), 0, '区间外应统计为 0');
 
 // 保留策略：超出保留期的行会被清掉
 const retentionStore = await createSqliteStore({
@@ -579,6 +585,7 @@ assert.equal(memoryStore.supportsHistory, false);
 assert.equal(memoryStore.querySamples({ from: 0, to: 1 }).unsupported, true);
 assert.equal([...memoryStore.gpuPages()].length, 0);
 assert.equal(memoryStore.stats().reason, '未启用（--no-db）');
+assert.equal(memoryStore.countProcesses({ from: 0, to: 1 }), 0);
 
 /* ---------- 导出：按行生成（流式导出的基础） ---------- */
 assert.equal(GPU_CSV_HEADER.startsWith('timestamp_iso,gpu_index'), true);
