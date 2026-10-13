@@ -746,8 +746,10 @@ sqliteStore.close();
 const missingSqliteError = Object.assign(new Error('No such built-in module: node:sqlite'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' });
 assert.equal(
   describeStorageError(missingSqliteError, { nodeVersion: 'v18.19.1' }),
-  '当前 Node v18.19.1 没有 node:sqlite（需要 ≥ 22.5）',
+  '当前 Node v18.19.1 没有 node:sqlite，需要升级到 22.5 或更高',
 );
+// 界面上会把它包在"不可用（…）"里，所以这句自身不能带括号，否则读起来是双层嵌套
+assert.equal(describeStorageError(missingSqliteError).includes('（'), false);
 assert.equal(
   describeStorageError(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })),
   '没有权限写入历史库：EACCES: permission denied',
@@ -767,10 +769,10 @@ const degradedStore = await createStore({
 });
 assert.equal(degradedStore.mode, 'memory');
 assert.equal(degradedStore.supportsHistory, false);
-assert.ok(degradedStore.reason.includes('需要 ≥ 22.5'), '降级原因要能直接看懂');
+assert.ok(degradedStore.reason.includes('需要升级到 22.5'), '降级原因要能直接看懂');
 assert.equal(degradedStore.reason.includes('built-in module'), false, '不应把 Node 的英文原始报错漏到界面上');
 assert.equal(storageWarnings.length, 1, '降级要留一条日志，不能静默');
-assert.ok(storageWarnings[0].includes('需要 ≥ 22.5'));
+assert.ok(storageWarnings[0].includes('需要升级到 22.5'));
 // 降级后行为要正常：查询返回"不支持"、写入不报错
 assert.equal(degradedStore.querySamples({ from: 0, to: 1 }).unsupported, true);
 assert.equal(degradedStore.appendSample({ t: 1, gpus: [] }), 0);

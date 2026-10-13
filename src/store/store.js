@@ -15,7 +15,8 @@ export function describeStorageError(error, { nodeVersion = process.version } = 
   const code = error?.code || '';
   // 最常见的一种：Node 22.5 以下没有内置的 node:sqlite
   if (code === 'ERR_UNKNOWN_BUILTIN_MODULE' || message.includes('node:sqlite')) {
-    return `当前 Node ${nodeVersion} 没有 node:sqlite（需要 ≥ 22.5）`;
+    // 这条会被界面包在"不可用（…）"里，所以自身不要再带括号
+    return `当前 Node ${nodeVersion} 没有 node:sqlite，需要升级到 22.5 或更高`;
   }
   // 下面几条把 Node 的原始描述放在冒号后面：界面上本来就是"不可用（…）"，
   // 再来一层括号会变成嵌套括号，很难读
