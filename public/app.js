@@ -1560,6 +1560,10 @@ async function boot() {
   await poll();
   // 进程历史是独立的一次性拉取，不参与每秒的实时更新
   loadProcessHistory();
+  // 但页面开久了"最近 24 小时"这个窗口会滑动，所以每 5 分钟悄悄刷一次
+  window.setInterval(() => {
+    if (!document.hidden && !state.processHistory.loading) loadProcessHistory();
+  }, 5 * 60 * 1000);
   // 先用轮询兜住，再尝试升级成 SSE 推送；推送连上后会自动停掉轮询
   schedulePolling();
   startPush();
