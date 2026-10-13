@@ -14,70 +14,100 @@ import path from 'node:path';
 
 import { gpuFromRow, gpuRow, hostRow, processRows, processesSignature, systemFromRow } from './rows.js';
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS gpu_sample (
-  ts            INTEGER NOT NULL,
-  node_id       TEXT    NOT NULL,
-  uuid          TEXT,
-  idx           INTEGER,
-  name          TEXT,
-  mem_used_mib  REAL,
-  mem_total_mib REAL,
-  util_gpu_pct  REAL,
-  util_mem_pct  REAL,
-  temp_c        REAL,
-  power_w       REAL,
-  clock_sm_mhz  REAL,
-  pstate        TEXT,
-  fan_pct       REAL,
-  throttle_mask INTEGER,
-  throttle_any  INTEGER
-);
-CREATE INDEX IF NOT EXISTS gpu_sample_ts_idx ON gpu_sample (ts);
-CREATE INDEX IF NOT EXISTS gpu_sample_uuid_ts_idx ON gpu_sample (uuid, ts);
-
-CREATE TABLE IF NOT EXISTS host_sample (
-  ts             INTEGER NOT NULL,
-  node_id        TEXT    NOT NULL,
-  cpu_pct        REAL,
-  mem_used_mib   REAL,
-  mem_total_mib  REAL,
-  mem_used_pct   REAL,
-  swap_used_mib  REAL,
-  swap_total_mib REAL,
-  load1          REAL,
-  load5          REAL,
-  load15         REAL,
-  disk_json      TEXT,
-  net_rx_bps     REAL,
-  net_tx_bps     REAL,
-  uptime_sec     INTEGER
-);
-CREATE INDEX IF NOT EXISTS host_sample_ts_idx ON host_sample (ts);
-
-CREATE TABLE IF NOT EXISTS gpu_process (
-  ts           INTEGER NOT NULL,
-  node_id      TEXT    NOT NULL,
-  uuid         TEXT,
-  gpu_index    INTEGER,
-  pid          INTEGER,
-  name         TEXT,
-  used_mem_mib REAL
-);
-CREATE INDEX IF NOT EXISTS gpu_process_ts_idx ON gpu_process (ts);
-`;
-
-const GPU_COLUMNS = [
-  'ts', 'node_id', 'uuid', 'idx', 'name', 'mem_used_mib', 'mem_total_mib',
-  'util_gpu_pct', 'util_mem_pct', 'temp_c', 'power_w', 'clock_sm_mhz',
-  'pstate', 'fan_pct', 'throttle_mask', 'throttle_any',
+// 表结构写成数据结构而不是一整段 SQL：建表、补列迁移、以及"哪些列要写要读"都从这一份生成，
+// 避免加了字段却忘了改另一个地方。新增字段只要在这里加一行。
+const TABLES = [
+  {
+    name: 'gpu_sample',
+    columns: [
+      ['ts', 'INTEGER NOT NULL'],
+      ['node_id', 'TEXT NOT NULL'],
+      ['uuid', 'TEXT'],
+      ['idx', 'INTEGER'],
+      ['name', 'TEXT'],
+      ['mem_used_mib', 'REAL'],
+      ['mem_total_mib', 'REAL'],
+      ['util_gpu_pct', 'REAL'],
+      ['util_mem_pct', 'REAL'],
+      ['temp_c', 'REAL'],
+      ['power_w', 'REAL'],
+      ['clock_sm_mhz', 'REAL'],
+      ['clock_mem_mhz', 'REAL'],
+      ['pstate', 'TEXT'],
+      ['fan_pct', 'REAL'],
+      ['pcie_gen', 'INTEGER'],
+      ['pcie_width', 'INTEGER'],
+      ['enc_util_pct', 'REAL'],
+      ['dec_util_pct', 'REAL'],
+      ['throttle_mask', 'INTEGER'],
+      ['throttle_any', 'INTEGER'],
+    ],
+  },
+  {
+    name: 'host_sample',
+    columns: [
+      ['ts', 'INTEGER NOT NULL'],
+      ['node_id', 'TEXT NOT NULL'],
+      ['cpu_pct', 'REAL'],
+      ['mem_used_mib', 'REAL'],
+      ['mem_total_mib', 'REAL'],
+      ['mem_used_pct', 'REAL'],
+      ['swap_used_mib', 'REAL'],
+      ['swap_total_mib', 'REAL'],
+      ['load1', 'REAL'],
+      ['load5', 'REAL'],
+      ['load15', 'REAL'],
+      ['disk_json', 'TEXT'],
+      ['net_rx_bps', 'REAL'],
+      ['net_tx_bps', 'REAL'],
+      ['uptime_sec', 'INTEGER'],
+    ],
+  },
+  {
+    name: 'gpu_process',
+    columns: [
+      ['ts', 'INTEGER NOT NULL'],
+      ['node_id', 'TEXT NOT NULL'],
+      ['uuid', 'TEXT'],
+      ['gpu_index', 'INTEGER'],
+      ['pid', 'INTEGER'],
+      ['name', 'TEXT'],
+      ['used_mem_mib', 'REAL'],
+    ],
+  },
 ];
-const HOST_COLUMNS = [
-  'ts', 'node_id', 'cpu_pct', 'mem_used_mib', 'mem_total_mib', 'mem_used_pct',
-  'swap_used_mib', 'swap_total_mib', 'load1', 'load5', 'load15', 'disk_json',
-  'net_rx_bps', 'net_tx_bps', 'uptime_sec',
+
+const INDEXES = [
+  'CREATE INDEX IF NOT EXISTS gpu_sample_ts_idx ON gpu_sample (ts)',
+  'CREATE INDEX IF NOT EXISTS gpu_sample_uuid_ts_idx ON gpu_sample (uuid, ts)',
+  'CREATE INDEX IF NOT EXISTS host_sample_ts_idx ON host_sample (ts)',
+  'CREATE INDEX IF NOT EXISTS gpu_process_ts_idx ON gpu_process (ts)',
 ];
-const PROCESS_COLUMNS = ['ts', 'node_id', 'uuid', 'gpu_index', 'pid', 'name', 'used_mem_mib'];
+
+const columnsOf = (table) => TABLES.find((item) => item.name === table).columns.map(([name]) => name);
+const GPU_COLUMNS = columnsOf('gpu_sample');
+const HOST_COLUMNS = columnsOf('host_sample');
+const PROCESS_COLUMNS = columnsOf('gpu_process');
+
+/**
+ * 建表 + 补列迁移。
+ * 老库缺哪些列就 ALTER TABLE 补上，已有数据不动——这样升级不用重建库。
+ * 注意 SQLite 的 ADD COLUMN 不接受 NOT NULL（除非常量默认值），所以只补可空列。
+ */
+function ensureSchema(db) {
+  for (const table of TABLES) {
+    const definition = table.columns.map(([name, type]) => `${name} ${type}`).join(', ');
+    db.exec(`CREATE TABLE IF NOT EXISTS ${table.name} (${definition})`);
+  }
+  for (const table of TABLES) {
+    const existing = new Set(db.prepare(`PRAGMA table_info(${table.name})`).all().map((row) => row.name));
+    for (const [name, type] of table.columns) {
+      if (existing.has(name) || type.includes('NOT NULL')) continue;
+      db.exec(`ALTER TABLE ${table.name} ADD COLUMN ${name} ${type}`);
+    }
+  }
+  for (const sql of INDEXES) db.exec(sql);
+}
 
 function pragmaValue(db, name) {
   try {
@@ -164,7 +194,7 @@ export async function createSqliteStore({
     }
   }
   db.exec('PRAGMA synchronous = NORMAL');
-  db.exec(SCHEMA);
+  ensureSchema(db);
 
   // 以文件头里的值为准，而不是当前连接缓存的值：连接里读到的可能是我们刚设的，
   // 但没真正落盘（老库就是这样），据此决定后面走增量回收还是整库重写
@@ -417,8 +447,12 @@ export async function createSqliteStore({
                    uuid, MAX(idx) AS idx, MAX(name) AS name,
                    AVG(mem_used_mib) AS mem_used_mib, MAX(mem_total_mib) AS mem_total_mib,
                    AVG(util_gpu_pct) AS util_gpu_pct, AVG(util_mem_pct) AS util_mem_pct,
-                   MAX(temp_c) AS temp_c, AVG(power_w) AS power_w, AVG(clock_sm_mhz) AS clock_sm_mhz,
-                   MAX(fan_pct) AS fan_pct, MAX(throttle_any) AS throttle_any
+                   MAX(temp_c) AS temp_c, AVG(power_w) AS power_w,
+                   AVG(clock_sm_mhz) AS clock_sm_mhz, AVG(clock_mem_mhz) AS clock_mem_mhz,
+                   MAX(fan_pct) AS fan_pct,
+                   MAX(pcie_gen) AS pcie_gen, MAX(pcie_width) AS pcie_width,
+                   AVG(enc_util_pct) AS enc_util_pct, AVG(dec_util_pct) AS dec_util_pct,
+                   MAX(throttle_any) AS throttle_any
             FROM gpu_sample
             WHERE ts >= ? AND ts <= ?
             GROUP BY bucket, uuid_c
@@ -430,7 +464,9 @@ export async function createSqliteStore({
       } else {
         rows = db.prepare(`
           SELECT ts, COALESCE(uuid, '') AS uuid_c, uuid, idx, name, mem_used_mib, mem_total_mib,
-                 util_gpu_pct, util_mem_pct, temp_c, power_w, clock_sm_mhz, pstate, fan_pct,
+                 util_gpu_pct, util_mem_pct, temp_c, power_w,
+                 clock_sm_mhz, clock_mem_mhz, pstate, fan_pct,
+                 pcie_gen, pcie_width, enc_util_pct, dec_util_pct,
                  throttle_mask, throttle_any
           FROM gpu_sample
           WHERE ts >= ? AND ts <= ? AND (ts, COALESCE(uuid, '')) > (?, ?)

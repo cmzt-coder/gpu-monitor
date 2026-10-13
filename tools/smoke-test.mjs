@@ -11,6 +11,7 @@ import { readGpuSnapshot, resolveGpuFields, parseGpuCsv, splitRow, defaultGpuFie
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
+  GPU_CSV_HEADER_FULL,
   SYSTEM_CSV_HEADER,
   gpuRowToCsv,
   samplesToCsv,
@@ -26,6 +27,7 @@ import { createMemoryStore } from '../src/store/store.js';
 import { gpuFromRow, packThrottle, processesSignature, systemFromRow, unpackThrottle } from '../src/store/rows.js';
 import { compare, normalizeRules, parseDuration } from '../src/alerts/rules.js';
 import { createAlertEngine } from '../src/alerts/engine.js';
+import { createAlertsRuntime } from '../src/alerts/runtime.js';
 import { expandEnv, loadAlertsConfig } from '../src/alerts/config.js';
 import { buildMessage, encodeHeader, sendMail } from '../src/notify/smtp.js';
 import { createNotifier } from '../src/notify/notifier.js';
@@ -663,6 +665,77 @@ legacyStore.close();
 removeDb(tmpDb);
 removeDb(legacyDb);
 
+/* ---------- 历史库：老库补列迁移 ---------- */
+const legacySchemaFile = path.join(os.tmpdir(), `gm-legacy-schema-${process.pid}.db`);
+removeDb(legacySchemaFile);
+{
+  // 手工造一个"旧版表结构"：没有 pcie / 编解码 / 显存时钟这些后加的列
+  const { DatabaseSync } = await import('node:sqlite');
+  const legacy = new DatabaseSync(legacySchemaFile);
+  legacy.exec(`CREATE TABLE gpu_sample (
+    ts INTEGER NOT NULL, node_id TEXT NOT NULL, uuid TEXT, idx INTEGER, name TEXT,
+    mem_used_mib REAL, mem_total_mib REAL, util_gpu_pct REAL, util_mem_pct REAL,
+    temp_c REAL, power_w REAL, clock_sm_mhz REAL, pstate TEXT, fan_pct REAL,
+    throttle_mask INTEGER, throttle_any INTEGER)`);
+  legacy.prepare('INSERT INTO gpu_sample (ts, node_id, uuid, idx, name, mem_used_mib, mem_total_mib) VALUES (?,?,?,?,?,?,?)')
+    .run(dbNow, 'n', 'g-old', 0, 'Old GPU', 1234, 2000);
+  legacy.close();
+}
+const migratedStore = await createSqliteStore({
+  file: legacySchemaFile, nodeId: 'test-node', storeIntervalMs: 1000, retentionDays: 0, now: () => dbNow,
+});
+// 查询语句本身引用了新列：如果迁移没生效，这里会直接抛 "no such column"
+const migratedSamples = migratedStore.querySamples({ from: dbNow - 1, to: dbNow + 1 });
+assert.equal(migratedSamples.samples[0].gpus[0].memUsedMiB, 1234, '升级后老数据必须还在');
+assert.equal(migratedSamples.samples[0].gpus[0].pcieGen, null, '补上的新列对老数据应为空');
+assert.equal(migratedSamples.samples[0].gpus[0].decUtilPct, null);
+assert.equal(migratedSamples.samples[0].gpus[0].clockMemMHz, null);
+
+// 新写入的扩展字段要能存下来、读回来
+migratedStore.appendSample({
+  t: dbNow + 1000,
+  gpus: [{
+    index: 1, uuid: 'g-new', name: 'New GPU', memUsedMiB: 1, memTotalMiB: 2, memUsedPct: 50,
+    pcieGen: 4, pcieWidth: 16, encUtilPct: 3, decUtilPct: 1, clockMemMHz: 9001, fanPct: 41,
+    pstate: 'P2', throttle: { swPowerCap: true },
+  }],
+  processes: [],
+  system: null,
+});
+migratedStore.flush();
+const extendedSample = migratedStore.querySamples({ from: dbNow + 500, to: dbNow + 2000 }).samples[0].gpus[0];
+assert.equal(extendedSample.pcieGen, 4);
+assert.equal(extendedSample.pcieWidth, 16);
+assert.equal(extendedSample.encUtilPct, 3);
+assert.equal(extendedSample.decUtilPct, 1);
+assert.equal(extendedSample.clockMemMHz, 9001);
+assert.equal(extendedSample.throttle.swPowerCap, true);
+migratedStore.close();
+removeDb(legacySchemaFile);
+
+/* ---------- 导出：扩展字段 ---------- */
+assert.ok(GPU_CSV_HEADER_FULL.startsWith(GPU_CSV_HEADER), '扩展表头要在基础表头之后追加');
+for (const column of ['pcie_gen', 'enc_util_pct', 'clock_mem_mhz', 'throttled']) {
+  assert.ok(GPU_CSV_HEADER_FULL.includes(column), `扩展表头缺少 ${column}`);
+}
+assert.equal(GPU_CSV_HEADER.includes('pcie_gen'), false, '默认表头不应被改动');
+const fullCsv = samplesToCsv([{
+  t: Date.UTC(2026, 0, 1),
+  gpus: [{
+    index: 0, name: 'A, B', memUsedMiB: 10, memTotalMiB: 20, memUsedPct: 50, utilGpuPct: 30,
+    utilMemPct: 40, tempC: 50, powerW: 60, clockSmMHz: 2500, clockMemMHz: 9001, pstate: 'P2',
+    fanPct: 41, pcieGen: 4, pcieWidth: 16, encUtilPct: 3, decUtilPct: 1, throttled: true,
+  }],
+}], { full: true });
+const fullLines = fullCsv.trim().split('\n');
+assert.equal(fullLines[0], GPU_CSV_HEADER_FULL);
+assert.ok(fullLines[1].endsWith(',2500,9001,P2,41,4,16,3,1,1'), `扩展列内容不对：${fullLines[1]}`);
+// 没拿到节流信息时留空，不要写成 0（那是"明确没有节流"的意思）
+assert.ok(
+  gpuRowToCsv('2026-01-01T00:00:00.000Z', { index: 0, name: 'X', throttled: null }, { full: true }).endsWith(','),
+  '节流信息未知时应留空',
+);
+
 /* ---------- 部署前自检 ---------- */
 const preflight = await runPreflight({
   gpuBin: FAKE_SMI,
@@ -1184,6 +1257,73 @@ assert.deepEqual(expandEnv({ a: ['${GM_TEST_SMTP_PASS}', 1] }), { a: ['secret', 
 delete process.env.GM_TEST_SMTP_PASS;
 assert.equal((await loadAlertsConfig('/nonexistent/alerts.json')).missing, true, '没有配置文件不算错误');
 assert.ok((await loadAlertsConfig(FAKE_SMI)).error, 'JSON 解析失败要给出原因');
+
+/* ---------- 告警运行时：热加载与"改坏了不丢告警" ---------- */
+const alertsFile = path.join(os.tmpdir(), `gm-alerts-${process.pid}.json`);
+const writeAlerts = (rules) => fs.writeFileSync(alertsFile, JSON.stringify({ enabled: true, cooldown: '5m', rules }));
+const runtimeBase = {
+  options: {
+    alerts: true,
+    alertsPath: alertsFile,
+    alertsDryRun: true,
+    alertsReload: false,
+    windowSamples: 300,
+    intervalMs: 1000,
+  },
+  collector: { subscribe: () => () => {}, getSamples: () => [] },
+  store: { supportsHistory: false },
+  logger: { warn() {}, info() {} },
+  watch: false,
+};
+
+writeAlerts([{ id: 'a', metric: 'tempC', op: '>=', threshold: 80, for: '1m' }]);
+const alertsRuntime = createAlertsRuntime(runtimeBase);
+await alertsRuntime.start();
+assert.equal(alertsRuntime.snapshot().enabled, true);
+assert.equal(alertsRuntime.snapshot().ruleCount, 1);
+assert.equal(alertsRuntime.snapshot().loaded, true, '装上规则后 loaded 必须为 true（启动横幅靠它判断）');
+assert.equal(alertsRuntime.snapshot().autoReload, false, '关掉监听时不应报告自动重载');
+
+// 改文件后重新加载：规则数随之变化
+writeAlerts([
+  { id: 'a', metric: 'tempC', op: '>=', threshold: 80, for: '1m' },
+  { id: 'b', metric: 'memUsedPct', op: '>=', threshold: 90, for: '2m' },
+  { id: 'c', metric: 'throttled', op: '==', value: true, for: '1m' },
+]);
+const reloaded = await alertsRuntime.reload();
+assert.equal(reloaded.reloaded, true);
+assert.equal(reloaded.ruleCount, 3);
+assert.equal(reloaded.previousRuleCount, 1);
+assert.ok(alertsRuntime.snapshot().reloadedAt, '应记录最近一次重新加载的时间');
+
+// 配置写坏：必须沿用上一次可用的规则，而不是静默变成"没有告警"
+fs.writeFileSync(alertsFile, '{ 这不是合法 JSON');
+const brokenReload = await alertsRuntime.reload();
+assert.equal(brokenReload.reloaded, false);
+assert.equal(alertsRuntime.snapshot().ruleCount, 3, '配置写坏时应沿用上一次的规则');
+assert.ok(alertsRuntime.snapshot().lastReloadError, '应把失败原因记下来');
+
+// 改回合法配置：恢复正常
+writeAlerts([{ id: 'x', metric: 'tempC', op: '>=', threshold: 80, for: '1m' }]);
+assert.equal((await alertsRuntime.reload()).reloaded, true);
+assert.equal(alertsRuntime.snapshot().ruleCount, 1);
+assert.equal(alertsRuntime.snapshot().lastReloadError, null);
+
+// 文件被删掉：同样保留上一次的规则
+fs.unlinkSync(alertsFile);
+assert.equal((await alertsRuntime.reload()).reloaded, false);
+assert.equal(alertsRuntime.snapshot().ruleCount, 1, '配置文件不存在时也应沿用上一次的规则');
+alertsRuntime.close();
+
+// --no-alerts 时要给出明确原因
+const noAlertsRuntime = createAlertsRuntime({
+  ...runtimeBase,
+  options: { ...runtimeBase.options, alerts: false },
+});
+await noAlertsRuntime.start();
+assert.equal(noAlertsRuntime.snapshot().enabled, false);
+assert.ok(noAlertsRuntime.snapshot().reason.includes('--no-alerts'));
+noAlertsRuntime.close();
 
 /* ---------- 通知渠道：dry-run 不真的发信 ---------- */
 const dryRunLogs = [];

@@ -11,12 +11,11 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 import { createCollector } from './src/collector.js';
-import { loadAlertsConfig } from './src/alerts/config.js';
-import { createAlertEngine } from './src/alerts/engine.js';
-import { createNotifier } from './src/notify/notifier.js';
+import { createAlertsRuntime } from './src/alerts/runtime.js';
 import { evaluateHealth } from './src/health.js';
 import {
   GPU_CSV_HEADER,
+  GPU_CSV_HEADER_FULL,
   SYSTEM_CSV_HEADER,
   gpuRowToCsv,
   samplesToCsv,
@@ -61,6 +60,7 @@ const HELP = `GPU 显存负载监控服务
       --alerts <路径>     告警配置文件（默认 alerts.json，不存在则不启用）
       --no-alerts         不启用告警
       --alerts-dry-run    只打印"本来要发什么"，不真正发信
+      --no-alerts-reload  关掉告警配置的热加载（默认改了 alerts.json 会自动重新加载）
 
 历史库（SQLite，Node 22.5+ 内置）：
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
@@ -96,6 +96,7 @@ function parseArgs(argv) {
     alerts: true,
     alertsPath: process.env.GPU_MONITOR_ALERTS || 'alerts.json',
     alertsDryRun: false,
+    alertsReload: true,
     diskTargets: [],
     db: true,
     dbPath: process.env.GPU_MONITOR_DB || path.join('data', 'gpu-monitor.db'),
@@ -155,6 +156,9 @@ function parseArgs(argv) {
       case '--alerts-dry-run':
         options.alertsDryRun = true;
         break;
+      case '--no-alerts-reload':
+        options.alertsReload = false;
+        break;
       case '--db':
         options.dbPath = next() || options.dbPath;
         break;
@@ -210,42 +214,21 @@ const collector = createCollector({
   // 告警状态由服务层持有，用这个钩子挂进状态里：
   // /api/state 与 SSE 推送共用同一份 getState()，不会出现"只有一条通道带告警"的情况
   extraState: () => ({
-    alerts: alertEngine ? alertEngine.snapshot() : { enabled: false },
+    alerts: alertsRuntime.snapshot(),
   }),
 });
 
 /* ---------- 告警 ---------- */
 
-const alertsLoad = options.alerts
-  ? await loadAlertsConfig(options.alertsPath)
-  : { config: null, path: options.alertsPath, error: null, disabled: true };
-
-const alertEngine = alertsLoad.config
-  ? createAlertEngine({
-    // 持续时长（for）的判定基准是内存窗口，默认取 采样点数 × 采集间隔
-    config: {
-      window: options.windowSamples * options.intervalMs,
-      intervalMs: options.intervalMs,
-      ...alertsLoad.config,
-    },
-    getSamples: () => collector.getSamples(options.windowSamples),
-    // for 超过内存窗口的规则改用历史库判定：
-    // 一次取够最宽的那条规则需要的区间，由引擎按 historyCache 周期缓存复用。
-    // 没有历史库（--no-db 或 Node 版本偏低）时传 null，引擎会退回"夹到窗口长度"的老行为。
-    history: store.supportsHistory
-      ? ({ from, to }) => store.querySamples({ from, to, stepMs: 0, pointLimit: 3000 })
-      : null,
-    notifier: createNotifier({
-      config: alertsLoad.config,
-      dryRun: options.alertsDryRun,
-    }),
-  })
-  : null;
-
-if (alertEngine) {
-  // 内部订阅者不算"有页面在看"，否则空闲降频永远不会生效
-  collector.subscribe((state) => alertEngine.evaluate(state), { countsAsViewer: false });
-}
+// 告警的装配与热加载都在这个 runtime 里：改了 alerts.json 会自动重新加载，
+// 配置写坏时沿用上一次可用的规则，不会静默失去告警
+const alertsRuntime = createAlertsRuntime({
+  options: { ...options, alertsReload: options.alertsReload },
+  collector,
+  store,
+  watch: options.alertsReload,
+});
+await alertsRuntime.start();
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -330,9 +313,9 @@ function resolveRange(url) {
   return from > to ? { from: to, to: from, requestedStep } : { from, to, requestedStep };
 }
 
-function* gpuCsvLines({ from, to }, step) {
+function* gpuCsvLines({ from, to }, step, { full = false } = {}) {
   for (const row of store.gpuPages({ from, to, step })) {
-    yield gpuRowToCsv(new Date(row.ts).toISOString(), gpuFromRow(row));
+    yield gpuRowToCsv(new Date(row.ts).toISOString(), gpuFromRow(row), { full });
   }
 }
 
@@ -414,7 +397,7 @@ const server = http.createServer(async (req, res) => {
     const health = evaluateHealth({
       state: collector.getState(),
       storage: store.stats(),
-      alerts: alertEngine ? alertEngine.snapshot() : null,
+      alerts: alertsRuntime.snapshot(),
       version: VERSION,
       probePath: options.db === false ? null : path.dirname(path.resolve(options.dbPath)),
     });
@@ -526,9 +509,33 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/api/export.csv') {
-    if (fromStore) {
-      const step = store.resolveStep(range.from, range.to, range.requestedStep);
-      await streamCsv(res, `gpu-monitor-${nodeId}-${stamp()}.csv`, GPU_CSV_HEADER, gpuCsvLines(range, step));
+    // fields=full 会带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流这些扩展列，
+    // 它们只存在历史库里（内存窗口只留了画曲线要用的字段），所以没有库就直接说清楚
+    const full = url.searchParams.get('fields') === 'full';
+    if (full && !store.supportsHistory) {
+      sendJson(res, 400, {
+        error: 'full_fields_unavailable',
+        message: '扩展字段只存在历史库里：请启用历史库（去掉 --no-db，并确保 Node ≥ 22.5）后重试',
+      });
+      return;
+    }
+    // 要扩展字段但没有指定区间时，按当前内存窗口对应的那段时间去库里取
+    const exportRange = range ?? (full
+      ? {
+        from: Date.now() - options.windowSamples * options.intervalMs,
+        to: Date.now(),
+        requestedStep: 0,
+      }
+      : null);
+    const exportFromStore = Boolean(exportRange && store.supportsHistory);
+    if (exportFromStore) {
+      const step = store.resolveStep(exportRange.from, exportRange.to, exportRange.requestedStep);
+      await streamCsv(
+        res,
+        `gpu-monitor${full ? '-full' : ''}-${nodeId}-${stamp()}.csv`,
+        full ? GPU_CSV_HEADER_FULL : GPU_CSV_HEADER,
+        gpuCsvLines(exportRange, step, { full }),
+      );
       return;
     }
     sendDownload(
@@ -584,15 +591,13 @@ server.listen(options.port, options.host, () => {
     : (store.supportsHistory
       ? `${store.stats().path}（每 ${options.storeIntervalMs} ms 落一行，保留 ${options.retentionDays > 0 ? `${options.retentionDays} 天` : '全部'}）`
       : `不可用：${store.reason || '未知原因'}`);
-  const alertsLine = !options.alerts
-    ? '已关闭（--no-alerts）'
-    : alertEngine
-      ? `${alertsLoad.path}（${alertEngine.rules.length} 条规则${options.alertsDryRun ? '，dry-run 不实际发信' : ''}${alertEngine.problems.length ? `，${alertEngine.problems.length} 条被跳过` : ''}）`
-      : alertsLoad.error
-        ? `配置有问题：${alertsLoad.error}`
-        : alertsLoad.disabled
-          ? `已关闭（配置里 enabled=false）`
-          : `未启用（没有找到 ${options.alertsPath}）`;
+  const alertsSnapshot = alertsRuntime.snapshot();
+  const alertsLine = alertsSnapshot.loaded
+    ? `${alertsSnapshot.configPath}（${alertsSnapshot.ruleCount} 条规则`
+      + `${options.alertsDryRun ? '，dry-run 不实际发信' : ''}`
+      + `${alertsSnapshot.problems?.length ? `，${alertsSnapshot.problems.length} 条被跳过` : ''}`
+      + `${alertsSnapshot.autoReload ? '，改动后自动重载' : ''}）`
+    : (alertsSnapshot.reason || '未启用');
   process.stdout.write(
     'GPU 显存负载监控已启动\n'
     + `  页面：   http://${shown}:${options.port}/\n`
@@ -639,6 +644,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    alertsRuntime.close();
     collector.stop();
     try {
       // 退出前把缓冲里的行落盘，避免最后几秒的数据丢掉

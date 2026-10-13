@@ -14,6 +14,20 @@ const GPU_HEADERS = [
 
 export const GPU_CSV_HEADER = GPU_HEADERS.join(',');
 
+// 导出扩展字段时追加的列：这些数据都在库里，但默认 CSV 里没有
+const GPU_FULL_HEADERS = [
+  'clock_sm_mhz',
+  'clock_mem_mhz',
+  'pstate',
+  'fan_pct',
+  'pcie_gen',
+  'pcie_width',
+  'enc_util_pct',
+  'dec_util_pct',
+  'throttled',
+];
+export const GPU_CSV_HEADER_FULL = `${GPU_CSV_HEADER},${GPU_FULL_HEADERS.join(',')}`;
+
 function cell(value) {
   if (value == null) return '';
   const text = String(value);
@@ -26,20 +40,20 @@ function round(value, digits = 1) {
   return Math.round(value * factor) / factor;
 }
 
-export function samplesToCsv(samples) {
-  const rows = [GPU_CSV_HEADER];
+export function samplesToCsv(samples, { full = false } = {}) {
+  const rows = [full ? GPU_CSV_HEADER_FULL : GPU_CSV_HEADER];
   for (const sample of samples) {
     const ts = new Date(sample.t).toISOString();
     for (const gpu of sample.gpus) {
-      rows.push(gpuRowToCsv(ts, gpu));
+      rows.push(gpuRowToCsv(ts, gpu, { full }));
     }
   }
   return `${rows.join('\n')}\n`;
 }
 
 /** 单独一行 GPU 记录，供"按时间区间流式导出"复用（不必先把整段数据读进内存） */
-export function gpuRowToCsv(timestampIso, gpu) {
-  return [
+export function gpuRowToCsv(timestampIso, gpu, { full = false } = {}) {
+  const base = [
     timestampIso,
     gpu.index,
     cell(gpu.name),
@@ -50,6 +64,20 @@ export function gpuRowToCsv(timestampIso, gpu) {
     round(gpu.utilMemPct, 1),
     gpu.tempC,
     round(gpu.powerW, 1),
+  ];
+  if (!full) return base.join(',');
+  return [
+    ...base,
+    round(gpu.clockSmMHz, 0),
+    round(gpu.clockMemMHz, 0),
+    cell(gpu.pstate),
+    round(gpu.fanPct, 0),
+    gpu.pcieGen ?? '',
+    gpu.pcieWidth ?? '',
+    round(gpu.encUtilPct, 1),
+    round(gpu.decUtilPct, 1),
+    // 节流导出成 0/1：空值表示这次采集没拿到节流信息，与"明确没有节流"区分开
+    gpu.throttled == null ? '' : (gpu.throttled ? 1 : 0),
   ].join(',');
 }
 

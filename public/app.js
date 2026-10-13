@@ -18,6 +18,7 @@ const refs = {
   btnCsv: $('btn-csv'),
   btnJson: $('btn-json'),
   btnSysCsv: $('btn-sys-csv'),
+  btnCsvFull: $('btn-csv-full'),
   kpiCount: $('kpi-count'),
   kpiCountFoot: $('kpi-count-foot'),
   kpiMem: $('kpi-mem'),
@@ -1335,8 +1336,12 @@ function describeStorage(meta) {
 function describeAlerts(meta) {
   const alerts = meta.alerts;
   if (!alerts) return '--';
-  if (!alerts.enabled) return alerts.problems?.length ? `未启用（${alerts.problems.join('；')}）` : '未启用（没有配置规则）';
+  if (!alerts.enabled) {
+    if (alerts.problems?.length) return `未启用（${alerts.problems.join('；')}）`;
+    return `未启用（${alerts.reason || '没有配置规则'}）`;
+  }
   const parts = [`${alerts.ruleCount} 条规则`];
+  if (alerts.autoReload) parts.push('改动自动生效');
   if (alerts.cooldownMs) parts.push(`抑制 ${Math.round(alerts.cooldownMs / 60000)} 分钟`);
   parts.push(alerts.firing.length ? `当前 ${alerts.firing.length} 条触发中` : '当前无告警');
   // 长周期（for 超过内存窗口）规则的判定数据来自哪里，值得写清楚
@@ -1407,6 +1412,12 @@ function render() {
   renderStatus();
   renderNotice(state.meta);
   renderAlerts(state.meta);
+  // 扩展字段导出依赖历史库，没有库就置灰并说明原因
+  const canFullExport = state.meta?.storage?.supportsHistory === true;
+  refs.btnCsvFull.disabled = !canFullExport;
+  refs.btnCsvFull.title = canFullExport
+    ? '导出当前范围内的 CSV，并带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流等扩展列'
+    : '扩展字段只存在历史库里，启用历史库后可用';
   renderKpis();
   renderCharts();
   renderSystemCard();
@@ -1509,11 +1520,12 @@ async function selectRange(value) {
   render();
 }
 
-function download(path) {
+function download(path, extra = {}) {
   // 导出范围跟随曲线选择：实时 → 内存窗口，历史区间 → 库里的对应区间
   const params = new URLSearchParams();
   if (state.range === 'live') params.set('limit', String(state.windowSamples));
   else params.set('range', state.range);
+  for (const [key, value] of Object.entries(extra)) params.set(key, String(value));
   const url = `${path}?${params.toString()}`;
   const link = document.createElement('a');
   link.href = url;
@@ -1524,6 +1536,8 @@ function download(path) {
 }
 
 refs.btnCsv.addEventListener('click', () => download('/api/export.csv'));
+// 扩展字段只存在历史库里，没有库时后端会返回 400，所以按钮直接置灰并给出原因
+refs.btnCsvFull.addEventListener('click', () => download('/api/export.csv', { fields: 'full' }));
 refs.btnSysCsv.addEventListener('click', () => download('/api/export.system.csv'));
 refs.btnJson.addEventListener('click', () => download('/api/export.json'));
 refs.btnRefresh.addEventListener('click', async () => {

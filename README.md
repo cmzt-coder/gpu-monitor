@@ -115,6 +115,7 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 - **抗抖动**：冷却期内不会重复通知，**包括"刚恢复又马上触发"的情况**；并且只有真的发出过"告警"，恢复正常时才会补一条"恢复"，不会出现没告警却收到恢复的怪邮件。
 - **覆盖不足会明说**：如果拿到数据的时间跨度不够规则要求的 `for`（比如服务刚上线、库里历史还不够长），告警照发，但文案会写成"仅覆盖 12 秒，不足规则要求的 5 分钟"，不会假装已经持续了那么久。
 - **密码建议放环境变量**：配置里支持 `${SMTP_PASS}` 这种占位符，写法是 `"pass": "${SMTP_PASS}"`，启动前 export 一下即可，不用把密码写进文件。若确实要写在文件里，记得 `chmod 600 alerts.json`。
+- **改完配置不用重启**：`alerts.json` 一保存就自动重新加载（监听目录，所以编辑器"写临时文件再改名"的保存方式也能识别）。**配置写坏时不会把告警弄丢**——沿用上一次可用的规则，并在日志和页面「采集信息 → 告警」里写明原因；监控系统最怕的就是自己悄悄失效。想关掉热加载用 `--no-alerts-reload`。
 
 先确认规则能不能触发、会发什么内容，用 `--alerts-dry-run`：只打印"本来要发什么"，不真的连 SMTP。
 
@@ -247,6 +248,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 | `--alerts` | `alerts.json` | 告警配置文件路径，文件不存在则不启用告警 |
 | `--no-alerts` | 关闭 | 不启用告警 |
 | `--alerts-dry-run` | 关闭 | 只打印将要发送的通知，不真正发信 |
+| `--no-alerts-reload` | 关闭 | 关掉告警配置热加载（默认改了 `alerts.json` 会自动重新加载） |
 | `--idle-after` | `30` | 多久（秒）没有页面访问就转入空闲降频，`0` 表示不降频 |
 | `--idle-interval` | `10000` | 空闲期间的采集间隔（毫秒） |
 | `--mock` | 关闭 | 用模拟数据启动，便于无 GPU 环境联调 |
@@ -263,7 +265,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 | `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
 | `GET /api/history?range=7d` | 历史区间（`3d` / `7d` / `30d` / `60d` / `90d` / `all`，或 `from`/`to`、`step`） |
 | `GET /api/processes?range=24h&limit=200` | 进程占用事件（谁在什么时候占上了哪张卡），区间写法同 `/api/history`，另返回 `total` 总数 |
-| `GET /api/export.csv` | 下载曲线原始数据（每行 = 一个采样点 × 一张卡） |
+| `GET /api/export.csv` | 下载曲线原始数据（每行 = 一个采样点 × 一张卡）；加 `&fields=full` 会带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流等扩展列（需要历史库） |
 | `GET /api/export.system.csv` | 下载宿主指标（每行 = 一个采样点；磁盘只导出第一个挂载点，完整明细在 JSON 里） |
 | `GET /api/export.json` | 下载当前完整状态 + 采样窗口 |
 
@@ -277,6 +279,8 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 原有的 `gpus`、`processes`、`platform`、`collector`、`error` 等字段语义未变，`/api/history` 的采样点新增了 `system` 字段。
 
 导出接口接受与 `/api/history` 相同的区间参数（`?range=7d` / `?from=…&to=…` / `?step=`），带区间时会**流式写出**——90 天那种几十万行的导出不会先整块读进内存。不带区间参数时行为与以前完全一致（导出内存窗口）。
+
+默认 CSV 的列是固定的（时间、卡号、名称、显存、利用率、温度、功耗）；加 `?fields=full` 会再追加 `clock_sm_mhz / clock_mem_mhz / pstate / fan_pct / pcie_gen / pcie_width / enc_util_pct / dec_util_pct / throttled` 九列（`throttled` 用 0/1 表示，空值代表这次采集没拿到节流信息）。这些扩展字段只存在历史库里，所以没有启用历史库时会返回 400 并说明原因。页面曲线卡片右侧的「扩展字段 CSV」按钮就是这个导出，没启用历史库时会自动置灰。
 
 ## 实现说明
 
