@@ -28,6 +28,14 @@ import { gpuFromRow, packThrottle, processesSignature, systemFromRow, unpackThro
 import { compare, normalizeRules, parseDuration } from '../src/alerts/rules.js';
 import { createAlertEngine } from '../src/alerts/engine.js';
 import { createAlertsRuntime } from '../src/alerts/runtime.js';
+import {
+  createProcessInfoReader,
+  parseCgroup,
+  parseCmdline,
+  parsePasswd,
+  parseUidStatus,
+  serviceLabel,
+} from '../src/procinfo.js';
 import { expandEnv, loadAlertsConfig } from '../src/alerts/config.js';
 import { buildMessage, encodeHeader, sendMail } from '../src/notify/smtp.js';
 import { createNotifier } from '../src/notify/notifier.js';
@@ -427,6 +435,104 @@ assert.equal(noSystemState.system, null);
 assert.equal(noSystemState.gpus.length, 1, '关掉宿主指标不影响 GPU 采集');
 noSystemCollector.stop();
 
+/* ---------- 进程归属：cgroup / 用户 / 命令行的解析 ---------- */
+// 用例取自真实服务器（一台跑着 vLLM 容器与 Schrödinger 作业的 A100 机器）
+const dockerVllm = parseCgroup('0::/system.slice/docker-f82ea7a094268cae1962222556278877e19ff221f3972aa7bfc89201615ba040.scope');
+assert.equal(dockerVllm.containerId, 'f82ea7a094268cae1962222556278877e19ff221f3972aa7bfc89201615ba040');
+assert.equal(dockerVllm.unit, null, '容器的 .scope 不应被当成 systemd 服务');
+assert.equal(dockerVllm.session, false);
+assert.deepEqual(
+  serviceLabel({ ...dockerVllm, containerName: 'vllm-server' }),
+  { kind: 'container', label: '容器 vllm-server' },
+);
+assert.deepEqual(serviceLabel({ ...dockerVllm }), { kind: 'container', label: '容器 f82ea7a09426' }, '拿不到容器名时退回短 ID');
+
+const userSession = parseCgroup('0::/user.slice/user-1004.slice/session-225.scope');
+assert.equal(userSession.session, true);
+assert.equal(userSession.containerId, null);
+assert.deepEqual(serviceLabel(userSession), { kind: 'session', label: '用户会话' });
+
+const systemService = parseCgroup('0::/system.slice/vllm.service');
+assert.equal(systemService.unit, 'vllm.service');
+assert.deepEqual(serviceLabel(systemService), { kind: 'systemd', label: 'vllm.service' });
+
+// cgroup v1 的写法：层级:控制器:路径
+const v1Docker = parseCgroup('11:pids:/docker/5901ee3472d59a8a04000546df4471d918987ff301b57d547c43dd7ec43c4178');
+assert.equal(v1Docker.containerId, '5901ee3472d59a8a04000546df4471d918987ff301b57d547c43dd7ec43c4178');
+
+// Kubernetes：既能认出容器，也能认出 Pod
+const k8s = parseCgroup('0::/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod1a2b3c4d-1111-2222-3333-444455556666.slice/cri-containerd-1111222233334444555566667777888899990000111122223333444455556666.scope');
+assert.equal(k8s.podId, '1a2b3c4d-1111-2222-3333-444455556666');
+assert.equal(k8s.containerId, '1111222233334444555566667777888899990000111122223333444455556666');
+
+// 既不是容器也不是服务：留空，不要编一个
+assert.deepEqual(serviceLabel(parseCgroup('0::/')), { kind: null, label: null });
+assert.equal(parseCgroup('').containerId, null);
+
+assert.equal(parseUidStatus('Name:\tpython3\nUid:\t1004\t1004\t1004\t1004\nGid:\t1004\t1004\t1004\t1004\n'), 1004);
+assert.equal(parseUidStatus('Name:\tx\n'), null);
+assert.equal(parsePasswd('root:x:0:0:root:/root:/bin/bash\njklei:x:1004:1004::/home/jklei:/bin/bash\n').get(1004), 'jklei');
+const mineruCmdline = Buffer.from(`${['/usr/bin/python3', '/usr/local/bin/mineru-api', '--port', '8000'].join('\0')}\0`);
+assert.equal(parseCmdline(mineruCmdline), '/usr/bin/python3 /usr/local/bin/mineru-api --port 8000', 'NUL 分隔的命令行要拼回一行');
+assert.equal(parseCmdline(Buffer.from('VLLM::EngineCore\0')), 'VLLM::EngineCore', '改写过标题的进程命令行只有这一个词');
+assert.equal(parseCmdline(Buffer.from('\0')), null);
+assert.ok(parseCmdline(Buffer.from('x'.repeat(400))).endsWith('…'), '过长的命令行要截断');
+
+// 端到端（注入假文件）：读 /proc → 解析 cgroup → 解析容器名 → 取用户
+const fakePid = 41381;
+const fakeContainerId = 'f82ea7a094268cae1962222556278877e19ff221f3972aa7bfc89201615ba040';
+const fakeFiles = {
+  [`/proc/${fakePid}/cgroup`]: `0::/system.slice/docker-${fakeContainerId}.scope`,
+  [`/proc/${fakePid}/status`]: 'Name:\tpython3\nUid:\t0\t0\t0\t0\n',
+  [`/proc/${fakePid}/cmdline`]: Buffer.from('VLLM::EngineCore\0'),
+  '/etc/passwd': 'root:x:0:0:root:/root:/bin/bash\njklei:x:1004:1004::/home/jklei:/bin/bash\n',
+  [`/var/lib/docker/containers/${fakeContainerId}/config.v2.json`]: JSON.stringify({ Name: '/vllm-server' }),
+};
+let fakeReads = 0;
+const infoReader = createProcessInfoReader({
+  platform: 'linux',
+  readFile: async (file) => {
+    fakeReads += 1;
+    if (file in fakeFiles) return fakeFiles[file];
+    throw new Error(`ENOENT: ${file}`);
+  },
+  exec: async () => {
+    throw new Error('docker 命令不可用（应该走元数据文件这条路）');
+  },
+  now: () => 1_000_000,
+});
+assert.equal(infoReader.supported, true);
+const enrichedProcesses = await infoReader.enrich([{ pid: fakePid, name: 'VLLM::EngineCore', usedMemMiB: 8502 }]);
+assert.equal(enrichedProcesses[0].service, '容器 vllm-server');
+assert.equal(enrichedProcesses[0].serviceKind, 'container');
+assert.equal(enrichedProcesses[0].user, 'root');
+assert.equal(enrichedProcesses[0].containerName, 'vllm-server');
+assert.equal(enrichedProcesses[0].cmdline, 'VLLM::EngineCore');
+assert.equal(enrichedProcesses[0].name, 'VLLM::EngineCore', '原有字段不能被改动');
+assert.equal(enrichedProcesses[0].usedMemMiB, 8502);
+
+// 同一个 pid 在缓存期内不重复读 /proc
+const readsAfterFirst = fakeReads;
+await infoReader.enrich([{ pid: fakePid, name: 'VLLM::EngineCore' }]);
+assert.equal(fakeReads, readsAfterFirst, '缓存期内不应重复读 /proc');
+
+// 读不到 /proc（权限/不存在）时要原样返回，而不是把采集打断
+const blindReader = createProcessInfoReader({
+  platform: 'linux',
+  readFile: async () => { throw new Error('EACCES'); },
+  exec: async () => { throw new Error('docker 不可用'); },
+  now: () => 1_000_000,
+});
+const blindResult = await blindReader.enrich([{ pid: 1, name: 'x' }]);
+assert.equal(blindResult[0].service, null);
+assert.equal(blindResult[0].user, null);
+assert.equal(blindResult[0].name, 'x');
+
+// 非 Linux 平台直接原样返回
+const macReader = createProcessInfoReader({ platform: 'darwin' });
+assert.equal(macReader.supported, false);
+assert.deepEqual(await macReader.enrich([{ pid: 1, name: 'x' }]), [{ pid: 1, name: 'x' }]);
+
 /* ---------- 历史库：行映射与节流位掩码 ---------- */
 assert.equal(packThrottle(null), null, '驱动没报节流信息时应存 null');
 assert.equal(packThrottle({ swPowerCap: false, hwThermal: false }), 0, '明确没有节流应存 0，与"未知"区分开');
@@ -491,7 +597,10 @@ const gpuAt = (i) => ({
   fanPct: 40,
   throttle: { swPowerCap: i === 2, hwThermal: false, gpuIdle: false },
 });
-const procAt = (pid) => [{ gpuUuid: 'GPU-test', gpuIndex: 0, pid, name: 'train.py', usedMemMiB: 90 }];
+const procAt = (pid) => [{
+  gpuUuid: 'GPU-test', gpuIndex: 0, pid, name: 'train.py', usedMemMiB: 90,
+  service: '容器 vllm-server', user: 'root',
+}];
 const hostAt = (i) => ({
   cpu: { usagePct: 10 + i },
   mem: { usedMiB: 500, totalMiB: 1000, usedPct: 50 },
@@ -572,6 +681,8 @@ const procEvents = sqliteStore.queryProcesses({ from: dbNow - 1, to: dbNow + 100
 assert.equal(procEvents.length, 4, '只写首次、定时快照与身份变化，不再逐点刷重复行');
 assert.equal(procEvents[0].pid, 7, '最新一条是切回来的进程');
 assert.ok(procEvents.some((event) => event.pid === 9), '进程切换也要留档');
+assert.equal(procEvents[0].service, '容器 vllm-server', '服务归属要跟着进程一起落库');
+assert.equal(procEvents[0].user, 'root');
 assert.equal(
   sqliteStore.countProcesses({ from: dbNow - 1, to: dbNow + 10000 }),
   procEvents.length,

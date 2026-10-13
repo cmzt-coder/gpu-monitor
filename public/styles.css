@@ -351,6 +351,24 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .table .mem-strong { font-weight: 600; }
 .table .mem-sub { color: var(--jf-color-ink-muted); font-size: 12.5px; }
 
+/* 服务归属：容器 / systemd 单元 / 用户会话，颜色只做轻微区分 */
+.table .service-tag {
+  display: inline-block;
+  max-width: 220px;
+  padding: 2px 8px;
+  border-radius: var(--jf-radius-sm);
+  background: var(--jf-color-surface-muted);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.table .service-tag[data-kind="container"] { background: #e7f2fb; color: var(--jf-color-primary-hover); }
+.table .service-tag[data-kind="systemd"] { background: #e9f6f4; color: #1f6d63; }
+.table .service-tag[data-kind="session"] { background: #fdf7e8; color: var(--jf-color-warning); }
+.table .service-tag[data-kind="none"] { background: none; color: var(--jf-color-ink-muted); }
+
 /* ---------- 各卡当前占用 ---------- */
 .gpu-cards { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
 

@@ -73,6 +73,8 @@ const TABLES = [
       ['pid', 'INTEGER'],
       ['name', 'TEXT'],
       ['used_mem_mib', 'REAL'],
+      ['service', 'TEXT'],
+      ['user_name', 'TEXT'],
     ],
   },
 ];
@@ -572,7 +574,7 @@ export async function createSqliteStore({
 
   function queryProcesses({ from, to, limit = 5000 } = {}) {
     return db.prepare(`
-      SELECT ts, uuid, gpu_index, pid, name, used_mem_mib
+      SELECT ts, uuid, gpu_index, pid, name, used_mem_mib, service, user_name
       FROM gpu_process
       WHERE ts >= ? AND ts <= ?
       ORDER BY ts DESC
@@ -584,6 +586,8 @@ export async function createSqliteStore({
       pid: row.pid,
       name: row.name,
       usedMemMiB: row.used_mem_mib,
+      service: row.service,
+      user: row.user_name,
     }));
   }
 

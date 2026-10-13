@@ -6,12 +6,47 @@ const MOCK_NAMES = [
   'NVIDIA L40S',
 ];
 
-const MOCK_PROCESS_NAMES = [
-  '/usr/bin/python3 -m vllm.entrypoints.api_server',
-  '/usr/bin/python3 train.py --config cfg/a.yaml',
-  '/usr/local/bin/ollama serve',
-  '/usr/bin/python3 -m torch.distributed.run',
-  '/opt/jupyter/bin/python3 -m ipykernel_launcher',
+// 进程也带上"服务归属"，让 --mock 下的表格和真机一致（容器 / systemd / 用户会话都要覆盖到）
+const MOCK_PROCESSES = [
+  {
+    name: '/usr/bin/python3 -m vllm.entrypoints.api_server',
+    service: '容器 vllm-server',
+    serviceKind: 'container',
+    containerId: 'f82ea7a094268cae1962222556278877e19ff221f3972aa7bfc89201615ba040',
+    containerName: 'vllm-server',
+    user: 'root',
+    cmdline: 'python3 -m vllm.entrypoints.openai.api_server --model Qwen3-32B --tensor-parallel-size 2',
+  },
+  {
+    name: '/usr/bin/python3 train.py --config cfg/a.yaml',
+    service: 'train.service',
+    serviceKind: 'systemd',
+    user: 'ztlu',
+    cmdline: '/usr/bin/python3 train.py --config cfg/a.yaml --epochs 30',
+  },
+  {
+    name: '/usr/local/bin/ollama serve',
+    service: '用户会话',
+    serviceKind: 'session',
+    user: 'jklei',
+    cmdline: '/usr/local/bin/ollama serve',
+  },
+  {
+    name: '/usr/bin/python3 -m torch.distributed.run',
+    service: '容器 torchrun',
+    serviceKind: 'container',
+    containerName: 'torchrun',
+    user: 'root',
+    cmdline: 'torchrun --nproc_per_node=4 train.py --config cfg/b.yaml',
+  },
+  {
+    name: '/opt/jupyter/bin/python3 -m ipykernel_launcher',
+    // 手动启动、又没有容器身份的进程：这里就该留空，而不是编一个服务名
+    service: null,
+    serviceKind: null,
+    user: 'ztlu',
+    cmdline: '/opt/jupyter/bin/python3 -m ipykernel_launcher -f /tmp/kernel-8f2.json',
+  },
 ];
 
 export function createMockSource({
@@ -82,11 +117,12 @@ export function createMockSource({
     const processes = gpus
       .map((gpu, i) => {
         if (gpu.memUsedPct < 12) return null;
+        const mock = MOCK_PROCESSES[i % MOCK_PROCESSES.length];
         return {
           gpuUuid: gpu.uuid,
           gpuIndex: gpu.index,
           pid: 10000 + i * 137,
-          name: MOCK_PROCESS_NAMES[i % MOCK_PROCESS_NAMES.length],
+          ...mock,
           usedMemMiB: Math.round(gpu.memUsedMiB * 0.82),
         };
       })

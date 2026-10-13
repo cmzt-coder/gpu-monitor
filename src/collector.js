@@ -6,6 +6,7 @@ import os from 'node:os';
 import { History } from './history.js';
 import { detectPlatform, resolveNvidiaSmi } from './platform.js';
 import { BASE_FIELDS, defaultGpuFields, readGpuSnapshot, resolveGpuFields } from './nvidia.js';
+import { createProcessInfoReader } from './procinfo.js';
 import { createSystemCollector } from './system.js';
 
 // 探测失败后每隔这么久再试一次，这样后装驱动/挂载显卡后不用重启服务
@@ -51,6 +52,8 @@ export function createCollector({
   now = Date.now,
   // 让上层往状态里补字段（比如告警）。统一走这里，/api/state 与 SSE 推送才不会各补一份、慢慢跑偏
   extraState = null,
+  // 进程信息补全（服务归属 / 运行用户 / 完整命令行），Linux 上从 /proc 读
+  processInfo = createProcessInfoReader({ platform: platform.id }),
 }) {
   const history = new History(options.windowSamples);
   const system = systemCollector === undefined
@@ -173,6 +176,15 @@ export function createCollector({
           timeout: Math.max(3000, options.intervalMs * 4),
           fields: probe.fields,
         });
+      }
+
+      // 补上"这个进程属于哪个服务/容器/用户"：失败时原样返回，不影响采集
+      if (processInfo?.supported && snapshot.processes?.length) {
+        try {
+          snapshot.processes = await processInfo.enrich(snapshot.processes);
+        } catch {
+          // 读 /proc 失败不是致命问题，页面上这几列留空即可
+        }
       }
 
       let systemSample = null;

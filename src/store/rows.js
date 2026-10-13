@@ -95,6 +95,8 @@ export function processRows(nodeId, ts, processes) {
     pid: proc.pid ?? null,
     name: proc.name ?? null,
     used_mem_mib: proc.usedMemMiB ?? null,
+    service: proc.service ?? null,
+    user_name: proc.user ?? null,
   }));
 }
 

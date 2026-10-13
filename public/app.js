@@ -1150,7 +1150,7 @@ function renderProcTable() {
     tdRatio.className = 'num mem-sub';
     tdRatio.textContent = ratio == null ? '--' : fmtPct(ratio, 1);
 
-    tr.append(tdGpu, tdPid, tdName, tdMem, tdRatio);
+    tr.append(tdGpu, tdPid, tdName, serviceCell(proc), tdMem, tdRatio);
     refs.procBody.appendChild(tr);
   }
 
@@ -1199,6 +1199,28 @@ function procNameCell(name) {
   span.textContent = name || '未知进程';
   td.appendChild(span);
   td.title = name || '';
+  return td;
+}
+
+/**
+ * 「服务」列：容器名 / systemd 单元 / 用户会话，都拿不到时留一个短横线。
+ * 悬停给出运行用户与完整命令行——命令行往往最能说明这是哪个业务。
+ */
+function serviceCell(proc) {
+  const td = document.createElement('td');
+  const tag = document.createElement('span');
+  tag.className = 'service-tag';
+  tag.textContent = proc.service || '–';
+  if (proc.serviceKind) tag.dataset.kind = proc.serviceKind;
+  if (!proc.service) tag.dataset.kind = 'none';
+  td.appendChild(tag);
+
+  const hints = [
+    proc.user ? `运行用户：${proc.user}` : null,
+    proc.cmdline && proc.cmdline !== proc.name ? `命令行：${proc.cmdline}` : null,
+    proc.containerId && !proc.containerName ? `容器 ID：${proc.containerId}` : null,
+  ].filter(Boolean);
+  if (hints.length) td.title = hints.join('\n');
   return td;
 }
 
@@ -1280,6 +1302,7 @@ function renderProcHistory() {
       gpuTagCell(event.gpuIndex),
       textCell(event.pid == null ? '--' : String(event.pid)),
       procNameCell(event.name),
+      serviceCell(event),
       textCell(fmtMiB(event.usedMemMiB), 'num mem-strong'),
     );
     refs.procHistBody.appendChild(tr);
