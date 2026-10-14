@@ -530,6 +530,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .alerts__rule-cond { color: var(--jf-color-ink-muted); }
 .alerts__rule-state { color: var(--jf-color-success); font-size: 12.5px; }
 .alerts__rule-state[data-state="firing"] { color: var(--jf-color-danger); font-weight: 600; }
+/* 阈值顺序反了的提示独占一行，别和规则名挤在一起 */
+.alerts__rule-note { flex-basis: 100%; color: var(--jf-color-danger); font-size: 12.5px; }
 /* 规则清单里的级别标签用描边样式：整页 11 条都刷成实心色块太吵 */
 .alerts__rule .alerts__level {
   background: transparent;

@@ -8,7 +8,8 @@
 //   for 超过内存窗口 → 查历史库（可用时），按缓存周期刷新，一条 SQL 覆盖所有长周期规则。
 // 没有历史库时，长周期规则的 for 会被夹到窗口长度，并在启动日志里提示。
 import {
-  METRICS, compare, normalizeRules, parseDuration, readGpuMetric, readHostMetric, readServiceMetric,
+  METRICS, compare, findThresholdConflicts, normalizeRules, parseDuration,
+  readGpuMetric, readHostMetric, readServiceMetric,
 } from './rules.js';
 
 function formatValue(value, rule) {
@@ -39,6 +40,8 @@ export function createAlertEngine({
   logger = console,
 } = {}) {
   const { rules, problems } = normalizeRules(config);
+  // 阈值顺序反了不算"规则有问题"（照常判定），但必须让人知道
+  const warnings = findThresholdConflicts(rules);
   const cooldownMs = parseDuration(config.cooldown, 600000);
   const windowMs = parseDuration(config.window, 0);
   const intervalMs = Number(config.intervalMs) > 0 ? Number(config.intervalMs) : 1000;
@@ -73,6 +76,9 @@ export function createAlertEngine({
 
   for (const problem of problems) {
     logger.warn?.(`[gpu-monitor] 告警规则被跳过：${problem}`);
+  }
+  for (const item of warnings) {
+    logger.warn?.(`[gpu-monitor] 告警阈值可疑：${item.message}`);
   }
   for (const rule of rules) {
     if (windowMs > 0 && rule.forMs > windowMs && !history) {
@@ -352,6 +358,7 @@ export function createAlertEngine({
         enabled: rules.length > 0,
         ruleCount: rules.length,
         problems,
+        warnings,
         cooldownMs,
         windowMs,
         // 规则清单：零触发时页面也要能说清"在盯什么"。

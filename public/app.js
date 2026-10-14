@@ -530,6 +530,7 @@ function renderAlerts(meta) {
   const badges = [];
   if (alerts.dryRun) badges.push('dry-run：只打印不发送');
   if (alerts.problems?.length) badges.push(`${alerts.problems.length} 条规则被跳过`);
+  if (alerts.warnings?.length) badges.push(`${alerts.warnings.length} 条规则阈值可疑`);
   if (alerts.lastReloadError) badges.push('配置有误，仍在用上一次的规则');
   refs.alertsBadge.textContent = badges.join(' · ');
   refs.alertsBadge.hidden = badges.length === 0;
@@ -566,6 +567,11 @@ function renderAlerts(meta) {
   refs.alertsRules.hidden = rules.length === 0;
   refs.alertsRulesSummary.textContent = `规则清单（${rules.length}）`;
   refs.alertsRuleList.replaceChildren();
+  const ruleNotes = new Map();
+  for (const item of alerts.warnings || []) {
+    if (!ruleNotes.has(item.ruleId)) ruleNotes.set(item.ruleId, []);
+    ruleNotes.get(item.ruleId).push(item.message);
+  }
   for (const rule of rules) {
     const item = document.createElement('li');
     item.className = 'alerts__rule';
@@ -596,6 +602,13 @@ function renderAlerts(meta) {
       state.textContent = '正常';
     }
     item.append(level, text, state);
+    // 阈值顺序反了照常判定，但得让人看见，否则真出事时只会收到警告那条
+    for (const note of ruleNotes.get(rule.id) || []) {
+      const warn = document.createElement('span');
+      warn.className = 'alerts__rule-note';
+      warn.textContent = `⚠ ${note}`;
+      item.append(warn);
+    }
     refs.alertsRuleList.appendChild(item);
   }
 }

@@ -1226,6 +1226,59 @@ assert.equal(compare(89, { op: '>=', threshold: 90 }), false);
 assert.equal(compare(true, { op: '==', value: true }), true);
 assert.equal(compare(null, { op: '>=', threshold: 1 }), false, '取不到值时不应误判');
 
+// 阈值顺序反了：规则照常判定，但必须在加载时说出来——否则真出事时只会收到警告那条，
+// 配置看着还挺合理（把显存警告线从 85% 放宽到 95%，却忘了严重线还在 93%）
+const quietLogger = { warn() {}, info() {}, error() {} };
+const conflicting = createAlertEngine({
+  config: {
+    rules: [
+      { id: 'vram-warn', metric: 'memUsedPct', op: '>=', threshold: 95, level: 'warning' },
+      { id: 'vram-critical', metric: 'memUsedPct', op: '>=', threshold: 93, level: 'critical' },
+    ],
+  },
+  getSamples: () => [],
+  logger: quietLogger,
+});
+assert.equal(conflicting.snapshot().warnings.length, 1, '严重线比警告线更靠内要报出来');
+assert.equal(conflicting.snapshot().warnings[0].ruleId, 'vram-critical', '提示要挂在真正不会先响的那条上');
+assert.ok(conflicting.snapshot().warnings[0].message.includes('永远不会先响'));
+assert.equal(conflicting.snapshot().ruleCount, 2, '顺序反了不算规则有问题，照常判定');
+assert.equal(conflicting.snapshot().problems.length, 0);
+
+const ordered = createAlertEngine({
+  config: {
+    rules: [
+      { id: 'vram-warn', metric: 'memUsedPct', op: '>=', threshold: 95, level: 'warning' },
+      { id: 'vram-critical', metric: 'memUsedPct', op: '>=', threshold: 98, level: 'critical' },
+      // 阈值相等属于"两条一起响"，不算顺序反了
+      { id: 'disk-warn', metric: 'hostDiskUsedPct', op: '>=', threshold: 92, level: 'warning' },
+      { id: 'disk-critical', metric: 'hostDiskUsedPct', op: '>=', threshold: 92, level: 'critical' },
+      // 不同服务范围之间不该互相比较
+      { id: 'svc-warn', metric: 'serviceMemMiB', op: '>=', threshold: 20000, level: 'warning', service: 'vllm-embed' },
+      { id: 'svc-critical', metric: 'serviceMemMiB', op: '>=', threshold: 18000, level: 'critical', service: 'mineru' },
+      // 布尔量与 == 没有"更严重"的方向，跳过
+      { id: 'throttled', metric: 'throttled', op: '==', value: true, level: 'critical' },
+    ],
+  },
+  getSamples: () => [],
+  logger: quietLogger,
+});
+assert.equal(ordered.snapshot().warnings.length, 0, '顺序正确、阈值相等、跨服务范围都不该报');
+
+// 越小越严重的指标也要看方向
+const lowerIsWorse = createAlertEngine({
+  config: {
+    rules: [
+      { id: 'free-warn', metric: 'memUsedMiB', op: '<=', threshold: 1000, level: 'warning' },
+      { id: 'free-critical', metric: 'memUsedMiB', op: '<=', threshold: 2000, level: 'critical' },
+    ],
+  },
+  getSamples: () => [],
+  logger: quietLogger,
+});
+assert.equal(lowerIsWorse.snapshot().warnings.length, 1, '<= 方向下严重线必须更小');
+assert.equal(lowerIsWorse.snapshot().warnings[0].ruleId, 'free-critical');
+
 /* ---------- 告警：判定、抑制与恢复 ---------- */
 let alertClock = 1_000_000;
 let alertSamples = [];

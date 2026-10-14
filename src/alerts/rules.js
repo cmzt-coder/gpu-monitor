@@ -143,3 +143,43 @@ export function readServiceMetric(sample, serviceName, metric) {
   if (metric === 'serviceSharePct') return entry.sharePct ?? null;
   return undefined;
 }
+
+/**
+ * 找出"警告线比严重线还严格"的规则。
+ *
+ * 同一个指标、同一个服务范围、同一个比较方向下，严重那条的阈值必须比警告那条更靠外，
+ * 否则严重告警永远不会先响——配置看着没问题，真出事时只收到警告，属于最典型的静默失效。
+ * 这类问题不会让规则被跳过，所以只能在加载时说一句。
+ */
+export function findThresholdConflicts(rules = []) {
+  const groups = new Map();
+  for (const rule of rules) {
+    // 布尔量（节流 / 采集状态）和 == / != 没有"更严重"的方向，不参与比较
+    if (!['>', '>=', '<', '<='].includes(rule.op)) continue;
+    if (typeof rule.threshold !== 'number') continue;
+    const key = `${rule.metric}|${rule.scope}|${rule.service || ''}|${rule.op}`;
+    if (!groups.has(key)) groups.set(key, { warning: [], critical: [] });
+    groups.get(key)[rule.level].push(rule);
+  }
+
+  const conflicts = [];
+  for (const { warning, critical } of groups.values()) {
+    for (const warn of warning) {
+      for (const crit of critical) {
+        // 越大越严重的方向（> / >=）要求严重线更高；反过来要求严重线更低。
+        // 阈值相等不算：那种情况两条会同时响，虽然冗余，但严重那条并没有被"藏起来"。
+        const biggerIsWorse = warn.op.startsWith('>');
+        const inverted = biggerIsWorse
+          ? crit.threshold < warn.threshold
+          : crit.threshold > warn.threshold;
+        if (!inverted) continue;
+        conflicts.push({
+          ruleId: crit.id,
+          message: `${crit.id} 是严重规则（${crit.op} ${crit.threshold}），`
+            + `却比警告规则 ${warn.id}（${warn.op} ${warn.threshold}）更靠内，严重告警永远不会先响`,
+        });
+      }
+    }
+  }
+  return conflicts;
+}
