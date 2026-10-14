@@ -22,6 +22,7 @@ import {
   processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
+  serverTimeZone,
   systemRowToCsv,
 } from './src/export.js';
 import { createMockSource, createMockSystem } from './src/mock.js';
@@ -266,6 +267,9 @@ const collector = createCollector({
     // 近 1 小时的利用率均值（跨时间、跨卡）。放服务端算：一条 SQL 聚合就够，
     // 不必让每个打开的页面各自拉一小时的原始数据回来自己平均
     utilAverage: utilAverageState(),
+    // 导出里的 time_local 用的是这个时区（服务器本地）。页面把它写进导出说明，
+    // 免得浏览器和服务器不在同一个时区时，看到的时间对不上还以为是数据错了
+    timeZone: serverTimeZone(),
   }),
 });
 
@@ -366,19 +370,19 @@ function resolveRange(url) {
 
 function* gpuCsvLines({ from, to }, step, { full = false } = {}) {
   for (const row of store.gpuPages({ from, to, step })) {
-    yield gpuRowToCsv(new Date(row.ts).toISOString(), gpuFromRow(row), { full });
+    yield gpuRowToCsv(row.ts, gpuFromRow(row), { full });
   }
 }
 
 function* systemCsvLines({ from, to }, step) {
   for (const row of store.hostPages({ from, to, step })) {
-    yield systemRowToCsv(new Date(row.ts).toISOString(), systemFromRow(row));
+    yield systemRowToCsv(row.ts, systemFromRow(row));
   }
 }
 
 function* processCsvLines({ from, to }) {
   for (const row of store.processPages({ from, to })) {
-    yield processRowToCsv(new Date(row.ts).toISOString(), processFromRow(row));
+    yield processRowToCsv(row.ts, processFromRow(row));
   }
 }
 

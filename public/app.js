@@ -40,6 +40,7 @@ const refs = {
   exportFullGroup: $('export-full-group'),
   exportFull: $('export-full'),
   exportFullHint: $('export-full-hint'),
+  exportTimeHint: $('export-time-hint'),
   exportSummary: $('export-summary'),
   kpiCount: $('kpi-count'),
   kpiCountFoot: $('kpi-count-foot'),
@@ -2317,6 +2318,13 @@ function syncExportPanel() {
       ? '扩展字段只存在历史库里，导出会比基础列多一点时间（流式写出）'
       : '需要历史库：当前不可用，只导出基础列')
     : '只有 GPU 曲线有扩展指标';
+
+  // 时间列有两列，说清楚各自是谁——否则用 Excel 打开看到的是 UTC，会以为数据错了
+  const zone = state.meta?.timeZone;
+  refs.exportTimeHint.textContent = item.format === 'CSV'
+    ? `时间有两列：time_local 是服务器本地时间${zone ? `（${zone}）` : ''}，Excel 直接认成日期时间；`
+      + 'timestamp_iso 是 UTC，脚本和跨时区对齐用'
+    : '';
 
   const parts = [`${item.label}（${item.format}）`];
   if (canFull && exportChoice.full) parts.push('含扩展指标');

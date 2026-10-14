@@ -1,5 +1,60 @@
 // 把内存中的采样窗口导出为 CSV（每张卡每一刻的显存与利用率原始数据）
+//
+// 时间有两列，不是一个失误：
+//   time_local     2026-10-14 14:25:03   服务器本地时间，Excel / pandas 直接认成日期时间
+//   timestamp_iso  2026-10-14T06:25:03.000Z   UTC，机器读、跨时区对齐用
+// 只给 UTC 的话，用 Excel 打开会看到比墙上时钟早 8 小时（东八区），像数据错了一样；
+// 只给本地时间的话，又丢了时区信息，换台机器或改时区后老文件没法解释。
+
+/** 服务器时区（IANA 名）。导出说"本地时间"时指的就是它 */
+export function serverTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+// 每行都要格式化时间，几百万行时反复 new Intl.DateTimeFormat 会明显拖慢导出，
+// 所以按时区缓存住。同一个导出只会用到同一个时区，缓存命中率是 100%
+const localFormatCache = new Map();
+
+function localFormatter(timeZone) {
+  let formatter = localFormatCache.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('sv-SE', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      // 用 h23 而不是 hour12:false：后者在部分 ICU 版本里会把午夜给成 24:00:00
+      hourCycle: 'h23',
+    });
+    localFormatCache.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
+/**
+ * 毫秒时间戳 → 导出用的两个时间字符串。
+ *
+ * sv-SE 的输出正好是 `YYYY-MM-DD HH:MM:SS`，这是 Excel 与 pandas 都直接认的写法；
+ * ISO 8601 带 T 和 Z 的写法 Excel 只会当普通文本，还容易被误读成 UTC。
+ */
+export function formatTimestamp(ms, { timeZone } = {}) {
+  const zone = timeZone || serverTimeZone();
+  return {
+    // 个别时区/ICU 组合会吐不换行空格，统一成普通空格，免得下游按空格切列时切不开
+    local: localFormatter(zone).format(ms).replace(/\s+/g, ' '),
+    iso: new Date(ms).toISOString(),
+  };
+}
+
 const GPU_HEADERS = [
+  'time_local',
   'timestamp_iso',
   'gpu_index',
   'gpu_name',
@@ -48,18 +103,19 @@ function round(value, digits = 1) {
 export function samplesToCsv(samples, { full = false } = {}) {
   const rows = [full ? GPU_CSV_HEADER_FULL : GPU_CSV_HEADER];
   for (const sample of samples) {
-    const ts = new Date(sample.t).toISOString();
     for (const gpu of sample.gpus) {
-      rows.push(gpuRowToCsv(ts, gpu, { full }));
+      rows.push(gpuRowToCsv(sample.t, gpu, { full }));
     }
   }
   return `${rows.join('\n')}\n`;
 }
 
 /** 单独一行 GPU 记录，供"按时间区间流式导出"复用（不必先把整段数据读进内存） */
-export function gpuRowToCsv(timestampIso, gpu, { full = false } = {}) {
+export function gpuRowToCsv(ts, gpu, { full = false } = {}) {
+  const { local, iso } = formatTimestamp(ts);
   const base = [
-    timestampIso,
+    local,
+    iso,
     gpu.index,
     cell(gpu.name),
     gpu.memUsedMiB,
@@ -94,6 +150,7 @@ export function gpuRowToCsv(timestampIso, gpu, { full = false } = {}) {
 // 宿主指标的导出：一行 = 一个采样点。
 // 磁盘只导出第一个挂载点（通常是 / 或系统盘），完整的逐盘明细在 JSON 导出里。
 const SYSTEM_HEADERS = [
+  'time_local',
   'timestamp_iso',
   'cpu_usage_pct',
   'mem_used_mib',
@@ -116,6 +173,7 @@ export const SYSTEM_CSV_HEADER = SYSTEM_HEADERS.join(',');
 
 // 进程事件导出：一行 = 一次"谁在什么时候占上了哪张卡"的留档
 const PROCESS_HEADERS = [
+  'time_local',
   'timestamp_iso',
   'gpu_index',
   'gpu_uuid',
@@ -128,9 +186,11 @@ const PROCESS_HEADERS = [
 export const PROCESS_CSV_HEADER = PROCESS_HEADERS.join(',');
 
 /** 单独一行进程事件，供流式导出复用 */
-export function processRowToCsv(timestampIso, proc) {
+export function processRowToCsv(ts, proc) {
+  const { local, iso } = formatTimestamp(ts);
   return [
-    timestampIso,
+    local,
+    iso,
     proc.gpuIndex ?? '',
     cell(proc.gpuUuid),
     proc.pid ?? '',
@@ -142,12 +202,14 @@ export function processRowToCsv(timestampIso, proc) {
 }
 
 /** 单独一行宿主指标，供流式导出复用 */
-export function systemRowToCsv(timestampIso, system) {
+export function systemRowToCsv(ts, system) {
+  const { local, iso } = formatTimestamp(ts);
   // 速率为 0 也要如实导出，所以不能用 `value || ''`
   const rate = (value) => (value == null || !Number.isFinite(value) ? '' : Math.round(value));
   const disk = Array.isArray(system.disk) && system.disk.length ? system.disk[0] : null;
   return [
-    timestampIso,
+    local,
+    iso,
     round(system.cpu?.usagePct, 1),
     round(system.mem?.usedMiB, 1),
     round(system.mem?.totalMiB, 1),
@@ -172,7 +234,7 @@ export function samplesToSystemCsv(samples) {
     const system = sample.system;
     // 平台取不到宿主指标时不会有这一行，避免出现一整列空值
     if (!system) continue;
-    rows.push(systemRowToCsv(new Date(sample.t).toISOString(), system));
+    rows.push(systemRowToCsv(sample.t, system));
   }
   return `${rows.join('\n')}\n`;
 }

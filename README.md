@@ -437,7 +437,9 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 
 导出接口接受与 `/api/history` 相同的区间参数（`?range=7d` / `?from=…&to=…` / `?step=`），带区间时会**流式写出**——90 天那种几十万行的导出不会先整块读进内存。不带区间参数时行为与以前完全一致（导出内存窗口）。
 
-默认 CSV 的列是固定的（时间、卡号、名称、显存、利用率、温度、功耗）；加 `?fields=full` 会再追加 `clock_sm_mhz / clock_mem_mhz / pstate / fan_pct / pcie_gen / pcie_width / enc_util_pct / dec_util_pct / throttled / ecc_mode / ecc_corrected_volatile / ecc_uncorrected_volatile / ecc_corrected_aggregate / ecc_uncorrected_aggregate` 共十四列（`throttled` 用 0/1 表示，空值代表这次采集没拿到节流信息）。这些扩展字段只存在历史库里，所以没有启用历史库时会返回 400 并说明原因；页面的导出弹窗里勾「包含扩展指标」就是它，没有历史库时这个勾选项会自动置灰并说明原因。
+**时间列有两列，不是一个失误**：第一列 `time_local` 是**服务器本地时间**（`2026-10-14 14:25:03`），Excel / pandas 直接认成日期时间；第二列 `timestamp_iso` 是 **UTC**（`2026-10-14T06:25:03.000Z`），脚本读、跨时区对齐用。只给 UTC 的话，在东八区用 Excel 打开会看到比墙上时钟早 8 小时，像数据错了一样；只给本地时间又丢了时区信息，换台机器或改时区后老文件没法解释。服务器时区取系统设置，也可以用 `TZ=Asia/Shanghai` 显式指定（Node 原生支持）。页面导出弹窗里会写明当前服务器时区，不用猜。
+
+默认 CSV 的列是固定的（本地时间、UTC 时间、卡号、名称、显存、利用率、温度、功耗）；加 `?fields=full` 会再追加 `clock_sm_mhz / clock_mem_mhz / pstate / fan_pct / pcie_gen / pcie_width / enc_util_pct / dec_util_pct / throttled / ecc_mode / ecc_corrected_volatile / ecc_uncorrected_volatile / ecc_corrected_aggregate / ecc_uncorrected_aggregate` 共十四列（`throttled` 用 0/1 表示，空值代表这次采集没拿到节流信息）。这些扩展字段只存在历史库里，所以没有启用历史库时会返回 400 并说明原因；页面的导出弹窗里勾「包含扩展指标」就是它，没有历史库时这个勾选项会自动置灰并说明原因。
 
 **导出与时间范围的关系**：导出的时间范围由导出弹窗里那一组单独决定，默认「跟随曲线」——也就是曲线上方选的是什么（实时 → 内存窗口；3 天/90 天/全部 → 查库）就导什么。只有**「当前完整快照」不含时间范围**（它导的是"此刻"，选中时那一组会自动置灰），其余三项都跟着走。
 
@@ -481,6 +483,8 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 **想看宿主机 CPU / 内存的历史？** 用顶部「导出」→ 内容选「宿主指标」；完整的状态快照（含逐盘明细）选「当前完整快照」。
 
 **下载按钮在哪？** 页面上只有顶部一个「导出」按钮——内容、时间范围、选项都在弹窗里选。之所以收成一个入口，是因为原来四个按钮分在三处、各自默认的时间范围还不一样（比如 JSON 不跟时间范围），很容易搞混。现在弹窗底部那行「将导出：…」会实时写清你到底要下什么。
+
+**导出的 CSV 用 Excel 打开，时间比墙上时钟早 8 小时？** 那是老版本的行为：时间列只有一列 UTC（`...T06:25:03.000Z`），东八区看着就像少了 8 小时。现在 CSV 有两列时间：`time_local` 是服务器本地时间（`2026-10-14 14:25:03`，Excel 直接认成日期时间），`timestamp_iso` 是同一时刻的 UTC。要用哪列取哪列——**看和筛用 `time_local`，写脚本入库用 `timestamp_iso`**。如果 `time_local` 也不对，说明服务器的系统时区不是你要的那个，用 `TZ=Asia/Shanghai ./start-bg.sh` 显式指定即可（页面导出弹窗里会显示当前用的是哪个时区）。
 
 **历史库提示"不可用"？** 大概率是 Node 版本低于 22.13（没有内置 `node:sqlite`）。升级 Node 即可；不升级也不影响实时监控，只是没有历史。页面「采集信息 → 历史库」会写明具体原因。
 

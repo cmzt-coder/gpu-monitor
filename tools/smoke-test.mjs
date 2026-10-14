@@ -20,10 +20,12 @@ import {
   GPU_CSV_HEADER_FULL,
   PROCESS_CSV_HEADER,
   SYSTEM_CSV_HEADER,
+  formatTimestamp,
   gpuRowToCsv,
   processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
+  serverTimeZone,
   systemRowToCsv,
 } from '../src/export.js';
 import { createMockSource, createMockSystem } from '../src/mock.js';
@@ -187,13 +189,60 @@ assert.equal(history.size, 3, '环形缓冲应只保留 3 个采样点');
 assert.deepEqual(history.snapshot(3).map((s) => s.t), [2, 3, 4]);
 
 /* ---------- CSV 导出 ---------- */
+// 导出里的时间用两个固定时刻的常量，后面几处断言都复用
+const CSV_T0 = Date.UTC(2026, 0, 1);          // 2026-01-01T00:00:00Z
+const CSV_T0_STR = formatTimestamp(CSV_T0);
+
+/* 时间列：Excel 打开不能比墙上时钟早 8 小时，同时不能丢掉时区信息 */
+// 用明确的时区把断言钉死，这样在任何机器上跑结果都一样
+const TS_DEMO = Date.UTC(2026, 9, 14, 6, 25, 3);
+assert.equal(
+  formatTimestamp(TS_DEMO, { timeZone: 'Asia/Shanghai' }).local,
+  '2026-10-14 14:25:03',
+  '东八区必须是 14:25，不能直接吐 UTC 的 06:25',
+);
+assert.equal(
+  formatTimestamp(TS_DEMO, { timeZone: 'Asia/Shanghai' }).iso,
+  '2026-10-14T06:25:03.000Z',
+  'UTC 那一列要保持原样：机器读、跨时区对齐都靠它',
+);
+assert.equal(formatTimestamp(TS_DEMO, { timeZone: 'UTC' }).local, '2026-10-14 06:25:03');
+assert.equal(
+  Date.parse(`${formatTimestamp(TS_DEMO, { timeZone: 'Asia/Shanghai' }).local.replace(' ', 'T')}+08:00`),
+  TS_DEMO,
+  '本地时间加回偏移量必须还原成同一个瞬间，说明时区是真的套用上了',
+);
+
+// 午夜边界：部分 ICU 版本会把 0 点写成 24:00:00，Excel 认不出来
+assert.equal(
+  formatTimestamp(Date.UTC(2026, 9, 14, 16, 0, 0), { timeZone: 'Asia/Shanghai' }).local,
+  '2026-10-15 00:00:00',
+  '午夜必须是 00:00:00 而不是 24:00:00',
+);
+assert.equal(formatTimestamp(TS_DEMO).local.length, 19, '固定 YYYY-MM-DD HH:MM:SS，不带毫秒');
+
+// 不传时区就走服务器时区；再和 Date 自己的本地取值对一遍（两套独立实现互相校验）
+assert.equal(formatTimestamp(TS_DEMO).local, formatTimestamp(TS_DEMO, { timeZone: serverTimeZone() }).local);
+const tsDate = new Date(TS_DEMO);
+const pad2 = (n) => String(n).padStart(2, '0');
+assert.equal(
+  formatTimestamp(TS_DEMO).local,
+  `${tsDate.getFullYear()}-${pad2(tsDate.getMonth() + 1)}-${pad2(tsDate.getDate())} `
+    + `${pad2(tsDate.getHours())}:${pad2(tsDate.getMinutes())}:${pad2(tsDate.getSeconds())}`,
+  'Intl 的输出要和 Date 的本地时间取值一致',
+);
+
 const csv = samplesToCsv([
   { t: Date.UTC(2026, 8, 30, 1, 2, 3), gpus: [{ index: 0, name: 'A, B', memUsedMiB: 1, memTotalMiB: 2, memUsedPct: 50, utilGpuPct: 10, utilMemPct: 20, tempC: 30, powerW: 40 }] },
 ]);
 const lines = csv.trim().split('\n');
 assert.equal(lines.length, 2);
-assert.ok(lines[0].startsWith('timestamp_iso,gpu_index'), 'CSV 表头应固定');
+assert.ok(lines[0].startsWith('time_local,timestamp_iso,gpu_index'), 'CSV 表头应固定');
 assert.ok(lines[1].includes('"A, B"'), '含逗号的名称应被引号包裹');
+assert.ok(
+  lines[1].startsWith(`${formatTimestamp(Date.UTC(2026, 8, 30, 1, 2, 3)).local},2026-09-30T01:02:03.000Z,`),
+  `数据行前两列应是本地时间 + UTC：${lines[1]}`,
+);
 
 const systemCsv = samplesToSystemCsv([
   { t: Date.UTC(2026, 8, 30, 1, 2, 3), system: null },
@@ -210,9 +259,26 @@ const systemCsv = samplesToSystemCsv([
   },
 ]);
 const systemLines = systemCsv.trim().split('\n');
-assert.equal(systemLines[0].startsWith('timestamp_iso,cpu_usage_pct'), true);
+assert.equal(systemLines[0].startsWith('time_local,timestamp_iso,cpu_usage_pct'), true);
 assert.equal(systemLines.length, 2, '没有宿主指标的采样点不应产生空行');
 assert.ok(systemLines[1].includes(',0,2048'), '速率为 0 也要如实导出');
+
+// 表头列数必须等于行里实际产出的列数。
+// 加 time_local 时就漏过一次：数据行多了一列而表头没跟上，
+// Excel 里所有列整体右移一格，光看数据根本发现不了。
+const headerCols = (header) => header.split(',').length;
+for (const [label, header, row] of [
+  ['GPU 曲线', GPU_CSV_HEADER, gpuRowToCsv(CSV_T0, { index: 0, name: 'X' })],
+  ['GPU 曲线（含扩展）', GPU_CSV_HEADER_FULL, gpuRowToCsv(CSV_T0, { index: 0, name: 'X' }, { full: true })],
+  ['宿主指标', SYSTEM_CSV_HEADER, systemRowToCsv(CSV_T0, {})],
+  ['进程历史', PROCESS_CSV_HEADER, processRowToCsv(CSV_T0, { pid: 1, name: 'x' })],
+]) {
+  assert.equal(row.split(',').length, headerCols(header), `${label}导出的列数与表头对不上`);
+  assert.ok(
+    header.startsWith('time_local,timestamp_iso,'),
+    `${label}导出的表头前两列必须是 time_local + timestamp_iso，时间才对得上墙上时钟`,
+  );
+}
 
 /* ---------- 模拟数据源 ---------- */
 const mock = await createMockSource({ gpuCount: 2 })();
@@ -594,6 +660,13 @@ assert.ok(stylesCss.includes('.app[data-dense="1"] .alerts[data-state="idle"]'),
 assert.ok(appJs.includes('refs.appEl.dataset.dense'), 'app.js 要按展示模式打上 data-dense');
 assert.ok(appJs.includes('utilView.footShort'), 'KPI 脚注在紧凑模式下要用短文案');
 assert.ok(appJs.includes('syncEvidenceSticky'), '右列 sticky 的判定要跟着顶栏厚薄重算');
+
+/* ---------- 前端：导出弹窗的时间口径说明（静态结构） ---------- */
+// 导出的时间列有两列（本地时间 + UTC），说明文字必须跟着列名走：
+// 只改列名不改文案、或者把 <p> 删了忘了改 app.js，都会让人对着 UTC 里的 06:25 发懵
+assert.ok(indexHtml.includes('id="export-time-hint"'), '导出弹窗要有时间口径的说明位');
+assert.ok(appJs.includes('refs.exportTimeHint.textContent'), 'app.js 要往那行里写清楚两列时间分别是什么');
+assert.ok(appJs.includes('time_local') && appJs.includes('timestamp_iso'), '说明文字里要点名列名，不能只说"有两列时间"');
 
 /* ---------- 硬件健康：XID（内核日志） ---------- */
 // 两种来源的总线号写法必须归一到一起，否则日志里的 XID 落不到具体的卡上
@@ -1231,8 +1304,8 @@ assert.equal([...sqliteStore.processPages({ ...procWindow, minMiB: 200 })].lengt
 assert.equal([...sqliteStore.processPages({ ...procWindow, limit: 2 })].length, 2, '可以只取前 N 条');
 // 导出的一行：字段要齐，且不用查库就能拼出来
 assert.equal(
-  processRowToCsv('2026-01-01T00:00:00.000Z', processFromRow(allProcessPages[0])),
-  '2026-01-01T00:00:00.000Z,0,GPU-test,7,train.py,90,容器 vllm-server,root',
+  processRowToCsv(CSV_T0, processFromRow(allProcessPages[0])),
+  `${CSV_T0_STR.local},${CSV_T0_STR.iso},0,GPU-test,7,train.py,90,容器 vllm-server,root`,
 );
 
 // 写入侧的占用下限（--proc-min）：只有显式设了值才丢数据，默认必须一条不落
@@ -1301,22 +1374,22 @@ assert.equal(memoryStore.stats().reason, '启动时加了 --no-db');
 assert.equal(memoryStore.countProcesses({ from: 0, to: 1 }), 0);
 
 /* ---------- 导出：按行生成（流式导出的基础） ---------- */
-assert.equal(GPU_CSV_HEADER.startsWith('timestamp_iso,gpu_index'), true);
-assert.equal(SYSTEM_CSV_HEADER.startsWith('timestamp_iso,cpu_usage_pct'), true);
+assert.equal(GPU_CSV_HEADER.startsWith('time_local,timestamp_iso,gpu_index'), true);
+assert.equal(SYSTEM_CSV_HEADER.startsWith('time_local,timestamp_iso,cpu_usage_pct'), true);
 assert.equal(
-  gpuRowToCsv('2026-01-01T00:00:00.000Z', gpuFromRow({
+  gpuRowToCsv(CSV_T0, gpuFromRow({
     ts: dbNow, idx: 1, uuid: 'u', name: 'A, B', mem_used_mib: 10, mem_total_mib: 20,
     util_gpu_pct: 30, util_mem_pct: 40, temp_c: 50, power_w: 60,
   })),
-  '2026-01-01T00:00:00.000Z,1,"A, B",10,20,50,30,40,50,60',
+  `${CSV_T0_STR.local},${CSV_T0_STR.iso},1,"A, B",10,20,50,30,40,50,60`,
   '含逗号的名称要加引号，显存占用率按已用/总量算',
 );
-assert.equal(systemRowToCsv('2026-01-01T00:00:00.000Z', systemFromRow({
+assert.equal(systemRowToCsv(CSV_T0, systemFromRow({
   ts: dbNow, cpu_pct: 12.34, mem_used_mib: 500, mem_total_mib: 1000, mem_used_pct: 50,
   swap_used_mib: null, swap_total_mib: null, load1: 0.5, load5: 0.4, load15: 0.3,
   disk_json: JSON.stringify([{ path: '/', usedMiB: 1, totalMiB: 2, usedPct: 50 }]),
   net_rx_bps: 0, net_tx_bps: 2048, uptime_sec: 42,
-})), '2026-01-01T00:00:00.000Z,12.3,500,1000,50,,,0.5,0.4,0.3,/,1,2,50,0,2048');
+})), `${CSV_T0_STR.local},${CSV_T0_STR.iso},12.3,500,1000,50,,,0.5,0.4,0.3,/,1,2,50,0,2048`);
 
 // 服务维度的汇总要能落库、读回来（占比按当时的整机显存重算）
 sqliteStore.appendSample({
@@ -1522,7 +1595,7 @@ assert.ok(
 );
 // 没拿到节流信息时留空，不要写成 0（那是"明确没有节流"的意思）
 assert.ok(
-  gpuRowToCsv('2026-01-01T00:00:00.000Z', { index: 0, name: 'X', throttled: null }, { full: true }).endsWith(','),
+  gpuRowToCsv(CSV_T0, { index: 0, name: 'X', throttled: null }, { full: true }).endsWith(','),
   '节流信息未知时应留空',
 );
 
@@ -2374,5 +2447,6 @@ process.stdout.write(
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
   + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
-  + '平均利用率的跨时间口径与覆盖不足标注 / 导航模式紧凑顶栏（结构约定）\n',
+  + '平均利用率的跨时间口径与覆盖不足标注 / 导航模式紧凑顶栏（结构约定）/ '
+  + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）\n',
 );
