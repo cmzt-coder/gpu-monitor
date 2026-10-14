@@ -66,7 +66,7 @@ const HELP = `GPU 显存负载监控服务
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
       --no-db             不落库，只保留内存窗口
       --store-interval <毫秒> 落库间隔，与页面刷新间隔解耦（默认 5000）
-      --retention-days <天>   历史保留天数（默认 90，0 表示永久保留）
+      --retention-days <天>   历史保留天数；默认 0 = 永久保留，填天数则按天自动清理
       --no-store-processes    不把占用进程写入历史库
       --reclaim           启动时把历史库做一次整库重写（开启增量回收，释放已删数据占用的空间）
 
@@ -75,7 +75,7 @@ const HELP = `GPU 显存负载监控服务
 
 示例：
   node server.js --port 8090
-  node server.js --port 8090 --retention-days 0 --store-interval 1000
+  node server.js --port 8090 --retention-days 30 --store-interval 1000
   node server.js --port 8090 --mock --no-db
 `;
 
@@ -101,7 +101,10 @@ function parseArgs(argv) {
     db: true,
     dbPath: process.env.GPU_MONITOR_DB || path.join('data', 'gpu-monitor.db'),
     storeIntervalMs: 5000,
-    retentionDays: 90,
+    // 默认永久保留：历史库的价值就在于"翻得回去"，而按天清理是静默的数据丢失。
+    // 实测单卡 5 秒粒度约 7 MiB/天，一年 2.5 GiB，磁盘上通常不值得为此丢数据；
+    // 真要限制就显式给 --retention-days <天>。
+    retentionDays: 0,
     storeProcesses: true,
     reclaimOnStart: false,
     version: VERSION,

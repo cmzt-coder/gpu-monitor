@@ -168,7 +168,8 @@ export async function createSqliteStore({
   file,
   nodeId,
   storeIntervalMs = 5000,
-  retentionDays = 90,
+  // 默认 0 = 永久保留：漏传这个参数时应该"什么都不删"，而不是悄悄按时限删历史
+  retentionDays = 0,
   storeProcesses = true,
   // 进程身份没变时也按这个间隔补一次快照，避免记录到的显存数值离现实太远
   processRefreshMs = 300000,

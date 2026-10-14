@@ -310,11 +310,12 @@ export async function runPreflight({
       dbLines.push([ICONS.skip, `库文件尚未创建（首次启动会自动建库）：${absoluteDb}`]);
     }
 
-    // 体积预估：按当前检测到的卡数 + 默认落库粒度
+    // 体积预估：按当前检测到的卡数 + 默认落库粒度。
+    // 保留期默认是永久，所以这里给"一年"这个基准——磁盘够不够一年，基本就够用很多年了
     const cardsForEstimate = gpuCount > 0 ? gpuCount : 1;
     const perDay = cardsForEstimate * Math.round(86400000 / storeIntervalMs);
-    const per90 = perDay * 90 * BYTES_PER_ROW;
-    dbLines.push([ICONS.skip, `体积预估：${gpuCount > 0 ? `${gpuCount} 张卡` : '卡数未知（按 1 张卡估）'}、每 ${storeIntervalMs / 1000} 秒落一行 → 约 ${perDay.toLocaleString('en-US')} 行/天，90 天约 ${gib(per90)}`]);
+    const perYear = perDay * 365 * BYTES_PER_ROW;
+    dbLines.push([ICONS.skip, `体积预估：${gpuCount > 0 ? `${gpuCount} 张卡` : '卡数未知（按 1 张卡估）'}、每 ${storeIntervalMs / 1000} 秒落一行 → 约 ${perDay.toLocaleString('en-US')} 行/天，永久保留一年约 ${gib(perYear)}`]);
     // 库目录可能还不存在，那就用最近的已存在祖先来看剩余空间
     let spaceProbe = dir;
     while (!fs.existsSync(spaceProbe) && path.dirname(spaceProbe) !== spaceProbe) spaceProbe = path.dirname(spaceProbe);
@@ -322,8 +323,8 @@ export async function runPreflight({
       const stat = fs.statfsSync(spaceProbe);
       const free = stat.bavail * stat.bsize;
       facts.diskFreeBytes = free;
-      dbLines.push([free > per90 ? ICONS.ok : ICONS.warn, `${spaceProbe} 剩余空间 ${gib(free)}${free > per90 ? '' : '（不足 90 天预估，建议调大 --store-interval 或调小 --retention-days）'}`]);
-      if (free <= per90) warnings.push('磁盘剩余空间小于 90 天历史的预估占用');
+      dbLines.push([free > perYear ? ICONS.ok : ICONS.warn, `${spaceProbe} 剩余空间 ${gib(free)}${free > perYear ? '' : '（不足一年的预估占用，建议调大 --store-interval，或给 --retention-days 设个天数）'}`]);
+      if (free <= perYear) warnings.push('磁盘剩余空间小于一年历史的预估占用');
     } catch (error) {
       dbLines.push([ICONS.skip, `剩余空间读取失败（${spaceProbe}）：${error?.message || error}`]);
     }

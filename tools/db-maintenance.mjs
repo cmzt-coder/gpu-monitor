@@ -29,7 +29,7 @@ function mib(bytes) {
   return `${(bytes / 1048576).toFixed(1)} MiB`;
 }
 
-export async function runMaintenance({ dbPath, prune = false, reclaim = false, retentionDays = 90, now = Date.now }) {
+export async function runMaintenance({ dbPath, prune = false, reclaim = false, retentionDays = 0, now = Date.now }) {
   const absolute = path.resolve(dbPath);
   if (!fs.existsSync(absolute)) {
     return { ok: false, reason: `历史库不存在：${absolute}（服务首次启动时会自动创建）` };
@@ -102,21 +102,27 @@ function print(report, { prune, reclaim, retentionDays }) {
   lines.push(`  WAL 体积：${mib(report.walBefore)} → ${mib(report.walAfter)}${report.result.checkpointed ? '（已截断）' : ''}`);
   lines.push(`  可回收空间：${mib(report.reclaimableBefore)} → ${mib(report.reclaimableAfter)}`);
   lines.push(`  auto_vacuum：${report.autoVacuumBefore === 2 ? '增量回收（已开启）' : `未开启（${report.autoVacuumBefore}）`}${report.autoVacuumAfter === 2 && report.autoVacuumBefore !== 2 ? ' → 增量回收（已转换）' : ''}`);
-  if (prune) lines.push(`  本次清理：删除 ${report.dropped} 行（保留 ${retentionDays} 天）`);
+  // 保留期默认 0（永久保留），这时 --prune 不做任何事。必须说清楚，
+  // 否则用户会以为"跑过 --prune 了"，或者反过来，以为自己的历史被清了
+  if (prune && retentionDays > 0) {
+    lines.push(`  本次清理：删除 ${report.dropped} 行（保留 ${retentionDays} 天）`);
+  } else if (prune) {
+    lines.push('  本次清理：未删除任何行——保留期是 0（永久保留），要按天清理请显式加 --retention-days <天>');
+  }
   if (report.result.incremental) lines.push('  增量回收：已执行');
   if (report.result.error) lines.push(`  维护出错：${report.result.error}`);
   lines.push('');
   if (!reclaim && report.reclaimableBefore > 16 * 1024 * 1024) {
     lines.push(`提示：有 ${mib(report.reclaimableBefore)} 空间可回收，跑一次 --reclaim 即可（会整库重写，大库需要一点时间和等量磁盘空间）。`);
   } else if (!prune && !reclaim) {
-    lines.push('提示：加 --prune 按保留期清理，加 --reclaim 回收空间。');
+    lines.push('提示：加 --reclaim 回收空间；要按天清理历史用 --prune --retention-days <天>（服务默认永久保留）。');
   }
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const argv = process.argv.slice(2);
-  const options = { dbPath: path.join('data', 'gpu-monitor.db'), prune: false, reclaim: false, retentionDays: 90 };
+  const options = { dbPath: path.join('data', 'gpu-monitor.db'), prune: false, reclaim: false, retentionDays: 0 };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => argv[(i += 1)];
     switch (argv[i]) {
@@ -134,7 +140,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         break;
       case '--help':
       case '-h':
-        process.stdout.write('用法：node tools/db-maintenance.mjs [--db <路径>] [--prune] [--reclaim] [--retention-days <天>]\n');
+        process.stdout.write(
+          '用法：node tools/db-maintenance.mjs [--db <路径>] [--prune] [--reclaim] [--retention-days <天>]\n\n'
+          + '  --retention-days 默认 0（永久保留）。服务也是默认永久保留，所以除非你显式给天数，\n'
+          + '  --prune 不会删除任何数据。\n',
+        );
         process.exit(0);
         break;
       default:

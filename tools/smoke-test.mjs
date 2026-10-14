@@ -796,6 +796,21 @@ assert.equal(retentionStore.querySamples(nearOld).points, 0, '过期的那条应
 assert.equal(retentionStore.querySamples(nearNow).points, 1, '没过期的那条要保留');
 retentionStore.close();
 
+// 默认必须是永久保留：漏传 retentionDays 时应该什么都不删，
+// 而不是悄悄按某个时限把历史清掉——按天清理属于静默的数据丢失
+const defaultRetentionStore = await createSqliteStore({
+  file: ':memory:',
+  nodeId: 'test-node',
+  storeIntervalMs: 1000,
+  now: () => dbNow,
+});
+assert.equal(defaultRetentionStore.stats().retentionDays, 0, '不传 retentionDays 时应为永久保留');
+defaultRetentionStore.appendSample({ t: oldTs, gpus: [gpuAt(0)], processes: [], system: hostAt(0) });
+defaultRetentionStore.flush();
+assert.equal(defaultRetentionStore.prune(dbNow), 0, '永久保留时不应删除任何行');
+assert.equal(defaultRetentionStore.querySamples({ from: oldTs - 1000, to: oldTs + 1000 }).points, 1, '三天前的数据要还在');
+defaultRetentionStore.close();
+
 // 空实现：没有历史库时要明确说"不支持"，而不是假装返回空历史
 const memoryStore = createMemoryStore('启动时加了 --no-db');
 assert.equal(memoryStore.supportsHistory, false);
