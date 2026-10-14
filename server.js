@@ -111,6 +111,8 @@ function parseArgs(argv) {
     // 进程记录下限（MiB）：0 = 全记。只看大进程请用页面上的「占用下限」，
     // 那是查询侧过滤、历史照样完整；这里设了值就是真的不写进库
     procMinMiB: 0,
+    // 行重映射状态基本不变，低频读一次就够（单位毫秒）
+    remapIntervalMs: 300000,
     reclaimOnStart: false,
     version: VERSION,
     help: false,

@@ -97,6 +97,13 @@ function toFlag(value) {
   return null;
 }
 
+function toYesNo(value) {
+  const text = String(value ?? '').trim().toLowerCase();
+  if (text === 'yes') return true;
+  if (text === 'no') return false;
+  return null;
+}
+
 function convert(value, type) {
   if (type === 'flag') return toFlag(value);
   if (type === 'string') return toText(value);
@@ -213,7 +220,81 @@ export async function readGpuSnapshot({ bin = 'nvidia-smi', timeout = 5000, fiel
   return { gpus, processes, processWarning, fields };
 }
 
-/* ---------- 扩展字段探测 ---------- */
+/* ---------- 行重映射（Row Remapper） ---------- */
+
+/**
+ * 解析 `nvidia-smi -q -d ROW_REMAPPER` 的输出。
+ *
+ * 这几个值没有对应的 --query-gpu 字段，只能从 -q 的结构化文本里抠。
+ * 返回 Map<PCI 总线号, { correctable, uncorrectable, pending, failure, banksMax }>——
+ * 用总线号而不是顺序来对应，是因为 -q 的输出顺序没有承诺。
+ */
+export function parseRowRemapper(stdout) {
+  const byBusId = new Map();
+  let current = null;
+  let inHistogram = false;
+
+  for (const raw of String(stdout).split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+
+    const gpu = /^GPU ([0-9a-fA-F:.]{4,})$/.exec(line);
+    if (gpu) {
+      current = { correctable: null, uncorrectable: null, pending: null, failure: null, banksMax: null };
+      byBusId.set(gpu[1].toLowerCase(), current);
+      inHistogram = false;
+      continue;
+    }
+    if (!current) continue;
+
+    // 直方图里的 Max / High / … 是"还有多少 bank 的备用行没动过"
+    if (line.startsWith('Bank Remap Availability Histogram')) {
+      inHistogram = true;
+      continue;
+    }
+    const kv = /^([^:]+?)\s*:\s*(.+)$/.exec(line);
+    if (!kv) continue;
+    const key = kv[1].trim();
+    const value = kv[2].trim();
+
+    if (inHistogram) {
+      if (key === 'Max') current.banksMax = toNumber(value);
+      continue;
+    }
+    // 注意 Exact match：'Inactive Correctable Error' 不能被当成 'Correctable Error'
+    if (key === 'Correctable Error') current.correctable = toNumber(value);
+    else if (key === 'Uncorrectable Error') current.uncorrectable = toNumber(value);
+    else if (key === 'Pending') current.pending = toYesNo(value);
+    else if (key === 'Remapping Failure Occurred') current.failure = toYesNo(value);
+  }
+  return byBusId;
+}
+
+/**
+ * 读一次行重映射状态，按 GPU 序号给出来。
+ * 需要两次调用：重映射字段只在 -q 里，-q 里又只有总线号，所以另一边查一次
+ * index + pci.bus_id 把两者接起来。低频调用（默认 5 分钟一次），开销可忽略。
+ */
+export async function readRowRemapper({ bin = 'nvidia-smi', timeout = 8000 } = {}) {
+  const [pairs, detail] = await Promise.all([
+    runSmi(bin, 'gpu', ['index', 'pci.bus_id'], timeout),
+    run(bin, ['-q', '-d', 'ROW_REMAPPER'], { timeout, maxBuffer: 8 * 1024 * 1024 }).then((result) => result.stdout),
+  ]);
+
+  const byBusId = parseRowRemapper(detail);
+  const byIndex = new Map();
+  for (const line of String(pairs).split('\n')) {
+    if (!line.trim()) continue;
+    const cells = splitRow(line, 2);
+    const index = toNumber(cells[0]);
+    if (index == null) continue;
+    const entry = byBusId.get(String(cells[1] || '').trim().toLowerCase()) || null;
+    if (entry) byIndex.set(index, entry);
+  }
+  // 一条都没解析出来通常意味着这块卡/这个驱动根本不提供重映射信息，
+  // 调用方据此把界面那一行整块隐藏，而不是显示一排 0（那会被读成"很健康"）
+  return { byIndex, unsupported: byBusId.size === 0 };
+}
 
 /**
  * 从 nvidia-smi 的报错里找出"不被支持的那个字段"。

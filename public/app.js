@@ -1295,7 +1295,7 @@ function renderGpuCards() {
           <span data-role="fan" hidden></span>
           <span data-role="encdec" hidden></span>
         </div>
-        <div class="gpu-card__ecc" data-role="ecc" hidden></div>
+        <div class="gpu-card__health" data-role="health" hidden></div>
         <div data-role="throttle"></div>`;
       card.querySelector('.gpu-card__name').textContent = gpu.name;
       card.querySelector('.gpu-card__index').textContent = `GPU ${gpu.index}`;
@@ -1347,50 +1347,79 @@ function renderGpuCards() {
     if (hasEncdec) encdecNode.textContent = `编解码 ${fmtPct(gpu.encUtilPct, 0)} / ${fmtPct(gpu.decUtilPct, 0)}`;
 
     card.querySelector('[data-role="throttle"]').replaceChildren(renderThrottleChips(gpu));
-    renderEccNode(card.querySelector('[data-role="ecc"]'), gpu);
+    renderHealthNode(card.querySelector('[data-role="health"]'), gpu);
   }
 }
 
 /**
- * 显存纠错（ECC）那一行。
+ * 硬件健康那一行：显存纠错（ECC）+ 行重映射。
  *
  * 关键不是"有没有错"，而是"有没有在涨"：aggregate 是终身累计、volatile 是本次驱动
  * 加载以来，所以两个都写出来，并单独标出本次的新增。不可纠正错误意味着已经在丢数据，
  * 用最重的配色。
+ *
+ * 行重映射只在"有情况"时补上去（待生效 / 已重映射过 / 重映射失败），
+ * 健康时不留字，免得这一行变成没人看的长句。
  */
-function renderEccNode(node, gpu) {
+function renderHealthNode(node, gpu) {
   const ce = gpu.eccCorrectedAggregate;
   const ue = gpu.eccUncorrectedAggregate;
-  // 驱动没提供这些字段（老驱动 / 消费卡）时整行隐藏，不显示一排 "--"
-  if (gpu.eccMode == null && ce == null && ue == null) {
+  const eccKnown = !(gpu.eccMode == null && ce == null && ue == null);
+  const remap = gpu.remap || null;
+  const remapKnown = Boolean(remap && (remap.correctable != null || remap.uncorrectable != null
+    || remap.pending != null || remap.failure != null || remap.banksMax != null));
+  // 两样都拿不到（老驱动 / 消费卡）时整行隐藏，不显示一排 "--"
+  if (!eccKnown && !remapKnown) {
     node.hidden = true;
     return;
   }
   node.hidden = false;
-  if (gpu.eccMode && gpu.eccMode !== 'Enabled') {
-    node.dataset.tone = '';
-    node.textContent = `ECC 已关闭（${gpu.eccMode}），上面的错误计数不代表实际风险`;
-    return;
-  }
 
   const ceV = gpu.eccCorrectedVolatile;
   const ueV = gpu.eccUncorrectedVolatile;
   const since = (volatileValue, total) => (
     volatileValue > 0 && volatileValue !== total ? `（本次 ${volatileValue}）` : ''
   );
+  const parts = [];
+  let tone = '';
 
-  if (!(ce > 0) && !(ue > 0)) {
-    // 全 0 本身就是有用的信息：以后任何一个非 0 都是"从干净状态开始的变化"
-    node.dataset.tone = '';
-    node.textContent = 'ECC 无错误（可纠正 0 · 不可纠正 0）';
-    return;
+  if (eccKnown) {
+    if (gpu.eccMode && gpu.eccMode !== 'Enabled') {
+      parts.push(`ECC 已关闭（${gpu.eccMode}）`);
+    } else if (!(ce > 0) && !(ue > 0)) {
+      // 全 0 本身就是有用的信息：以后任何一个非 0 都是"从干净状态开始的变化"
+      parts.push('ECC 无错误');
+    } else {
+      const ecc = [];
+      if (ue > 0) {
+        ecc.push(`不可纠正 ${ue}${since(ueV, ue)}`);
+        tone = 'danger';
+      }
+      if (ce > 0) {
+        ecc.push(`可纠正 ${ce}${since(ceV, ce)}`);
+        if (!tone) tone = 'warning';
+      }
+      parts.push(`ECC ${ecc.join(' · ')}`);
+    }
   }
 
-  const parts = [];
-  if (ue > 0) parts.push(`不可纠正 ${ue}${since(ueV, ue)}`);
-  if (ce > 0) parts.push(`可纠正 ${ce}${since(ceV, ce)}`);
-  node.dataset.tone = ue > 0 ? 'danger' : 'warning';
-  node.textContent = `ECC ${parts.join(' · ')}`;
+  if (remapKnown) {
+    const remapped = (remap.correctable ?? 0) + (remap.uncorrectable ?? 0);
+    if (remap.failure === true) {
+      // 备用行都不够用了，这是换卡依据
+      parts.push('行重映射失败');
+      tone = 'danger';
+    } else if (remap.pending === true) {
+      parts.push('有行重映射待生效（下次 GPU 复位时应用）');
+      if (tone !== 'danger') tone = 'warning';
+    } else if (remapped > 0) {
+      parts.push(`已重映射 ${remapped} 行`);
+      if (!tone) tone = 'warning';
+    }
+  }
+
+  node.dataset.tone = tone;
+  node.textContent = parts.join(' · ');
 }
 
 /* ---------- 渲染：进程表与过滤 ---------- */

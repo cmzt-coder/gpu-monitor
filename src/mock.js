@@ -111,6 +111,16 @@ export function createMockSource({
           eccCorrectedAggregate: card.index === 2 ? 4800 : card.index * 6,
           eccUncorrectedAggregate: card.index === 2 ? 1 : 0,
         }),
+        // 行重映射：2 号卡演示"重映射失败"，1 号卡演示"有重映射待生效"，3 号卡不提供
+        ...(card.index === 3 ? {} : {
+          remap: {
+            correctable: card.index === 2 ? 7 : 0,
+            uncorrectable: card.index === 2 ? 3 : 0,
+            pending: card.index === 1,
+            failure: card.index === 2,
+            banksMax: card.index === 2 ? 0 : 640 - card.index * 2,
+          },
+        }),
         throttle: {
           swPowerCap: usedRatio > 0.9,
           hwSlowdown: false,

@@ -47,6 +47,11 @@ const TABLES = [
       ['ecc_ue_volatile', 'INTEGER'],
       ['ecc_ce_aggregate', 'INTEGER'],
       ['ecc_ue_aggregate', 'INTEGER'],
+      ['remap_correctable', 'INTEGER'],
+      ['remap_uncorrectable', 'INTEGER'],
+      ['remap_pending', 'INTEGER'],
+      ['remap_failure', 'INTEGER'],
+      ['remap_banks_max', 'INTEGER'],
     ],
   },
   {
@@ -491,7 +496,12 @@ export async function createSqliteStore({
                    MAX(throttle_any) AS throttle_any,
                    MAX(ecc_mode) AS ecc_mode,
                    MAX(ecc_ce_volatile) AS ecc_ce_volatile, MAX(ecc_ue_volatile) AS ecc_ue_volatile,
-                   MAX(ecc_ce_aggregate) AS ecc_ce_aggregate, MAX(ecc_ue_aggregate) AS ecc_ue_aggregate
+                   MAX(ecc_ce_aggregate) AS ecc_ce_aggregate, MAX(ecc_ue_aggregate) AS ecc_ue_aggregate,
+                   MAX(remap_correctable) AS remap_correctable,
+                   MAX(remap_uncorrectable) AS remap_uncorrectable,
+                   MAX(remap_pending) AS remap_pending,
+                   MAX(remap_failure) AS remap_failure,
+                   MAX(remap_banks_max) AS remap_banks_max
             FROM gpu_sample
             WHERE ts >= ? AND ts <= ?
             GROUP BY bucket, uuid_c
@@ -508,6 +518,7 @@ export async function createSqliteStore({
                  pcie_gen, pcie_width, enc_util_pct, dec_util_pct,
                  throttle_mask, throttle_any,
                  ecc_mode, ecc_ce_volatile, ecc_ue_volatile, ecc_ce_aggregate, ecc_ue_aggregate
+                 , remap_correctable, remap_uncorrectable, remap_pending, remap_failure, remap_banks_max
           FROM gpu_sample
           WHERE ts >= ? AND ts <= ? AND (ts, COALESCE(uuid, '')) > (?, ?)
           ORDER BY ts ASC, uuid_c ASC

@@ -66,6 +66,11 @@ export function gpuRow(nodeId, ts, gpu) {
     ecc_ue_volatile: gpu.eccUncorrectedVolatile ?? null,
     ecc_ce_aggregate: gpu.eccCorrectedAggregate ?? null,
     ecc_ue_aggregate: gpu.eccUncorrectedAggregate ?? null,
+    remap_correctable: gpu.remap?.correctable ?? null,
+    remap_uncorrectable: gpu.remap?.uncorrectable ?? null,
+    remap_pending: gpu.remap?.pending == null ? null : (gpu.remap.pending ? 1 : 0),
+    remap_failure: gpu.remap?.failure == null ? null : (gpu.remap.failure ? 1 : 0),
+    remap_banks_max: gpu.remap?.banksMax ?? null,
   };
 }
 
@@ -158,6 +163,18 @@ export function gpuFromRow(row) {
     eccUncorrectedVolatile: row.ecc_ue_volatile ?? null,
     eccCorrectedAggregate: row.ecc_ce_aggregate ?? null,
     eccUncorrectedAggregate: row.ecc_ue_aggregate ?? null,
+    // 三项全空说明这块卡/这个驱动不提供重映射信息，给 null 而不是一堆 0——
+    // 一排 0 会被读成"很健康"，那是两回事
+    remap: row.remap_correctable == null && row.remap_uncorrectable == null
+      && row.remap_pending == null && row.remap_failure == null && row.remap_banks_max == null
+      ? null
+      : {
+        correctable: row.remap_correctable ?? null,
+        uncorrectable: row.remap_uncorrectable ?? null,
+        pending: row.remap_pending == null ? null : row.remap_pending === 1,
+        failure: row.remap_failure == null ? null : row.remap_failure === 1,
+        banksMax: row.remap_banks_max ?? null,
+      },
   };
 }
 

@@ -5,7 +5,7 @@ import os from 'node:os';
 
 import { History } from './history.js';
 import { detectPlatform, resolveNvidiaSmi } from './platform.js';
-import { BASE_FIELDS, defaultGpuFields, readGpuSnapshot, resolveGpuFields } from './nvidia.js';
+import { BASE_FIELDS, defaultGpuFields, readGpuSnapshot, readRowRemapper, resolveGpuFields } from './nvidia.js';
 import { createProcessInfoReader } from './procinfo.js';
 import { summarizeServices } from './services.js';
 import { createSystemCollector } from './system.js';
@@ -36,6 +36,8 @@ function toCurveGpu(gpu) {
     eccUncorrectedVolatile: gpu.eccUncorrectedVolatile ?? null,
     eccCorrectedAggregate: gpu.eccCorrectedAggregate ?? null,
     eccUncorrectedAggregate: gpu.eccUncorrectedAggregate ?? null,
+    // 行重映射：同样是"卡有没有在变坏"的证据，告警要用到，必须进样本
+    remap: gpu.remap ? { ...gpu.remap } : null,
   };
 }
 
@@ -96,6 +98,8 @@ export function createCollector({
   let stopped = false;
   // 正在跑的那一拍（关历史库前要先等它结束，见 collectOnce / stop）
   let inFlight = null;
+  // 行重映射状态：这些值基本不变，低频读一次就行，读到的结果贴在每一帧的卡上
+  const remap = { at: 0, loading: false, byIndex: new Map(), error: null, unsupported: false };
   let timer = null;
   let lastClientAt = 0;
   let lastDelayMs = options.intervalMs;
@@ -194,6 +198,11 @@ export function createCollector({
         }
       }
 
+      // 行重映射：低频后台读，读不到就沿用上一次的结果，
+      // 绝不能让这一拍因为多问一次 nvidia-smi 而变慢或失败
+      if (!mockSource && runtime.smi?.ok) refreshRemap(runtime.smi.bin);
+      applyRemap(snapshot.gpus);
+
       let systemSample = null;
       if (system) {
         try {
@@ -271,6 +280,42 @@ export function createCollector({
     };
     inFlight.then(done, done);
     return inFlight;
+  }
+
+  /**
+   * 低频刷新行重映射状态。
+   * 刻意不 await：它要再起两次 nvidia-smi，让采集循环等它会拖慢每一帧。
+   * 成功失败都记时间戳，失败时也要等到下一个周期再试，避免每拍都去撞墙。
+   */
+  function refreshRemap(bin) {
+    if (remap.loading || stopped) return;
+    if (remap.at && now() - remap.at < options.remapIntervalMs) return;
+    remap.loading = true;
+    readRowRemapper({ bin, timeout: Math.max(4000, options.intervalMs * 4) })
+      .then((result) => {
+        remap.byIndex = result.byIndex;
+        remap.unsupported = result.unsupported;
+        remap.error = null;
+        // 立刻补到当前这一帧上：否则要等下一次采集才生效，
+        // 采集间隔较长（空闲降频 10 秒）时页面会白等好几秒
+        applyRemap(runtime.latest?.gpus);
+      })
+      .catch((error) => {
+        // 老驱动没有 ROW_REMAPPER 段时整条命令会失败，这不算故障
+        remap.error = error?.message || String(error);
+      })
+      .finally(() => {
+        remap.loading = false;
+        remap.at = now();
+      });
+  }
+
+  /** 把最近一次读到的重映射状态贴到这一帧的卡上；没有数据的卡保持原样 */
+  function applyRemap(gpus) {
+    for (const gpu of gpus || []) {
+      const found = remap.byIndex.get(gpu.index);
+      if (found) gpu.remap = found;
+    }
   }
 
   function cadence() {
@@ -357,6 +402,12 @@ export function createCollector({
       systemEnabled: Boolean(system),
       systemWarning: runtime.systemWarning,
       storeWarning: runtime.storeWarning,
+      // 行重映射的采集状态：读不到时说清原因，而不是让那一行凭空消失
+      remapStatus: {
+        supported: remap.byIndex.size > 0,
+        updatedAt: remap.at || null,
+        error: remap.error,
+      },
       storage: store
         ? store.stats()
         : { mode: 'disabled', supportsHistory: false, reason: '未启用历史库' },

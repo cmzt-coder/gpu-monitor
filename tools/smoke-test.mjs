@@ -7,7 +7,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { readGpuSnapshot, resolveGpuFields, parseGpuCsv, splitRow, defaultGpuFields } from '../src/nvidia.js';
+import {
+  readGpuSnapshot, readRowRemapper, resolveGpuFields, parseGpuCsv, parseRowRemapper, splitRow, defaultGpuFields,
+} from '../src/nvidia.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -402,6 +404,44 @@ assert.equal(state.gpus[0].eccUncorrectedAggregate, 0);
 assert.equal(state.gpus[1].eccMode, null, '驱动不提供 ECC 字段时应留空，而不是当成 0');
 assert.equal(state.gpus[1].eccCorrectedAggregate, null);
 assert.equal(state.gpus[2].eccCorrectedVolatile, 3, '本次驱动加载以来的计数要单独保留');
+
+// 行重映射：不在 --query-gpu 里，只能解析 -q 的结构化文本，所以按总线号对回卡上
+const remapRead = await readRowRemapper({ bin: FAKE_SMI });
+assert.equal(remapRead.unsupported, false);
+assert.equal(remapRead.byIndex.size, 3, '三张卡都要有重映射状态');
+assert.equal(remapRead.byIndex.get(0).banksMax, 640, '备用行直方图里的 Max 要解析出来');
+assert.equal(remapRead.byIndex.get(0).pending, false, 'No 要变成 false 而不是 null');
+assert.equal(remapRead.byIndex.get(0).failure, false);
+assert.equal(remapRead.byIndex.get(1).pending, true, 'Yes 要变成 true');
+assert.equal(remapRead.byIndex.get(2).failure, true, '重映射失败是最重的信号');
+assert.equal(remapRead.byIndex.get(2).correctable, 7);
+assert.equal(remapRead.byIndex.get(2).uncorrectable, 3);
+
+// 解析器要能区分 'Correctable Error' 与 'Inactive Correctable Error'——两者只差一个词，
+// 误判会把"已经不用的行"当成活跃错误。N/A 要留 null，不能当成 false（那是"明确没有"）
+const trickyRemap = parseRowRemapper([
+  'GPU 00000000:01:00.0',
+  '    Remapped Rows',
+  '        Correctable Error                              : 5',
+  '        Inactive Correctable Error                     : 99',
+  '        Uncorrectable Error                            : 1',
+  '        Pending                                        : N/A',
+].join('\n'));
+assert.equal(trickyRemap.get('00000000:01:00.0').correctable, 5, '不能把 Inactive 那行算进 Correctable');
+assert.equal(trickyRemap.get('00000000:01:00.0').uncorrectable, 1);
+assert.equal(trickyRemap.get('00000000:01:00.0').pending, null, 'N/A 要留 null，不能当成 false');
+assert.equal(parseRowRemapper('一段没有 GPU 段的文本').size, 0, '没有 GPU 段时应返回空');
+
+// 采集器把后台读到的重映射状态贴到卡上：它是异步的，所以给它一点时间
+const remapDeadline = Date.now() + 3000;
+let remapGpu = null;
+while (Date.now() < remapDeadline && !remapGpu) {
+  remapGpu = collector.getState().gpus.find((gpu) => gpu.remap);
+  if (!remapGpu) await new Promise((resolve) => setTimeout(resolve, 20));
+}
+assert.ok(remapGpu, '行重映射状态应被后台读进来并贴到卡上');
+assert.equal(remapGpu.remap.banksMax, 640);
+assert.equal(remapGpu.remap.failure, false);
 assert.equal(state.fields.extended, true);
 assert.equal(state.system.mem.usedPct, 40, '/api/state 应带上宿主指标');
 assert.equal(state.idle.active, false);
@@ -692,6 +732,7 @@ const gpuAt = (i) => ({
   eccUncorrectedVolatile: 0,
   eccCorrectedAggregate: 100 + i,
   eccUncorrectedAggregate: 0,
+  remap: { correctable: i, uncorrectable: 0, pending: i === 2, failure: false, banksMax: 640 - i },
 });
 const procAt = (pid) => [{
   gpuUuid: 'GPU-test', gpuIndex: 0, pid, name: 'train.py', usedMemMiB: 90,
@@ -737,6 +778,9 @@ assert.equal(rawQuery.samples[2].gpus[0].throttled, true);
 assert.equal(rawQuery.samples[0].gpus[0].eccMode, 'Enabled', 'ECC 模式要能往返');
 assert.equal(rawQuery.samples[0].gpus[0].eccCorrectedAggregate, 100, 'ECC 累计计数要能往返');
 assert.equal(rawQuery.samples[2].gpus[0].eccCorrectedVolatile, 2, 'volatile 与 aggregate 要分开存');
+assert.equal(rawQuery.samples[0].gpus[0].remap.banksMax, 640, '行重映射要能往返');
+assert.equal(rawQuery.samples[2].gpus[0].remap.pending, true, 'Pending 是真假值，存回来也要是布尔');
+assert.equal(rawQuery.samples[0].gpus[0].remap.failure, false);
 assert.equal(rawQuery.samples[0].system.cpu.usagePct, 10);
 assert.equal(rawQuery.samples[0].system.mem.usedPct, 50);
 

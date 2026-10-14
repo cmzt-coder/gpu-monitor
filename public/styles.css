@@ -401,14 +401,14 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   font-size: 12.5px; color: var(--jf-color-ink-muted);
   font-variant-numeric: tabular-nums;
 }
-/* ECC 单独一行：它是"这张卡是不是在变坏"的信号，不该混进一堆运行参数里 */
-.gpu-card__ecc {
+/* 硬件健康单独一行：它是"这张卡是不是在变坏"的信号，不该混进一堆运行参数里 */
+.gpu-card__health {
   margin-top: 7px;
   font-size: 12.5px; color: var(--jf-color-ink-muted);
   font-variant-numeric: tabular-nums;
 }
-.gpu-card__ecc[data-tone="warning"] { color: var(--jf-color-warning); }
-.gpu-card__ecc[data-tone="danger"] { color: var(--jf-color-danger); font-weight: 600; }
+.gpu-card__health[data-tone="warning"] { color: var(--jf-color-warning); }
+.gpu-card__health[data-tone="danger"] { color: var(--jf-color-danger); font-weight: 600; }
 
 /* ---------- 采集信息 ---------- */
 .meta { margin-top: 14px; display: grid; gap: 10px; }

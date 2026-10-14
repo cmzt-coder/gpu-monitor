@@ -38,6 +38,7 @@ const GPUS = [
     'clocks_throttle_reasons.hw_power_brake_slowdown': 'Not Active',
     'clocks_throttle_reasons.sw_thermal_slowdown': 'Not Active',
     'clocks_throttle_reasons.gpu_idle': 'Active',
+    'pci.bus_id': '00000000:01:00.0',
     // 一张干净但有历史的卡：本次运行没错，终身累计过 12 次可纠正错误
     'ecc.mode.current': 'Enabled',
     'ecc.errors.corrected.volatile.total': '0',
@@ -73,6 +74,7 @@ const GPUS = [
     'clocks_throttle_reasons.sw_thermal_slowdown': 'Not Active',
     'clocks_throttle_reasons.gpu_idle': 'Not Active',
     // 1 号卡故意不提供 ECC 字段：覆盖"驱动不支持时留空"这条路径
+    'pci.bus_id': '00000000:02:00.0',
   },
   {
     index: '2',
@@ -107,6 +109,7 @@ const GPUS = [
     'ecc.errors.uncorrected.volatile.total': '0',
     'ecc.errors.corrected.aggregate.total': '4800',
     'ecc.errors.uncorrected.aggregate.total': '1',
+    'pci.bus_id': '00000000:03:00.0',
   },
 ];
 
@@ -124,6 +127,49 @@ if (args.includes('-L')) {
     process.exit(2);
   }
   out(GPUS.map((gpu) => fields.map((field) => (field in gpu ? gpu[field] : '[Not Supported]')).join(', ')));
+} else if (args.includes('-q')) {
+  // nvidia-smi -q -d ROW_REMAPPER：格式与真机一致，三个块对应三种状态
+  const block = (busId, body) => [`GPU ${busId}`, '    Remapped Rows', ...body];
+  const hist = (max) => [
+    '        Bank Remap Availability Histogram',
+    `            Max                                        : ${max} bank(s)`,
+    '            High                                       : 0 bank(s)',
+    '            Partial                                    : 0 bank(s)',
+    '            Low                                        : 0 bank(s)',
+    '            None                                       : 0 bank(s)',
+  ];
+  out([
+    '==============NVSMI LOG==============',
+    '',
+    'Attached GPUs                                          : 3',
+    ...block('00000000:01:00.0', [
+      '        Correctable Error                              : 0',
+      '        Inactive Correctable Error                     : 0',
+      '        Uncorrectable Error                            : 0',
+      '        Inactive Uncorrectable Error                   : 0',
+      '        Pending                                        : No',
+      '        Remapping Failure Occurred                     : No',
+      ...hist(640),
+    ]),
+    ...block('00000000:02:00.0', [
+      '        Correctable Error                              : 2',
+      '        Inactive Correctable Error                     : 0',
+      '        Uncorrectable Error                            : 0',
+      '        Inactive Uncorrectable Error                   : 0',
+      '        Pending                                        : Yes',
+      '        Remapping Failure Occurred                     : No',
+      ...hist(638),
+    ]),
+    ...block('00000000:03:00.0', [
+      '        Correctable Error                              : 7',
+      '        Inactive Correctable Error                     : 1',
+      '        Uncorrectable Error                            : 3',
+      '        Inactive Uncorrectable Error                   : 0',
+      '        Pending                                        : No',
+      '        Remapping Failure Occurred                     : Yes',
+      ...hist(0),
+    ]),
+  ]);
 } else if (query.startsWith('--query-compute-apps=')) {
   out([
     'GPU-abc-0, 20481, /usr/bin/python3 -m vllm.entrypoints.api_server, 16200',
