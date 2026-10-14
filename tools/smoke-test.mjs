@@ -1768,6 +1768,8 @@ const noAlertsRuntime = createAlertsRuntime({
 await noAlertsRuntime.start();
 assert.equal(noAlertsRuntime.snapshot().enabled, false);
 assert.ok(noAlertsRuntime.snapshot().reason.includes('--no-alerts'));
+// 界面会把它包在"未启用（…）"里，自身带括号就会变成双层嵌套
+assert.equal(noAlertsRuntime.snapshot().reason.includes('（'), false, '未启用的原因自身不该带括号');
 noAlertsRuntime.close();
 
 /* ---------- 通知渠道：dry-run 不真的发信 ---------- */

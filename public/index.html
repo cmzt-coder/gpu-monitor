@@ -158,6 +158,24 @@
         </div>
       </section>
 
+      <section class="card" aria-labelledby="svc-h">
+        <div class="card__head card__head--stack">
+          <div>
+            <h2 class="card__title" id="svc-h">服务显存曲线</h2>
+            <p class="card__sub" id="svc-sub">按服务汇总，最多画占用最高的 5 个</p>
+          </div>
+          <div class="legend" id="svc-legend"></div>
+        </div>
+        <div class="chart__canvas-wrap chart__canvas-wrap--tall" id="svc-chart-wrap">
+          <canvas class="chart__canvas" id="svc-canvas" role="img" aria-label="按服务汇总的显存占用曲线"></canvas>
+        </div>
+        <div class="state-block" id="svc-empty" hidden>
+          <svg class="icon state-block__icon" aria-hidden="true"><use href="#icon-stack"></use></svg>
+          <p class="state-block__title" id="svc-empty-title">还没有服务维度的数据</p>
+          <p class="state-block__text" id="svc-empty-text"></p>
+        </div>
+      </section>
+
       <section class="card" aria-labelledby="sys-h">
         <div class="card__head">
           <div>
@@ -224,7 +242,7 @@
           </div>
           <div class="range-picker" id="proc-hist-range" role="group" aria-label="选择进程历史的时间范围"></div>
         </div>
-        <div class="table-wrap" id="proc-hist-wrap" hidden>
+        <div class="table-wrap table-wrap--scroll" id="proc-hist-wrap" hidden>
           <table class="table" id="proc-hist-table">
             <caption class="visually-hidden">历史进程占用记录，按时间从新到旧</caption>
             <thead>

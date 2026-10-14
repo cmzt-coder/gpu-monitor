@@ -73,7 +73,7 @@ export function createAlertsRuntime({
 
     if (!loaded.config) {
       const reason = loaded.error
-        || (options.alerts === false ? '已关闭（--no-alerts）'
+        || (options.alerts === false ? '启动时带了 --no-alerts'
           : loaded.disabled ? '配置里 enabled=false'
             : loaded.missing ? `未找到 ${options.alertsPath}` : '未启用');
       if (!initial && runtime.engine) {
@@ -144,7 +144,8 @@ export function createAlertsRuntime({
         reason: runtime.engine
           ? null
           : (runtime.error
-            || (options.alerts === false ? '已关闭（--no-alerts）'
+            // 这条会被界面包在"未启用（…）"里，所以自身不要再带括号
+            || (options.alerts === false ? '启动时带了 --no-alerts'
               : runtime.missing ? `未找到 ${options.alertsPath}`
                 : runtime.disabled ? '配置里 enabled=false' : '未启用')),
         reloadedAt: runtime.reloadedAt,

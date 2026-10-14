@@ -39,6 +39,13 @@ const refs = {
   charts: $('charts'),
   chartsEmpty: $('charts-empty'),
   chartsSub: $('charts-sub'),
+  svcSub: $('svc-sub'),
+  svcLegend: $('svc-legend'),
+  svcChartWrap: $('svc-chart-wrap'),
+  svcCanvas: $('svc-canvas'),
+  svcEmpty: $('svc-empty'),
+  svcEmptyTitle: $('svc-empty-title'),
+  svcEmptyText: $('svc-empty-text'),
   rangePicker: $('range-picker'),
   emptyTitle: $('empty-title'),
   emptyText: $('empty-text'),
@@ -77,6 +84,9 @@ const state = {
   filter: 'all',
   series: new Map(),
   systemSeries: { t: [], cpu: [], mem: [] },
+  // 每一帧的原始服务汇总：服务的增删很频繁，边采边维护固定的曲线列表容易错位，
+  // 所以原样留着，渲染时再挑"这段时间占用最高的几个"
+  serviceRows: [],
   chartNodes: new Map(),
   chartSignature: '',
   cardNodes: new Map(),
@@ -251,7 +261,10 @@ function tempTone(temp) {
 
 /* ---------- 数据接入 ---------- */
 function trimToWindow(list) {
-  const overflow = list.t.length - state.windowSamples;
+  // 上限必须和 chartSlots() 用同一个数：横轴是按它铺开的，曲线却按实时窗口（300 点）裁的话，
+  // 长区间会被截成最后 300 点并挤到画布最右边——1501 个点的区间实测就是这样，
+  // 时间轴左端会显示"现在"而不是区间起点。
+  const overflow = list.t.length - chartSlots();
   if (overflow > 0) list.t.splice(0, overflow);
   return overflow;
 }
@@ -294,6 +307,12 @@ function appendSample(sample, { force = false } = {}) {
       series.cpu.splice(0, overflow);
       series.mem.splice(0, overflow);
     }
+  }
+  // 服务汇总按帧原样留着，渲染时再挑"这段时间占用最高的几个"——
+  // 服务的增删很频繁，边采边维护一份固定的曲线列表反而容易错位
+  state.serviceRows.push({ t: sample.t, services: sample.services || [] });
+  if (state.serviceRows.length > chartSlots()) {
+    state.serviceRows.splice(0, state.serviceRows.length - chartSlots());
   }
 }
 
@@ -917,6 +936,110 @@ function renderCharts() {
         { limit: HIGH_THRESHOLD, times: series.t },
       );
     }
+  }
+}
+
+/* ---------- 渲染：服务显存曲线 ---------- */
+const SERVICE_COLORS = ['#005bac', '#00a0e3', '#2f988c', '#ed7d31', '#8e6bbf', '#c87700'];
+const SERVICE_TOP_N = 5;
+const SERVICE_LABELS = { 未识别: '未识别（拿不到服务身份的进程）' };
+
+/**
+ * 从逐帧的服务汇总里挑出这段时间占用最高的几个，剩下的归入"其他"。
+ * 排序用区间内的峰值而不是当前值：某个服务刚降下来、但整段时间都吃得很凶，
+ * 按当前值排会被挤出去，反而看不出是谁在占。
+ */
+function buildServiceSeries(rows, topN = SERVICE_TOP_N) {
+  const peaks = new Map();
+  for (const row of rows) {
+    for (const entry of row.services) {
+      const share = entry.sharePct ?? 0;
+      if (share > (peaks.get(entry.service) ?? 0)) peaks.set(entry.service, share);
+    }
+  }
+  const names = [...peaks.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([name]) => name);
+
+  const lines = names.map((name, index) => ({
+    name,
+    color: SERVICE_COLORS[index % SERVICE_COLORS.length],
+    values: [],
+  }));
+  const other = { name: '其他', color: SERVICE_COLORS[SERVICE_COLORS.length - 1], values: [] };
+  const times = [];
+
+  for (const row of rows) {
+    times.push(row.t);
+    const byName = new Map(row.services.map((entry) => [entry.service, entry]));
+    let shown = 0;
+    for (const line of lines) {
+      const entry = byName.get(line.name);
+      const share = entry ? (entry.sharePct ?? 0) : null;
+      line.values.push(share);
+      if (share != null) shown += share;
+    }
+    // "其他"是"这一帧所有服务之和减去已画出来的部分"，这样它永远和总量对得上，
+    // 不会因为某个服务中途消失而算错
+    const total = row.services.reduce((sum, entry) => sum + (entry.sharePct ?? 0), 0);
+    const rest = total - shown;
+    other.values.push(rest > 0.05 ? rest : null);
+  }
+  if (other.values.some((value) => value != null)) lines.push(other);
+  return { lines, times };
+}
+
+function renderServiceChart() {
+  refs.svcSub.textContent = `按服务汇总 · ${rangeLabel()} · 最多画占用最高的 ${SERVICE_TOP_N} 个`;
+  const rows = state.serviceRows;
+  const usable = rows.filter((row) => row.services.length > 0);
+
+  if (usable.length === 0) {
+    refs.svcChartWrap.hidden = true;
+    refs.svcLegend.replaceChildren();
+    refs.svcEmpty.hidden = false;
+    refs.svcEmptyTitle.textContent = '还没有服务维度的数据';
+    refs.svcEmptyText.textContent = rows.length === 0
+      ? '曲线还没有采样点，稍等一两秒。'
+      : '这个区间里没有服务汇总记录。服务维度是后加的，更早写入的历史补不回来。';
+    return;
+  }
+  refs.svcChartWrap.hidden = false;
+  refs.svcEmpty.hidden = true;
+
+  const { lines, times } = buildServiceSeries(usable);
+  drawLines(refs.svcCanvas, lines, chartSlots(), { times });
+
+  // 图例带当前值：只给颜色分不清谁是谁。
+  // 服务可能在区间末尾已经退出了，这时退到"最后一次见到的值"并标注出来，
+  // 显示"--"等于把这条曲线整段的信息都丢了
+  const lastRow = usable[usable.length - 1];
+  const inLast = new Map(lastRow.services.map((entry) => [entry.service, entry]));
+  const lastSeen = new Map();
+  for (const row of usable) {
+    for (const entry of row.services) lastSeen.set(entry.service, entry);
+  }
+  const drawnNames = lines.filter((line) => line.name !== '其他').map((line) => line.name);
+  const shownMemInLast = drawnNames.reduce((sum, name) => sum + (inLast.get(name)?.memMiB || 0), 0);
+  const totalMemInLast = lastRow.services.reduce((sum, entry) => sum + (entry.memMiB || 0), 0);
+
+  refs.svcLegend.replaceChildren();
+  for (const line of lines) {
+    const item = document.createElement('span');
+    item.className = 'legend__item';
+    const swatch = document.createElement('span');
+    swatch.className = 'legend__swatch';
+    swatch.style.background = line.color;
+    const isOther = line.name === '其他';
+    const gone = !isOther && !inLast.has(line.name);
+    const entry = isOther ? null : (inLast.get(line.name) || lastSeen.get(line.name));
+    const mem = isOther ? Math.max(0, totalMemInLast - shownMemInLast) : (entry?.memMiB ?? null);
+    const text = document.createElement('span');
+    text.textContent = `${SERVICE_LABELS[line.name] || line.name} ${mem == null ? '--' : fmtGiB(mem)}`
+      + (gone ? '（区间末尾已退出）' : '');
+    item.append(swatch, text);
+    refs.svcLegend.appendChild(item);
   }
 }
 
@@ -1560,6 +1683,7 @@ function render() {
     : '扩展字段只存在历史库里，启用历史库后可用';
   renderKpis();
   renderCharts();
+  renderServiceChart();
   renderSystemCard();
   renderGpuCards();
   renderProcFilter();
@@ -1614,6 +1738,7 @@ function renderRangePicker() {
 function resetSeries() {
   state.series.clear();
   state.systemSeries = { t: [], cpu: [], mem: [] };
+  state.serviceRows = [];
   // 让曲线与卡片节点按新的数据重建，避免残留上一次的卡列表
   state.chartSignature = '';
   state.cardSignature = '';
@@ -1693,6 +1818,7 @@ window.addEventListener('resize', () => {
   window.clearTimeout(resizeTimer);
   resizeTimer = window.setTimeout(() => {
     renderCharts();
+    renderServiceChart();
     renderSystemCard();
   }, 180);
 });

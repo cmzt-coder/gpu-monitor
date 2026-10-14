@@ -292,6 +292,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .chart__stat[data-tone="danger"] b { color: var(--jf-color-danger); }
 
 .chart__canvas-wrap { position: relative; margin-top: 8px; height: 158px; }
+.chart__canvas-wrap--tall { height: 200px; }
 .chart__canvas { display: block; width: 100%; height: 100%; }
 
 /* ---------- 状态块 ---------- */
@@ -316,6 +317,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 
 /* ---------- 表格 ---------- */
 .table-wrap { margin-top: 14px; overflow-x: auto; }
+/* 进程历史最多能带到 200 条，不设上限的话这张表会把页面撑到上万像素高 */
+.table-wrap--scroll { max-height: 420px; overflow-y: auto; }
 .table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .table thead th {
   position: sticky; top: 0; z-index: 1;
