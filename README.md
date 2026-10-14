@@ -322,6 +322,34 @@ ps -eo user,pid,cmd | grep -i '[n]ode'
 
 还有一点要有预期：**换上带 `node:sqlite` 的 Node 之后，历史库是从零开始攒的**，刚切过去时「3 天 / 7 天 / 30 天」这些区间只有从切换那一刻起的数据。
 
+### 时区（导出的时间差几小时，就查这里）
+
+云主机的系统时区默认常常是 **UTC**（`ls -l /etc/localtime` 会看到 `-> /usr/share/zoneinfo/Etc/UTC`），而用页面的人在东八区。这时导出的 `time_local` 会和 `timestamp_iso` 一模一样——看着像"修复没生效"，其实是这台机器的本地时间本来就是 UTC。
+
+```bash
+# 先确认是哪种情况
+date '+%Z %z'
+node -e 'console.log(Intl.DateTimeFormat().resolvedOptions().timeZone)'
+```
+
+要固定成本地时间，用 `--tz`：
+
+```bash
+SMTP_PASS='你的授权码' ./start-bg.sh --node /opt/node24/bin/node --tz Asia/Shanghai
+```
+
+它**只改 gpu-monitor 这个进程的时区**：导出里的 `time_local`、CSV 文件名里的时间戳、日志时间都会跟着走。系统时区一个字节都不动，所以**这台机器上跑着的其他服务完全不受影响**——这也是为什么不要用 `sudo timedatectl set-timezone Asia/Shanghai` 去改：那会波及所有依赖 UTC 的服务（数据库、日志、调度器），改完才发现就晚了。
+
+等价写法有三种，任选其一：
+
+| 方式 | 写法 | 适用 |
+| --- | --- | --- |
+| 启动参数 | `./start-bg.sh --tz Asia/Shanghai` | 最直观，推荐 |
+| 环境变量 | `TZ=Asia/Shanghai ./start-bg.sh` | Node 原生支持，写进自己的重启脚本也方便 |
+| systemd | 单元里加 `Environment=TZ=Asia/Shanghai` | 走 systemd 托管时用（模板里有注释示例） |
+
+启动横幅和页面上的导出弹窗都会写明**当前生效的时区**；如果时区还是 UTC 且没有显式固定，启动横幅会直接提示该怎么改——不会让你自己去猜为什么时间对不上。
+
 ## 启动脚本
 
 项目根目录自带三个脚本，参数和 `server.js` 完全一致：
@@ -402,6 +430,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 | `--no-alerts-reload` | 关闭 | 关掉告警配置热加载（默认改了 `alerts.json` 会自动重新加载） |
 | `--idle-after` | `30` | 多久（秒）没有页面访问就转入空闲降频，`0` 表示不降频 |
 | `--idle-interval` | `10000` | 空闲期间的采集间隔（毫秒） |
+| `--tz` | 跟随系统时区 | 把**本服务**的时区固定成这个 IANA 名字（如 `Asia/Shanghai`）。影响导出里的 `time_local` 列、CSV 文件名、日志时间；也认 `TZ` 环境变量。**只对这个进程生效，不改系统时区，不影响这台机器上的其他服务**——详见「部署到服务器 → 时区」 |
 | `--mock` | 关闭 | 用模拟数据启动，便于无 GPU 环境联调 |
 
 环境变量：`GPU_MONITOR_MOCK=1` 等价于 `--mock`；`GPU_MONITOR_MOCK_GPUS=8` 指定模拟卡数；`GPU_MONITOR_MOCK_HIGH=1` 让 0 号卡稳定在 90% 以上，用来检查告警配色。
@@ -485,7 +514,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 
 **下载按钮在哪？** 页面上只有顶部一个「导出」按钮——内容、时间范围、选项都在弹窗里选。之所以收成一个入口，是因为原来四个按钮分在三处、各自默认的时间范围还不一样（比如 JSON 不跟时间范围），很容易搞混。现在弹窗底部那行「将导出：…」会实时写清你到底要下什么。
 
-**导出的 CSV 用 Excel 打开，时间比墙上时钟早 8 小时？** 那是老版本的行为：时间列只有一列 UTC（`...T06:25:03.000Z`），东八区看着就像少了 8 小时。现在 CSV 有两列时间：`time_local` 是服务器本地时间（`2026-10-14 14:25:03`，Excel 直接认成日期时间），`timestamp_iso` 是同一时刻的 UTC。要用哪列取哪列——**看和筛用 `time_local`，写脚本入库用 `timestamp_iso`**。如果 `time_local` 也不对，说明服务器的系统时区不是你要的那个，用 `TZ=Asia/Shanghai ./start-bg.sh` 显式指定即可（页面导出弹窗里会显示当前用的是哪个时区）。
+**导出的 CSV 用 Excel 打开，时间比墙上时钟早 8 小时？** 时间列有两列：`time_local`（Excel 直接认成日期时间）和 `timestamp_iso`（同一时刻的 UTC）。要用哪列取哪列——**看和筛用 `time_local`，写脚本入库用 `timestamp_iso`**。如果 `time_local` 也早了 8 小时，那说明**服务器的系统时区就是 UTC**（云主机默认如此），不是代码没生效：`ls -l /etc/localtime` 会看到指向 `Etc/UTC`。用 `./start-bg.sh --tz Asia/Shanghai` 把它固定成东八区即可——只影响本服务进程，不改系统时区、不影响其他服务，细节见「部署到服务器 → 时区」。页面导出弹窗和启动横幅都会显示当前生效的时区。
 
 **历史库提示"不可用"？** 大概率是 Node 版本低于 22.13（没有内置 `node:sqlite`）。升级 Node 即可；不升级也不影响实时监控，只是没有历史。页面「采集信息 → 历史库」会写明具体原因。
 

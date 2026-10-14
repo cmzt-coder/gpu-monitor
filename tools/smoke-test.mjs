@@ -2,10 +2,11 @@
 // 冒烟测试：不依赖网络与真实 GPU，验证 nvidia-smi 解析、字段探测、宿主指标、
 // 空闲调度、环形缓冲与 CSV 导出。
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   normalizeBusId,
@@ -21,12 +22,15 @@ import {
   GPU_CSV_HEADER_FULL,
   PROCESS_CSV_HEADER,
   SYSTEM_CSV_HEADER,
+  applyTimeZone,
+  assertTimeZone,
   formatTimestamp,
   gpuRowToCsv,
   processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
   serverTimeZone,
+  shouldWarnUtcTimeZone,
   systemRowToCsv,
 } from '../src/export.js';
 import { createMockSource, createMockSystem } from '../src/mock.js';
@@ -231,6 +235,52 @@ assert.equal(
   `${tsDate.getFullYear()}-${pad2(tsDate.getMonth() + 1)}-${pad2(tsDate.getDate())} `
     + `${pad2(tsDate.getHours())}:${pad2(tsDate.getMinutes())}:${pad2(tsDate.getSeconds())}`,
   'Intl 的输出要和 Date 的本地时间取值一致',
+);
+
+/* 时区名校验：填错要在启动阶段就报人话，别等导出到一半才发现 */
+assert.equal(assertTimeZone('Asia/Shanghai'), 'Asia/Shanghai');
+assert.equal(assertTimeZone('UTC'), 'UTC');
+assert.equal(assertTimeZone(' asia/shanghai '), 'Asia/Shanghai', '多余空格与大小写要能容忍');
+assert.throws(() => assertTimeZone('Asia/Shangai'), /IANA/, '拼错的时区要给出可照着改的提示');
+assert.throws(() => assertTimeZone('+08:00'), /IANA/, '偏移量写法不算时区名');
+assert.throws(() => assertTimeZone(''), /不能为空/);
+
+// UTC 提醒只在"没人显式选过时区"时出现：系统默认是 UTC 时要提醒（云主机常态），
+// 用户自己选了 UTC 就别去打扰
+assert.equal(shouldWarnUtcTimeZone({ zone: 'UTC', fixed: false }), true);
+assert.equal(shouldWarnUtcTimeZone({ zone: 'utc', fixed: false }), true, '大小写不敏感');
+assert.equal(shouldWarnUtcTimeZone({ zone: 'UTC', fixed: true }), false, '主动选了 UTC 就不再唠叨');
+assert.equal(shouldWarnUtcTimeZone({ zone: 'Asia/Shanghai', fixed: false }), false);
+assert.equal(shouldWarnUtcTimeZone({}), false);
+
+/* 真实回归：系统时区是 UTC 时，--tz 必须把导出掰回本地时间 */
+// 这台服务器 /etc/localtime 指向 Etc/UTC，所以 time_local 一度和 UTC 列一模一样，
+// 看着像"改了没生效"。用子进程把 TZ 钉成 UTC 复现那个环境，再验 --tz 的效果——
+// 放子进程里是因为要改 process.env.TZ，不能在测试进程里留下痕迹。
+const tzProbe = execFileSync(process.execPath, ['--input-type=module', '-e', `
+  import { applyTimeZone, formatTimestamp, serverTimeZone } from ${JSON.stringify(pathToFileURL(path.join(HERE, '..', 'src', 'export.js')).href)};
+  const ms = Date.UTC(2026, 9, 14, 6, 25, 3);
+  const out = [
+    serverTimeZone(),
+    formatTimestamp(ms).local,
+    applyTimeZone('Asia/Shanghai'),
+    serverTimeZone(),
+    formatTimestamp(ms).local,
+    formatTimestamp(ms).iso,
+  ];
+  console.log(out.join('|'));
+`], { env: { ...process.env, TZ: 'UTC' }, encoding: 'utf8' }).trim();
+assert.equal(
+  tzProbe,
+  [
+    'UTC',                      // 复现出的环境：系统时区是 UTC
+    '2026-10-14 06:25:03',      // 不固定时 time_local 就是 UTC，和 UTC 列一样
+    'Asia/Shanghai',            // --tz 生效
+    'Asia/Shanghai',            // 进程时区真的被切过去了
+    '2026-10-14 14:25:03',      // 导出变成本地时间
+    '2026-10-14T06:25:03.000Z', // UTC 列原样不动
+  ].join('|'),
+  `--tz 没能把 UTC 环境掰成本地时间：${tzProbe}`,
 );
 
 const csv = samplesToCsv([
@@ -2518,5 +2568,6 @@ process.stdout.write(
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
   + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流与硬件健康的行内判定 / '
   + '导航模式紧凑顶栏（结构约定）/ '
-  + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）\n',
+  + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）/ '
+  + '--tz 固定时区（系统时区是 UTC 时的回归）\n',
 );

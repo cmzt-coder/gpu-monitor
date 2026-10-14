@@ -15,6 +15,58 @@ export function serverTimeZone() {
   }
 }
 
+/**
+ * 校验并归一化一个时区名。
+ *
+ * 服务器的系统时区常是 UTC（云主机默认如此），而人都在东八区——
+ * 这时导出的 time_local 会和 timestamp_iso 一模一样，看着像"没生效"。
+ * 所以给一个显式开关，把时区钉死，不必去动系统时区（那会影响这台机器上的其他服务）。
+ *
+ * 启动阶段就校验：填错时宁可起不来，也别等导出到一半才发现。
+ */
+export function assertTimeZone(value) {
+  const text = String(value ?? '').trim();
+  if (!text) throw new Error('时区不能为空，例如 Asia/Shanghai');
+  const hint = `请填 IANA 名字，例如 Asia/Shanghai、UTC、America/New_York`;
+  try {
+    // 顺手归一化：'etc/utc' 之类的大小写写法也会被纠正成标准名
+    const resolved = new Intl.DateTimeFormat('sv-SE', { timeZone: text }).resolvedOptions().timeZone;
+    // 部分 ICU 版本收 '+08:00' 这类偏移写法，也能算对，但 process.env.TZ 认的是 IANA 名字：
+    // 偏移写法传下去会落到 POSIX 的 TZ 解析规则里（正负号含义还是反的），结果没法预测。
+    // 所以这里只放行真正的时区名，把这类输入挡在启动阶段。
+    if (!resolved || /^[+-]/.test(resolved)) throw new Error('offset');
+    return resolved;
+  } catch {
+    throw new Error(`未知时区 ${JSON.stringify(text)}：${hint}`);
+  }
+}
+
+/**
+ * 把本进程的时区切成 `--tz` 指定的那一个，并返回最终生效的时区名。
+ *
+ * 改的是 `process.env.TZ`——Node 的 Date / Intl 会跟着它走，所以导出的 time_local、
+ * CSV 文件名里的时间戳、日志时间会一起统一，不必各处分别指定。
+ * 传空值就保持系统时区不变。**系统时区一个字节都不动**，同机其他服务不受影响。
+ */
+export function applyTimeZone(value) {
+  if (!value) return serverTimeZone();
+  const zone = assertTimeZone(value);
+  process.env.TZ = zone;
+  return serverTimeZone();
+}
+
+/**
+ * 要不要在启动时提醒"导出时区是 UTC"。
+ *
+ * 只在**没人显式选过时区**时提醒：`--tz` 或 `TZ` 都没给，说明这个 UTC 只是系统默认。
+ * 用户主动选了 UTC（比如团队就是要 UTC 归档）就别去打扰他。
+ * 云主机默认常常就是 UTC，而用页面的人在东八区——不提醒的话，
+ * 导出的 time_local 会和 UTC 列一模一样，看着像"改了没生效"。
+ */
+export function shouldWarnUtcTimeZone({ zone, fixed } = {}) {
+  return !fixed && String(zone || '').toUpperCase() === 'UTC';
+}
+
 // 每行都要格式化时间，几百万行时反复 new Intl.DateTimeFormat 会明显拖慢导出，
 // 所以按时区缓存住。同一个导出只会用到同一个时区，缓存命中率是 100%
 const localFormatCache = new Map();

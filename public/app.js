@@ -2236,6 +2236,38 @@ function renderExportRange() {
   }
 }
 
+/** 浏览器（也就是看页面的人）所在的时区；取不到就返回空串 */
+function ownTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 导出弹窗里那行时间口径说明。
+ *
+ * 服务器的系统时区经常是 UTC（云主机默认如此），而用 Excel 打开文件的人在东八区——
+ * 这时 time_local 会和 timestamp_iso 一模一样，看着像"修复没生效"。
+ * 所以这里不仅写清时区名，发现两边不一致时直接把补救的启动参数给出来。
+ */
+function exportTimeHint() {
+  const zone = state.meta?.timeZone;
+  const fixed = state.meta?.timeZoneFixed === true;
+  const own = ownTimeZone();
+  const subject = fixed ? `导出时区 ${zone}` : `服务器系统时区 ${zone || '未知'}`;
+  let text = `时间有两列：time_local 用${subject}，Excel 直接认成日期时间；`
+    + 'timestamp_iso 是 UTC，脚本和跨时区对齐用。';
+  // 判断只看"两边对不对得上"：哪怕时区是显式固定的，只要和看文件的人不一致，
+  // 他就一定会把 06:25 当成错误数据——这跟当初是不是有意选的没有关系
+  if (zone && own && zone !== own) {
+    text += ` 注意：这台机器是 ${own}，导出的 time_local 会和你看到的时间对不上；`
+      + `在服务器上用 --tz ${own} 启动就能固定成同一个口径（只影响本服务，不改系统时区）。`;
+  }
+  return text;
+}
+
 /** 面板里所有联动都在这里：谁可用、什么被置灰、底下那句话说什么 */
 function syncExportPanel() {
   const item = exportItem();
@@ -2258,11 +2290,7 @@ function syncExportPanel() {
     : '只有 GPU 曲线有扩展指标';
 
   // 时间列有两列，说清楚各自是谁——否则用 Excel 打开看到的是 UTC，会以为数据错了
-  const zone = state.meta?.timeZone;
-  refs.exportTimeHint.textContent = item.format === 'CSV'
-    ? `时间有两列：time_local 是服务器本地时间${zone ? `（${zone}）` : ''}，Excel 直接认成日期时间；`
-      + 'timestamp_iso 是 UTC，脚本和跨时区对齐用'
-    : '';
+  refs.exportTimeHint.textContent = item.format === 'CSV' ? exportTimeHint() : '';
 
   const parts = [`${item.label}（${item.format}）`];
   if (canFull && exportChoice.full) parts.push('含扩展指标');

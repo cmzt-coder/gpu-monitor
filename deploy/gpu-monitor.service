@@ -68,6 +68,11 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 #   加 --no-store-processes 不把占用进程写进历史库
 #   加 --reclaim 在启动时做一次整库重写、回收空间，跑完可以删掉
 #   加 --no-push 如果公司反代不支持 SSE
+#   加 --tz Asia/Shanghai 固定本服务时区：云主机的系统时区默认常是 UTC，
+#      那样导出的 time_local 会和 UTC 列一模一样。这个开关只对本进程生效，
+#      不改系统时区，也不影响这台机器上的其他服务（导出时间列、CSV 文件名、
+#      日志时间都会跟着它走）。等价的写法是下面这行 Environment，二选一即可。
+# Environment=TZ=Asia/Shanghai
 
 [Install]
 WantedBy=multi-user.target

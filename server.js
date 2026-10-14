@@ -18,11 +18,12 @@ import {
   GPU_CSV_HEADER_FULL,
   PROCESS_CSV_HEADER,
   SYSTEM_CSV_HEADER,
+  applyTimeZone,
   gpuRowToCsv,
   processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
-  serverTimeZone,
+  shouldWarnUtcTimeZone,
   systemRowToCsv,
 } from './src/export.js';
 import { createMockSource, createMockSystem } from './src/mock.js';
@@ -75,6 +76,12 @@ const HELP = `GPU 显存负载监控服务
                               （只想看得清爽点用页面上的「占用下限」，那个不会丢数据）
       --reclaim           启动时把历史库做一次整库重写（开启增量回收，释放已删数据占用的空间）
 
+时间：
+      --tz <时区>         把本服务的时区固定成这个 IANA 名字（如 Asia/Shanghai）。
+                              影响导出里的 time_local 列、CSV 文件名和日志时间。
+                              只对这个进程生效，不改系统时区、不影响这台机器上的其他服务。
+                              不填则跟随系统时区（云主机默认常是 UTC），也认 TZ 环境变量。
+
       --mock              使用模拟数据，便于无 GPU 环境本地开发
   -h, --help              显示帮助
 
@@ -111,6 +118,8 @@ function parseArgs(argv) {
     // 真要限制就显式给 --retention-days <天>。
     retentionDays: 0,
     storeProcesses: true,
+    // 显式时区（IANA 名）。null = 跟随系统时区，也认 TZ 环境变量
+    timeZone: null,
     // 进程记录下限（MiB）：0 = 全记。只看大进程请用页面上的「占用下限」，
     // 那是查询侧过滤、历史照样完整；这里设了值就是真的不写进库
     procMinMiB: 0,
@@ -195,6 +204,9 @@ function parseArgs(argv) {
       case '--reclaim':
         options.reclaimOnStart = true;
         break;
+      case '--tz':
+        options.timeZone = next() || options.timeZone;
+        break;
       case '--mock':
         options.mock = true;
         break;
@@ -214,6 +226,20 @@ if (options.help) {
   process.stdout.write(HELP);
   process.exit(0);
 }
+
+// 时区固定：必须放在任何时间相关逻辑之前。
+// 只改本进程的 process.env.TZ——Node 的 Date / Intl 会跟着走，
+// 导出的 time_local、CSV 文件名、日志时间因此统一；系统时区一个字节都不动，
+// 所以同一台机器上跑着的其他服务完全不受影响（云主机默认 UTC，改系统时区会波及它们）。
+let activeTimeZone;
+try {
+  activeTimeZone = applyTimeZone(options.timeZone);
+} catch (error) {
+  process.stderr.write(`启动失败：${error.message}\n`);
+  process.exit(1);
+}
+// 最终生效的时区（--tz > TZ 环境变量 > 系统时区），启动横幅与页面都用它
+const timeZoneFixed = Boolean(options.timeZone || process.env.TZ);
 
 const platform = detectPlatform();
 const nodeId = os.hostname();
@@ -267,9 +293,10 @@ const collector = createCollector({
     // 近 1 小时的利用率均值（跨时间、跨卡）。放服务端算：一条 SQL 聚合就够，
     // 不必让每个打开的页面各自拉一小时的原始数据回来自己平均
     utilAverage: utilAverageState(),
-    // 导出里的 time_local 用的是这个时区（服务器本地）。页面把它写进导出说明，
-    // 免得浏览器和服务器不在同一个时区时，看到的时间对不上还以为是数据错了
-    timeZone: serverTimeZone(),
+    // 导出里的 time_local 用的是这个时区（--tz > TZ > 系统时区）。
+    // 页面把它写进导出说明，并在这台机器和看页面的人不是同一个时区时直接提醒
+    timeZone: activeTimeZone,
+    timeZoneFixed,
   }),
 });
 
@@ -700,9 +727,19 @@ server.listen(options.port, options.host, () => {
     + `${options.idleAfterMs > 0 ? `，空闲 ${options.idleAfterMs / 1000} 秒后降频到 ${options.idleIntervalMs} ms` : '，不降频'}\n`
     + `  宿主指标：${options.system === false ? '已关闭' : (options.mock ? '模拟数据' : '开启')}`
     + `　扩展 GPU 指标：${options.extended ? '开启（自动探测驱动支持）' : '已关闭'}\n`
+    + `  导出时区：${activeTimeZone}${timeZoneFixed ? '' : '（跟随系统时区）'}\n`
     + `  历史库： ${storageLine}\n`
     + `  告警：   ${alertsLine}\n`,
   );
+
+  // 云主机的系统时区默认常是 UTC，而人都在东八区：这时导出的 time_local 会和
+  // timestamp_iso 一模一样，看着像"改了没生效"。与其让人自己发现，不如启动就说。
+  if (shouldWarnUtcTimeZone({ zone: activeTimeZone, fixed: timeZoneFixed })) {
+    process.stdout.write(
+      '  提示：   系统时区是 UTC，导出里的 time_local 会等于 UTC 那一列。\n'
+      + '           要和本机墙上时钟一致就用 --tz Asia/Shanghai 启动（只影响本进程，不改系统时区）\n',
+    );
+  }
 
   // 探测结果异步补一行，探测失败也不阻塞服务启动（采集循环每 30s 会重试）
   if (!options.mock) {
