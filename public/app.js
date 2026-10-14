@@ -682,6 +682,7 @@ function renderKpis() {
 /* ---------- 渲染：曲线 ---------- */
 function rangeLabel() {
   if (state.range === 'live') return '实时窗口';
+  if (state.range === 'all') return '全部现存历史';
   const item = RANGES.find((entry) => entry.value === state.range);
   return `历史区间 ${item?.label || state.range}`;
 }
@@ -698,7 +699,15 @@ function describeRange() {
   if (state.historyNotice) return `${label}：${state.historyNotice}`;
   if (!state.historyPoints) return `${label}：这段时间没有数据`;
   const stepText = state.historyStep > 0 ? `，每 ${Math.round(state.historyStep / 1000)} 秒一点` : '';
-  return `历史区间：最近 ${label}，共 ${state.historyPoints} 个点${stepText}${state.historyTruncated ? '（已截断）' : ''}${liveNote}`;
+  const truncated = state.historyTruncated ? '（已截断）' : '';
+  // 「全部」是"库里现存的全部"，不是"历史上的全部"：默认保留期会把更早的行清掉。
+  // 不写明白的话，选了「全部」却只看到 90 天，很容易以为是 bug
+  if (state.range === 'all') {
+    const retention = state.meta?.storage?.retentionDays;
+    const bound = retention > 0 ? `保留 ${retention} 天，更早的已按保留期清理` : '未设保留期，一直留着';
+    return `库里现存的全部历史（${bound}），共 ${state.historyPoints} 个点${stepText}${truncated}${liveNote}`;
+  }
+  return `历史区间：最近 ${label}，共 ${state.historyPoints} 个点${stepText}${truncated}${liveNote}`;
 }
 
 function chartSlots() {
