@@ -13,6 +13,7 @@ import {
 } from '../src/nvidia.js';
 import { createXidTracker, parseXidLines, readKernelLog } from '../src/xid.js';
 import { resampleToGrid } from '../public/resample.js';
+import { utilKpiView, UTIL_WINDOW_MS } from '../public/kpi-util.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -508,6 +509,57 @@ assert.deepEqual(
   [5000],
   '第一个真实点之前没有数据（那些格子留空），之后又没有数据（右端不超过最后一个点）',
 );
+
+/* ---------- 前端：平均利用率卡片的跨时间口径 ---------- */
+const kpiNow = 1_700_000_000_000;
+
+// 主口径：跨时间（服务端把近 1 小时的采样点整体平均过），且已攒满一小时
+const utilFull = utilKpiView({
+  avgUtilNow: 12,
+  crossTime: { avg: 63.4, samples: 5760, cards: 8, oldestTs: kpiNow - UTIL_WINDOW_MS, newestTs: kpiNow, windowMs: UTIL_WINDOW_MS },
+  cardCount: 8,
+  now: kpiNow,
+});
+assert.equal(utilFull.value, 63.4, '有跨时间均值时要用它，而不是这一帧的 12');
+assert.equal(utilFull.foot, '近 1 小时 · 8 张卡');
+assert.ok(utilFull.title.includes('5760'), '悬停说明里要交代样本量，方便核对口径');
+
+// 服务刚部署：库里只有 20 分钟，数字照给，但脚注必须说清覆盖面
+const utilPartial = utilKpiView({
+  avgUtilNow: 12,
+  crossTime: { avg: 40, samples: 240, cards: 8, oldestTs: kpiNow - 20 * 60000, newestTs: kpiNow, windowMs: UTIL_WINDOW_MS },
+  cardCount: 8,
+  now: kpiNow,
+});
+assert.equal(utilPartial.foot, '近 1 小时未满 · 实为最近 20 分钟', '覆盖不足要如实说，不能假装是一小时');
+assert.equal(utilPartial.value, 40);
+
+// 差一个采样间隙就算满：5 秒落库，少 1 分钟不该被当成"没覆盖满"
+const utilNearlyFull = utilKpiView({
+  crossTime: { avg: 40, samples: 700, cards: 8, oldestTs: kpiNow - UTIL_WINDOW_MS + 60000, newestTs: kpiNow, windowMs: UTIL_WINDOW_MS },
+  now: kpiNow,
+});
+assert.equal(utilNearlyFull.foot, '近 1 小时 · 8 张卡', '差一个采样间隙仍算覆盖满，避免刚过一小时就报"未满"');
+
+// 库里还没有采样点（服务刚起来）
+const utilNoSamples = utilKpiView({
+  crossTime: { avg: null, samples: 0, cards: 0, oldestTs: null, newestTs: null, windowMs: UTIL_WINDOW_MS },
+  avgUtilNow: 15,
+  cardCount: 8,
+  now: kpiNow,
+});
+assert.equal(utilNoSamples.value, 15, '历史库还空着时先给这一帧的数，别让卡片空着');
+assert.equal(utilNoSamples.foot, '近 1 小时暂无历史');
+
+// 降级：整个服务都没有历史库（Node 太旧 / --no-db）
+const utilNoHistory = utilKpiView({ avgUtilNow: 42, crossTime: null, cardCount: 8, now: kpiNow });
+assert.equal(utilNoHistory.value, 42);
+assert.equal(utilNoHistory.foot, '按 8 张卡平均（无历史库）', '降级口径必须显式标注，否则会被误读成跨时间均值');
+
+// 一点数据都没有
+assert.equal(utilKpiView({ now: kpiNow }).value, null);
+assert.equal(utilKpiView({ now: kpiNow }).foot, '等待采集');
+assert.equal(utilKpiView({ avgUtilNow: 0, cardCount: 1, now: kpiNow }).value, 0, '0% 是有效值，不能当成"没数据"');
 
 /* ---------- 硬件健康：XID（内核日志） ---------- */
 // 两种来源的总线号写法必须归一到一起，否则日志里的 XID 落不到具体的卡上
@@ -1021,6 +1073,70 @@ assert.ok(capped.points <= 3);
 const wideRange = { from: dbNow - 1, to: dbNow + 10 * 3600 * 1000 };
 assert.equal(sqliteStore.querySamples(wideRange).step, 0, '只有 6 行数据时不该分桶');
 assert.equal(sqliteStore.querySamples(wideRange).points, 6);
+
+/* ---------- 历史库：近 1 小时的利用率均值（跨时间、跨卡） ---------- */
+// 卡片上"平均 GPU 利用率"跟别的指标不一样：它不是这一帧的量，而是把库里
+// 一段时间内的所有采样点整体拉平，所以聚合必须正确，且读不到的卡不能算进去。
+const utilStore = await createSqliteStore({
+  file: ':memory:',
+  nodeId: 'test-node',
+  storeIntervalMs: 1000,
+  retentionDays: 0,
+  now: () => dbNow,
+});
+const utilCard = (index, uuid, utilPct) => ({
+  index,
+  uuid,
+  name: 'RTX 4090',
+  memUsedMiB: 100,
+  memTotalMiB: 1000,
+  utilGpuPct: utilPct,
+  utilMemPct: 10,
+  tempC: 60,
+  powerW: 100,
+});
+// GPU-0 三拍都有数（20/40/60）；GPU-1 只在第一拍读到（80）；GPU-2 三拍都是 null（驱动没给利用率）
+utilStore.appendSample({
+  t: dbNow,
+  gpus: [utilCard(0, 'GPU-0', 20), utilCard(1, 'GPU-1', 80), utilCard(2, 'GPU-2', null)],
+  processes: [],
+  system: null,
+});
+utilStore.appendSample({
+  t: dbNow + 1000,
+  gpus: [utilCard(0, 'GPU-0', 40), utilCard(1, 'GPU-1', null), utilCard(2, 'GPU-2', null)],
+  processes: [],
+  system: null,
+});
+utilStore.appendSample({ t: dbNow + 2000, gpus: [utilCard(0, 'GPU-0', 60)], processes: [], system: null });
+utilStore.flush();
+
+const utilAll = utilStore.averageGpuUtil({ from: dbNow, to: dbNow + 2000 });
+assert.equal(utilAll.avg, 50, '均值应只统计读得到的点：(20+80+40+60)/4');
+assert.equal(utilAll.samples, 4, 'util 为 null 的采样点不能算进样本数');
+assert.equal(utilAll.cards, 2, '只有真的贡献过数据的卡才算贡献卡');
+assert.equal(utilAll.oldestTs, dbNow, '要带回实际覆盖的时间跨度起点');
+assert.equal(utilAll.newestTs, dbNow + 2000);
+
+// 区间收窄就只算区间内的点，别把区间外的算进去
+const utilNarrow = utilStore.averageGpuUtil({ from: dbNow + 1000, to: dbNow + 1000 });
+assert.equal(utilNarrow.avg, 40);
+assert.equal(utilNarrow.samples, 1);
+
+// 没有任何数据时要给 null 而不是 0：0% 和"不知道"是两回事
+const utilEmpty = utilStore.averageGpuUtil({ from: dbNow + 3600000, to: dbNow + 7200000 });
+assert.equal(utilEmpty.avg, null, '空区间应返回 null，返回 0 会被页面画成"利用率 0%"');
+assert.equal(utilEmpty.samples, 0);
+assert.equal(utilEmpty.cards, 0);
+assert.equal(utilEmpty.oldestTs, null, '没有数据就不能编造覆盖时长');
+assert.equal(utilEmpty.newestTs, null);
+utilStore.close();
+
+// 没有历史库时同样给 null：页面据此退回"这一帧的跨卡平均"并标注无历史库
+const utilMemoryStore = createMemoryStore('冒烟测试');
+assert.equal(utilMemoryStore.averageGpuUtil().avg, null, '内存库不能假装有跨时间均值');
+assert.equal(utilMemoryStore.averageGpuUtil().samples, 0);
+assert.equal(utilMemoryStore.averageGpuUtil().cards, 0);
 
 // 行数真的超过上限时才自动分桶
 const tinyBucketStore = await createSqliteStore({
@@ -2223,5 +2339,6 @@ process.stdout.write(
   + '历史库（写入·分桶·保留·进程事件）/ 行映射与流式导出行 / 推送订阅 / '
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
   + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
-  + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应\n',
+  + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
+  + '平均利用率的跨时间口径与覆盖不足标注\n',
 );

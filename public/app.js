@@ -1,4 +1,5 @@
 import { resampleToGrid } from './resample.js';
+import { utilKpiView } from './kpi-util.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -720,11 +721,21 @@ function renderKpis() {
   refs.kpiMemFoot.textContent = usedPct == null ? '占用率 --' : `整机占用率 ${usedPct.toFixed(1)}%`;
   refs.kpiMemFoot.dataset.tone = toneFor(usedPct) || '';
 
-  const avgUtil = utils.length ? utils.reduce((a, b) => a + b, 0) / utils.length : null;
-  refs.kpiUtil.innerHTML = avgUtil == null
+  // 「平均 GPU 利用率」是跨时间的：服务端把历史库里近 1 小时的采样点整体平均好给过来。
+  // 没有历史库（Node 太旧 / --no-db）时才退回这一帧的跨卡平均，并把口径写在脚注里。
+  const avgUtilNow = utils.length ? utils.reduce((a, b) => a + b, 0) / utils.length : null;
+  const utilView = utilKpiView({
+    avgUtilNow,
+    crossTime: state.meta?.utilAverage || null,
+    cardCount: utils.length,
+    now: state.lastSampleAt || Date.now(),
+    intervalMs: state.intervalMs || 1000,
+  });
+  refs.kpiUtil.innerHTML = utilView.value == null
     ? '--<span class="kpi__unit">%</span>'
-    : `${avgUtil.toFixed(0)}<span class="kpi__unit">%</span>`;
-  refs.kpiUtilFoot.textContent = avgUtil == null ? '等待采集' : `按 ${utils.length} 张卡平均`;
+    : `${utilView.value.toFixed(0)}<span class="kpi__unit">%</span>`;
+  refs.kpiUtilFoot.textContent = utilView.foot;
+  refs.kpiUtilFoot.title = utilView.title;
 
   const maxTemp = temps.length ? Math.max(...temps) : null;
   refs.kpiTemp.innerHTML = maxTemp == null

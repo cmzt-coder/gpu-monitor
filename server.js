@@ -218,6 +218,37 @@ const platform = detectPlatform();
 const nodeId = os.hostname();
 const store = await createStore({ options, nodeId });
 
+// 近 1 小时的利用率均值：跨时间的那个"平均 GPU 利用率"。
+//
+// 和卡片上另外几个指标不同，这个数不是"这一帧"的量，而是把库里近一小时的所有
+// 采样点（跨时间、跨卡）拉平的均值，所以必须走历史库。
+//
+// 一条 SQL 聚合就能拿到，但 getState() 每秒都会被调用一次（采集循环 + 每个页面），
+// 没必要每秒查一次库，所以缓存 60 秒。库还没攒满一小时时，把实际覆盖的时间跨度
+// 一起返回，页面上如实说明，而不是假装这一小时是满的。
+const UTIL_WINDOW_MS = 3600000;
+const UTIL_REFRESH_MS = 60000;
+const UTIL_REFRESH_RETRY_MS = 5000;
+const utilAverageCache = { at: 0, value: { avg: null, samples: 0, cards: 0, oldestTs: null, newestTs: null, windowMs: UTIL_WINDOW_MS } };
+
+function refreshUtilAverage() {
+  utilAverageCache.at = Date.now();
+  if (!store.supportsHistory) return;
+  try {
+    const stats = store.averageGpuUtil({ from: utilAverageCache.at - UTIL_WINDOW_MS, to: utilAverageCache.at });
+    utilAverageCache.value = { ...stats, windowMs: UTIL_WINDOW_MS };
+  } catch (error) {
+    process.stderr.write(`[gpu-monitor] 利用率均值计算失败：${error?.message || error}\n`);
+  }
+}
+
+function utilAverageState() {
+  // 库里一条都没有时说明服务刚起来，5 秒后再试，别让页面干等一分钟
+  const ttl = utilAverageCache.value.samples > 0 ? UTIL_REFRESH_MS : UTIL_REFRESH_RETRY_MS;
+  if (Date.now() - utilAverageCache.at >= ttl) refreshUtilAverage();
+  return utilAverageCache.value;
+}
+
 // --mock 下连宿主指标也用模拟数据，这样在没有 GPU、也没有可读 /proc 的机器上也能看完整界面
 const collector = createCollector({
   options,
@@ -232,6 +263,9 @@ const collector = createCollector({
   // /api/state 与 SSE 推送共用同一份 getState()，不会出现"只有一条通道带告警"的情况
   extraState: () => ({
     alerts: alertsRuntime.snapshot(),
+    // 近 1 小时的利用率均值（跨时间、跨卡）。放服务端算：一条 SQL 聚合就够，
+    // 不必让每个打开的页面各自拉一小时的原始数据回来自己平均
+    utilAverage: utilAverageState(),
   }),
 });
 

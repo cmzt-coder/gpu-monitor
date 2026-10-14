@@ -734,6 +734,31 @@ export async function createSqliteStore({
     return Number(row?.n ?? 0);
   }
 
+  /**
+   * 区间内的 GPU 利用率均值（跨时间、跨卡）。
+   *
+   * 用 SQL 聚合而不是把原始点捞回来自己算：8 卡一小时的原始点是几千个，
+   * 而这里只要一个数。同时把实际覆盖到的时间跨度和采样点数带回去——
+   * 服务刚部署时库里可能填不满一小时，页面得能如实说"这其实只覆盖了 20 分钟"。
+   */
+  function averageGpuUtil({ from, to } = {}) {
+    const row = db.prepare(`
+      SELECT AVG(util_gpu_pct) AS avg, COUNT(util_gpu_pct) AS n,
+             COUNT(DISTINCT uuid) AS cards,
+             MIN(ts) AS min_ts, MAX(ts) AS max_ts
+      FROM gpu_sample
+      WHERE ts >= ? AND ts <= ? AND util_gpu_pct IS NOT NULL
+    `).get(from, to);
+    return {
+      avg: row?.avg ?? null,
+      samples: Number(row?.n ?? 0),
+      // 这一段区间里到底有几张卡贡献过数据：页面据此说"近 1 小时 · 8 张卡"
+      cards: Number(row?.cards ?? 0),
+      oldestTs: row?.min_ts ?? null,
+      newestTs: row?.max_ts ?? null,
+    };
+  }
+
   /** 不碰库的那部分状态字段：关库之后也照样给得出来 */
   function baseStats() {
     return {
@@ -821,6 +846,7 @@ export async function createSqliteStore({
     queryProcesses,
     processPages,
     countProcesses,
+    averageGpuUtil,
     gpuPages,
     hostPages,
     resolveStep,

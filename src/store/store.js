@@ -58,6 +58,10 @@ export function createMemoryStore(reason = null) {
     countProcesses() {
       return 0;
     },
+    // 没有历史库就算不出跨时间的均值（内存窗口只有几分钟），如实返回未知
+    averageGpuUtil() {
+      return { avg: null, samples: 0, cards: 0, oldestTs: null, newestTs: null };
+    },
     gpuPages: emptyPages,
     hostPages: emptyPages,
     processPages: emptyPages,
