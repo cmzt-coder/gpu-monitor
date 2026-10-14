@@ -229,6 +229,10 @@ export function createCollector({
             gpus: snapshot.gpus,
             processes: snapshot.processes,
             system: systemSample,
+            // 服务汇总必须跟着进库：库里的 service_sample 表就是靠这个字段写的。
+            // 漏传过一次，症状是表里一行没有、长周期服务规则查历史库时读不到数据而静默不触发——
+            // 实时判定用的是内存里那份，所以在 for 不超过窗口时完全看不出问题。
+            services,
           });
           runtime.storeWarning = null;
         } catch (error) {

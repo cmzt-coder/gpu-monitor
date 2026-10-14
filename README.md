@@ -426,6 +426,15 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 
 页面顶部的告警面板在**配好规则后就常驻**，不管当前有没有触发：没有触发时它是中性配色，写着「当前无告警，N 条规则未触发」，展开「规则清单」能看到每条规则的条件、级别和实时状态。`--alerts-dry-run` 会在标题旁挂一个「dry-run：只打印不发送」的角标——**只看到这个角标没消失，就说明告警还没真正发信**。
 
+**想立刻确认邮件通道通不通？** 不用等规则触发（阈值配得高时可能几天都不触发一次），也不用重启服务：
+
+```bash
+SMTP_PASS=你的密码 node tools/notify-test.mjs            # 真发一封测试通知
+node tools/notify-test.mjs --dry-run                     # 只看要发给谁、走哪个服务器
+```
+
+它复用服务里同一套 notifier / SMTP 实现和同一份 `alerts.json`，只读配置、不碰库、不影响正在跑的服务；发出去的是写清了"这是测试"的消息，不会和真告警混淆。配置里用 `${SMTP_PASS}` 占位时，记得把环境变量和命令写在同一行。
+
 **规则里的 for 好像没生效？** 看页面「采集信息 → 告警」那一行，它会写明长周期规则当前是查历史库、按内存窗口，还是分桶判定。没有历史库时（`--no-db` 或 Node 低于 22.13）长周期的 `for` 会被夹到内存窗口长度，启动日志里也有提示。
 
 **SMTP 连不上？** 内置的 SMTP 客户端只覆盖明文、STARTTLS、隐式 TLS（465）与 AUTH LOGIN/PLAIN，够用于内网 relay。如果你们的邮件服务要求 OAuth 或其他认证方式，可以先把通知渠道换成 `webhook`（指向自建脚本），由脚本去发信。
@@ -433,5 +442,13 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 ## 本地自检
 
 ```bash
-node tools/smoke-test.mjs   # 解析 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / CRLF 解析
+node tools/smoke-test.mjs   # 冒烟测试：解析、环形缓冲、CSV 导出、模拟数据源、历史库、告警判定、SMTP 协议
 ```
+
+仓库里其余几个工具，都是"只读优先、出问题给中文原因"的路子：
+
+| 工具 | 用途 |
+| --- | --- |
+| `tools/preflight.mjs` | 部署前体检：Node 版本、`nvidia-smi`、驱动支持的扩展字段、磁盘空间、端口占用 |
+| `tools/notify-test.mjs` | 通知通道自检：按 `alerts.json` 发一条测试通知，验证邮件 / Webhook 通不通 |
+| `tools/db-maintenance.mjs` | 历史库维护：看状态、按保留期清理、回收被删数据占用的空间 |

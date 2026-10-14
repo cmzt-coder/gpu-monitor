@@ -41,6 +41,7 @@ import {
 import { expandEnv, loadAlertsConfig } from '../src/alerts/config.js';
 import { buildMessage, encodeHeader, sendMail } from '../src/notify/smtp.js';
 import { createNotifier } from '../src/notify/notifier.js';
+import { sendTestNotice } from './notify-test.mjs';
 import { runPreflight } from './preflight.mjs';
 import { evaluateHealth } from '../src/health.js';
 
@@ -414,6 +415,28 @@ assert.equal(
 collector.noteClient();
 assert.equal(collector.cadence().idle, false, '刚有请求时不应处于空闲');
 collector.stop();
+
+// 交给历史库的样本必须带上服务汇总：service_sample 表全靠这个字段写。
+// 只测"库能存服务行"是不够的——库里那份测试是手动传的 services，
+// 采集侧漏传时照样全绿，于是 service_sample 一直是 0 行、长周期服务规则静默失效。
+const collectorStoreRows = [];
+const storingCollector = createCollector({
+  options: { ...baseOptions, smiBin: FAKE_SMI },
+  systemCollector: stubSystem,
+  store: { appendSample: (sample) => { collectorStoreRows.push(sample); return 0; } },
+});
+await storingCollector.tick();
+assert.equal(collectorStoreRows.length, 1, '采集一拍就应落一行');
+assert.ok(
+  Array.isArray(collectorStoreRows[0].services) && collectorStoreRows[0].services.length >= 1,
+  '落库样本必须带上服务汇总，否则 service_sample 表永远是空的',
+);
+assert.deepEqual(
+  collectorStoreRows[0].services,
+  storingCollector.getHistory().samples[0].services,
+  '落库的那份要和曲线样本里的是同一份',
+);
+storingCollector.stop();
 
 // 模拟数据源下不该显示"探测中"：直接标记为 mock，界面据此给出准确文案
 const mockCollector = createCollector({
@@ -1661,6 +1684,38 @@ const dryNotifier = createNotifier({
 assert.deepEqual(dryNotifier.channels, ['email', 'webhook', 'console']);
 await dryNotifier.send({ kind: 'firing', level: 'warning', ruleId: 'x', title: '测试', detail: '细节', at: Date.now() });
 assert.equal(dryRunLogs.filter((line) => line.includes('dry-run')).length, 2, '两个远程渠道都应走 dry-run');
+
+/* ---------- 通知自检工具：--dry-run 时不联网也能把配置解析透 ---------- */
+const noticeFile = path.join(os.tmpdir(), `gm-notify-${process.pid}.json`);
+fs.writeFileSync(noticeFile, JSON.stringify({
+  enabled: true,
+  rules: [{ id: 'a', metric: 'tempC', op: '>=', threshold: 80 }],
+  email: {
+    host: 'smtp.example.com',
+    port: 465,
+    secure: true,
+    starttls: false,
+    user: 'monitor@example.com',
+    pass: '${SMTP_PASS}',
+    from: 'monitor@example.com',
+    to: ['ops@example.com', 'oncall@example.com'],
+  },
+  webhook: { url: 'http://127.0.0.1:1/hook' },
+}));
+const noticeLogs = [];
+const noticeLogger = { info: (line) => noticeLogs.push(line), warn: (line) => noticeLogs.push(line), error: (line) => noticeLogs.push(line) };
+process.env.SMTP_PASS = 'secret-value';
+const noticeReport = await sendTestNotice({ alertsPath: noticeFile, dryRun: true, logger: noticeLogger });
+assert.equal(noticeReport.ok, true, 'dry-run 下不应有渠道失败');
+assert.deepEqual(noticeReport.info.channels, ['email', 'webhook', 'console']);
+assert.deepEqual(noticeReport.info.email.to, ['ops@example.com', 'oncall@example.com'], '收件人要原样列出来，便于核对发给了谁');
+assert.equal(noticeReport.info.email.tls, '隐式 TLS', '465 的呈现要说清是隐式 TLS 而不是 STARTTLS');
+assert.equal(noticeReport.info.email.hasPassword, true, '${SMTP_PASS} 要能展开，否则发信必然失败');
+assert.equal(noticeLogs.filter((line) => line.includes('dry-run')).length, 2);
+const missingNotice = await sendTestNotice({ alertsPath: '/nonexistent/alerts.json', dryRun: true, logger: noticeLogger });
+assert.equal(missingNotice.ok, false);
+assert.ok(missingNotice.reason.includes('未找到'), '配置不存在要给能看懂的原因，而不是抛异常');
+fs.unlinkSync(noticeFile);
 
 /* ---------- SMTP 客户端：用假 socket 验证协议流程 ---------- */
 assert.equal(encodeHeader('ASCII subject'), 'ASCII subject');
