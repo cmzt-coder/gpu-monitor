@@ -662,30 +662,58 @@ export async function createSqliteStore({
     return Number(row?.n ?? 0);
   }
 
-  function stats() {
-    const { oldestTs, newestTs } = bounds();
-    const { freelistBytes, walBytes } = reclaimInfo();
+  /** 不碰库的那部分状态字段：关库之后也照样给得出来 */
+  function baseStats() {
     return {
       mode: 'sqlite',
       supportsHistory: true,
       path: inMemory ? null : path.resolve(file),
-      sizeBytes: fileSize(),
-      walBytes,
-      freelistBytes,
       autoVacuum: autoVacuumMode,
       lastMaintainAt,
       lastMaintain,
-      buffered: buffer.gpu.length + buffer.host.length + buffer.process.length,
+      storeIntervalMs,
+      processRefreshMs,
+      retentionDays,
+      storeProcesses,
+    };
+  }
+
+  function stats() {
+    // 进程退出时仍可能有在途的请求或推送回调来取状态。关库之后再碰 db 会抛
+    // ERR_INVALID_STATE，把一次正常重启变成崩溃退出（线上真实发生过），
+    // 所以关库后一律用固定值回答，只保留关库前最后一次的计数与边界。
+    if (closed) {
+      return {
+        ...baseStats(),
+        sizeBytes: fileSize(),
+        walBytes: 0,
+        freelistBytes: 0,
+        buffered: 0,
+        written: { ...counters },
+        oldestTs: boundsCache.oldestTs ?? null,
+        newestTs: boundsCache.newestTs ?? null,
+        lastFlushAt,
+        lastPruneAt,
+        lastPruneDropped,
+        closed: true,
+      };
+    }
+    const { oldestTs, newestTs } = bounds();
+    const { freelistBytes, walBytes } = reclaimInfo();
+    return {
+      ...baseStats(),
+      sizeBytes: fileSize(),
+      walBytes,
+      freelistBytes,
+      // 服务行也算缓冲里的一份：漏掉它会让"还有多少行没落盘"少报
+      buffered: buffer.gpu.length + buffer.host.length + buffer.process.length + buffer.service.length,
       written: { ...counters },
       oldestTs,
       newestTs,
       lastFlushAt,
       lastPruneAt,
       lastPruneDropped,
-      storeIntervalMs,
-      processRefreshMs,
-      retentionDays,
-      storeProcesses,
+      closed: false,
     };
   }
 
@@ -725,13 +753,24 @@ export async function createSqliteStore({
     stats,
     close() {
       if (closed) return;
-      closed = true;
       clearInterval(flushTimer);
       clearInterval(pruneTimer);
       try {
         flush();
-      } finally {
+      } catch {
+        // 收尾落盘失败也要继续关库：退出流程不能被它打断
+      }
+      // 先把计数与边界落下来，再置 closed——否则关库后取状态只剩固定值可用
+      try {
+        bounds();
+      } catch {
+        // 库已经读不动了就只能用旧缓存，不影响退出
+      }
+      closed = true;
+      try {
         db.close();
+      } catch {
+        // 已经关掉了就算了
       }
     },
   };

@@ -39,7 +39,14 @@ export async function runMaintenance({ dbPath, prune = false, reclaim = false, r
   try {
     await import('node:sqlite');
   } catch {
-    return { ok: false, reason: `历史库维护需要 Node ≥ 22.13（当前 ${process.version}），先升级 Node 再执行` };
+    // 服务可能是用旁装的新 Node 启动的（系统 node 仍是旧版），这时"升级 Node"是句废话——
+    // 真正要做的只是换用启动服务时那个 node 来跑本脚本
+    return {
+      ok: false,
+      reason: `历史库维护需要 Node ≥ 22.13（当前 ${process.version}）。`
+        + '若服务是用旁装的新 Node 启动的，用同一个 node 跑本脚本，例如：'
+        + '/opt/node24/bin/node tools/db-maintenance.mjs',
+    };
   }
 
   const beforeBytes = fs.statSync(absolute).size;

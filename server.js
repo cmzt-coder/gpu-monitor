@@ -641,18 +641,39 @@ server.on('error', (error) => {
 
 let shuttingDown = false;
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
+  process.on(signal, async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     alertsRuntime.close();
-    collector.stop();
+
+    // 兜底：采集卡在 nvidia-smi 上时也要能退出，别把关闭流程吊在这儿
+    const forceExit = setTimeout(() => process.exit(0), 3000);
+    forceExit.unref?.();
+
+    // 先等在途那一拍结束再关库。这一拍收尾时还要落盘、还要取一次状态推给订阅者，
+    // 历史库要是先关了，它会打到已关闭的连接上，抛 ERR_INVALID_STATE 把进程带崩
     try {
-      // 退出前把缓冲里的行落盘，避免最后几秒的数据丢掉
-      store.close();
+      await collector.stop();
     } catch {
-      // 关库失败也只能继续退出
+      // 采集层的异常不该挡住退出
     }
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 800).unref();
+
+    // 关库放到最后：server.close() 之后仍可能有在途的 /api/state、/api/history 要读库。
+    // 缓冲里的行是在 store.close() 里落盘的，所以顺序调换不会丢最后几秒的数据。
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(forceExit);
+      try {
+        // 退出前把缓冲里的行落盘，避免最后几秒的数据丢掉
+        store.close();
+      } catch {
+        // 关库失败也只能继续退出
+      }
+      process.exit(0);
+    };
+    server.close(finish);
+    setTimeout(finish, 800).unref?.();
   });
 }

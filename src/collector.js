@@ -88,6 +88,8 @@ export function createCollector({
   let fieldPromise = null;
   let collecting = false;
   let stopped = false;
+  // 正在跑的那一拍（关历史库前要先等它结束，见 collectOnce / stop）
+  let inFlight = null;
   let timer = null;
   let lastClientAt = 0;
   let lastDelayMs = options.intervalMs;
@@ -156,9 +158,7 @@ export function createCollector({
     return fieldPromise;
   }
 
-  async function collectOnce() {
-    if (collecting) return;
-    collecting = true;
+  async function runCollect() {
     const startedAt = Date.now();
     try {
       let snapshot;
@@ -248,6 +248,23 @@ export function createCollector({
       collecting = false;
       notify();
     }
+  }
+
+  /**
+   * 跑一拍采集。
+   * 用一层薄包装把"正在跑的那一拍"记下来：关闭流程要先等它结束再关历史库，
+   * 因为这一拍收尾时还要落盘、还要取一次状态并推给订阅者——库要是先关了，
+   * 它就会打到已关闭的连接上，抛出 ERR_INVALID_STATE 把进程带崩（线上真实发生过）。
+   */
+  function collectOnce() {
+    if (collecting) return inFlight ?? Promise.resolve();
+    collecting = true;
+    inFlight = runCollect();
+    const done = () => {
+      inFlight = null;
+    };
+    inFlight.then(done, done);
+    return inFlight;
   }
 
   function cadence() {
@@ -374,6 +391,8 @@ export function createCollector({
       stopped = true;
       if (timer) clearTimeout(timer);
       timer = null;
+      // 把在途那一拍交还给调用方：先等它跑完再关历史库
+      return inFlight ?? Promise.resolve();
     },
     // 每次 HTTP 请求都调用一次，用来判断"还有没有人在看"
     noteClient() {

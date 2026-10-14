@@ -438,6 +438,39 @@ assert.deepEqual(
 );
 storingCollector.stop();
 
+// stop() 要把"在途那一拍"交出来：退出流程先等它结束再关历史库。
+// 反过来做（先关库）的话，那一拍收尾时取状态会打到已关闭的连接上，直接崩进程。
+const raceStore = { appends: 0, appendSample() { this.appends += 1; return 0; }, stats: () => ({ mode: 'sqlite', supportsHistory: true }) };
+let releaseSystem = null;
+const slowCollector = createCollector({
+  options: { ...baseOptions, smiBin: FAKE_SMI },
+  systemCollector: {
+    sample: async () => {
+      await new Promise((resolve) => { releaseSystem = resolve; });
+      return stubSystem.sample();
+    },
+  },
+  store: raceStore,
+});
+const racingTick = slowCollector.tick();
+// 采集开头要先起一次 nvidia-smi 子进程，纯 setImmediate 空转跑得比它快，
+// 所以这里按真实时间轮询，等它挂到系统采集那一步
+const raceDeadline = Date.now() + 3000;
+while (!releaseSystem && Date.now() < raceDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+assert.ok(releaseSystem, '在途那一拍应已挂起在系统采集上');
+
+let stopResolved = false;
+const stopping = slowCollector.stop();
+stopping.then(() => { stopResolved = true; });
+await new Promise((resolve) => setTimeout(resolve, 5));
+assert.equal(stopResolved, false, '在途那一拍没结束前 stop() 不该 resolve');
+
+releaseSystem();
+await stopping;
+await racingTick;
+assert.equal(stopResolved, true);
+assert.equal(raceStore.appends, 1, '在途那一拍仍应完成落库，不能因为停止就把它丢掉');
+
 // 模拟数据源下不该显示"探测中"：直接标记为 mock，界面据此给出准确文案
 const mockCollector = createCollector({
   options: baseOptions,
@@ -810,6 +843,16 @@ assert.ok(Math.abs(storedServices.services[0].sharePct - (9502 / 40960) * 100) <
 assert.equal(storedServices.services[1].processes, 2);
 
 sqliteStore.close();
+
+// 关库之后仍可能被在途调用取状态（退出过程中的请求 / 推送回调）。
+// 这时候去碰 db 会抛 ERR_INVALID_STATE，把一次正常重启变成崩溃退出——线上真实发生过。
+const statsAfterClose = sqliteStore.stats();
+assert.equal(statsAfterClose.closed, true, '关库后要能看出自己已经关了');
+assert.equal(statsAfterClose.mode, 'sqlite');
+assert.equal(statsAfterClose.written.gpu, 7, '关库后仍要能报出关库前的累计写入量');
+assert.equal(statsAfterClose.oldestTs, dbNow, '关库前最后一次的边界要留住');
+assert.equal(statsAfterClose.buffered, 0);
+assert.equal(sqliteStore.stats().closed, true, '反复取也不能出事');
 
 /* ---------- 历史库降级：错误信息要翻成人话 ---------- */
 // 这条信息会出现在启动横幅、/api/state.storage.reason、页面上的历史库与进程历史卡片
