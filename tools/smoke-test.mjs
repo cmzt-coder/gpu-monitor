@@ -12,6 +12,7 @@ import {
   readGpuSnapshot, readRowRemapper, resolveGpuFields, parseGpuCsv, parseRowRemapper, splitRow, defaultGpuFields,
 } from '../src/nvidia.js';
 import { createXidTracker, parseXidLines, readKernelLog } from '../src/xid.js';
+import { resampleToGrid } from '../public/resample.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -469,6 +470,44 @@ if (!xidState.xidStatus.available) {
     '读不到内核日志时不能显示"XID 0 次"，那是假的"一切正常"',
   );
 }
+
+/* ---------- 前端：把历史数据重采样成等间隔网格（实时窗口回填用） ---------- */
+// 库里的点是 6 秒一个、实时窗口要 3 秒一格：不重采样的话横轴会错位
+const gridSource = [
+  { t: 1000, gpus: [{ uuid: 'g0', memUsedMiB: 10 }] },
+  { t: 7000, gpus: [{ uuid: 'g0', memUsedMiB: 20 }] },
+  { t: 13000, gpus: [{ uuid: 'g0', memUsedMiB: 30 }] },
+];
+const resampled = resampleToGrid(gridSource, { from: 1000, to: 13000, intervalMs: 3000 });
+assert.deepEqual(resampled.map((sample) => sample.t), [1000, 4000, 7000, 10000, 13000], '网格必须等间隔，右端不越界');
+assert.deepEqual(resampled.map((sample) => sample.gpus[0].memUsedMiB), [10, 10, 20, 20, 30], '每格取"该时刻之前最近"的点');
+
+// 断档（服务重启那几十秒）：只向前填充 3 个间隔，再往后就留空，
+// 让曲线如实断开而不是拉一条横贯断口、假装一直有数据的假直线
+const gappedGrid = resampleToGrid([{ t: 1000, gpus: [] }, { t: 31000, gpus: [] }], { from: 1000, to: 31000, intervalMs: 3000 });
+assert.deepEqual(
+  gappedGrid.map((sample) => sample.t),
+  [1000, 4000, 7000, 10000, 31000],
+  '1000 之后最多向前填 3 格（到 10000），再往后留空直到下一个真实点',
+);
+
+// 网格右端不超过最后一个真实点：绝不凭空造数据
+const shortGrid = resampleToGrid([{ t: 1000, gpus: [] }, { t: 4000, gpus: [] }], { from: 1000, to: 20000, intervalMs: 3000 });
+assert.deepEqual(shortGrid.map((sample) => sample.t), [1000, 4000], '没有数据的那段不补，交给后续的实时帧');
+
+// 边界情况：空输入、非法间隔、乱序输入、网格起点早于第一个真实点
+assert.deepEqual(resampleToGrid([], { from: 0, to: 1000, intervalMs: 100 }), []);
+assert.deepEqual(resampleToGrid(gridSource, { from: 0, to: 1000, intervalMs: 0 }), [], '间隔非法时返回空而不是死循环');
+assert.deepEqual(
+  resampleToGrid([...gridSource].reverse(), { from: 1000, to: 3000, intervalMs: 1000 }).map((sample) => sample.t),
+  [1000, 2000, 3000],
+  '输入乱序也要能处理（库里查回来的顺序不保证）',
+);
+assert.deepEqual(
+  resampleToGrid([{ t: 5000, gpus: [] }], { from: 1000, to: 6000, intervalMs: 1000 }).map((sample) => sample.t),
+  [5000],
+  '第一个真实点之前没有数据（那些格子留空），之后又没有数据（右端不超过最后一个点）',
+);
 
 /* ---------- 硬件健康：XID（内核日志） ---------- */
 // 两种来源的总线号写法必须归一到一起，否则日志里的 XID 落不到具体的卡上

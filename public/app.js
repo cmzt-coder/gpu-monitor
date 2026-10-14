@@ -1,3 +1,5 @@
+import { resampleToGrid } from './resample.js';
+
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
 
@@ -1972,10 +1974,42 @@ async function reloadLiveWindow() {
     const history = await fetchJson('/api/history');
     state.intervalMs = history.intervalMs || state.intervalMs;
     state.windowSamples = history.windowSamples || state.windowSamples;
-    for (const sample of history.samples || []) appendSample(sample, { force: true });
+    const memory = history.samples || [];
+    let grid = null;
+    try {
+      grid = await backfillLiveWindow(memory);
+    } catch {
+      // 补不出来就算了，内存窗口该有的部分照常显示
+    }
+    // 顺序很重要：先早的（库里补出来的），再新的（内存里的）。
+    // 反过来的话曲线会按时间倒着排，看着完全乱掉
+    for (const sample of grid || []) appendSample(sample, { force: true });
+    for (const sample of memory) appendSample(sample, { force: true });
   } catch {
     // 回填失败不影响后续实时帧继续进来
   }
+}
+
+/**
+ * 用历史库把实时窗口**前面的**那一段补出来。
+ *
+ * 服务一重启，内存窗口就是空的，实时曲线得干等一整个窗口才长出形状——
+ * 但库里其实一直有数据（粒度粗一些）。所以这里补上重启后那段空白。
+ *
+ * 两条边界：只补"内存窗口之前"，不覆盖内存里已有的部分（内存里的粒度更细，
+ * 用库里的粗粒度盖上去反而更差）；拿不到历史库就返回 null，交给调用方退回内存窗口。
+ */
+async function backfillLiveWindow(memory) {
+  const windowMs = state.windowSamples * state.intervalMs;
+  const newest = memory.length ? memory[memory.length - 1].t : (state.lastSampleAt || Date.now());
+  const boundary = memory.length ? memory[0].t : newest;
+  const from = newest - windowMs;
+  // 内存窗口已经够满，没什么可补的
+  if (boundary - from < state.intervalMs) return null;
+
+  const data = await fetchJson(`/api/history?from=${from}&to=${boundary}`);
+  if (data.source !== 'db') return null;
+  return resampleToGrid(data.samples || [], { from, to: boundary, intervalMs: state.intervalMs });
 }
 
 async function loadHistoryRange(range) {
@@ -2234,14 +2268,8 @@ async function boot() {
   renderRangePicker();
   renderProcHistRange();
   renderProcHistMin();
-  try {
-    const history = await fetchJson('/api/history');
-    state.intervalMs = history.intervalMs || state.intervalMs;
-    state.windowSamples = history.windowSamples || state.windowSamples;
-    for (const sample of history.samples || []) appendSample(sample);
-  } catch {
-    // 首次回填失败不阻塞，直接进入轮询
-  }
+  // 与"切回实时"走同一条路：它内部会先从库里补出重启后那段空白
+  await reloadLiveWindow();
   await poll();
   // 进程历史是独立的一次性拉取：开页拉一次，之后靠"进程身份变化"触发重载
   loadProcessHistory();
