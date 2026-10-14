@@ -137,7 +137,14 @@ export async function readKernelLog({ timeout = 8000, runner = run } = {}) {
   const tried = [];
   for (const candidate of LOG_SOURCES) {
     try {
-      const { stdout } = await runner(candidate.bin, candidate.args, { timeout, maxBuffer: MAX_BUFFER });
+      const { stdout, stderr } = await runner(candidate.bin, candidate.args, { timeout, maxBuffer: MAX_BUFFER });
+      // journalctl 在没有权限时会**成功返回但只看得到一部分日志**（退出码 0，
+      // 只在 stderr 上留一句 Hint）。这种"看起来成功"最危险：会把"看不到"
+      // 当成"没有错误"，所以必须显式识别出来，当作读取失败处理。
+      if (PARTIAL_VIEW_HINT.test(String(stderr || ''))) {
+        tried.push({ bin: `${candidate.bin} ${candidate.args.join(' ')}`.trim(), result: '权限不足，只能看到部分日志' });
+        continue;
+      }
       return { text: stdout, source: candidate.source, tried, error: null };
     } catch (error) {
       tried.push({ bin: `${candidate.bin} ${candidate.args.join(' ')}`.trim(), result: describeFailure(error) });
@@ -148,13 +155,26 @@ export async function readKernelLog({ timeout = 8000, runner = run } = {}) {
 
 function describeFailure(error) {
   if (error?.code === 'ENOENT') return '命令不存在';
-  const message = String(error?.stderr || error?.message || error).trim().split('\n')[0];
-  return message || '调用失败';
+  const stderr = String(error?.stderr || '').trim();
+  if (stderr) return stderr.split('\n')[0];
+  // execFile 失败时 message 是 "Command failed: <命令>\n<stderr>"：只取第一行等于什么都没说，
+  // 所以有第二行就用第二行（它才是真正的原因）
+  const lines = String(error?.message || error).split('\n').map((line) => line.trim()).filter(Boolean);
+  if (lines.length > 1) return lines.slice(1).join(' ').slice(0, 200);
+  // 剩下的情况只剩"命令名 + Command failed"，那不是原因，别当原因写出来
+  return '命令执行失败（没有任何输出）';
 }
+
+// 权限不足的提示语要中英都认：系统语言是中文时 dmesg 回的是"不允许的操作"，
+// journalctl 则是 "You are currently not seeing messages from other users and the system"
+const PERMISSION_HINT = /operation not permitted|permission denied|不允许的操作|权限不足|not seeing messages/i;
+
+// journalctl 权限不足时的原话（退出码仍是 0，只在 stderr 上提示）
+const PARTIAL_VIEW_HINT = /not seeing messages|you are currently not seeing|Hint: You are currently/i;
 
 /** 把若干个失败原因归成一句能看懂的话，并给出下一步 */
 function explainFailure(tried) {
-  const denied = tried.some((item) => /operation not permitted|permission denied/i.test(item.result));
+  const denied = tried.some((item) => PERMISSION_HINT.test(item.result));
   if (denied) {
     return '读不到内核日志（权限不足）：Ubuntu 默认 kernel.dmesg_restrict=1，'
       + '需要 root 运行，或把运行用户加进 systemd-journal 组';

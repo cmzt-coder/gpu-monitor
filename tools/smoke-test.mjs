@@ -537,6 +537,31 @@ const deniedLog = await readKernelLog({
 assert.equal(deniedLog.text, null);
 assert.ok(deniedLog.error.includes('权限'), '权限不足要直说，并给出下一步');
 assert.ok(deniedLog.error.includes('dmesg_restrict'));
+// 真机上是中文系统，dmesg 回的是"不允许的操作"——只认英文就会漏掉这个最关键的判断
+const deniedCn = await readKernelLog({
+  runner: async () => { throw Object.assign(new Error('Command failed: dmesg'), { stderr: 'dmesg: 读取内核缓冲区失败: 不允许的操作' }); },
+});
+assert.ok(deniedCn.error.includes('权限'), '中文的"不允许的操作"也要认出是权限问题');
+assert.equal(deniedCn.error.includes('不允许的操作）'), false, '不该把三条命令的原始报错都堆给用户看');
+// execFile 只回 "Command failed: <命令>" 时，不能把命令名当成失败原因
+const vagueLog = await readKernelLog({
+  runner: async () => { throw new Error('Command failed: journalctl -k --no-pager -o short-iso -n 20000'); },
+});
+assert.equal(vagueLog.error.includes('Command failed'), false, '不能把命令名当作原因写给用户');
+
+// journalctl 权限不足时会"成功返回但只看得到一部分"：必须当作失败，
+// 否则会把"看不到"显示成"没有错误"，那是最危险的假阳性
+const partialLog = await readKernelLog({
+  runner: async (bin) => (bin === 'journalctl'
+    ? {
+      stdout: '部分日志……',
+      stderr: 'Hint: You are currently not seeing messages from other users and the system.\n'
+        + '      Users in groups \'adm\', \'systemd-journal\' can see all messages.',
+    }
+    : (() => { throw Object.assign(new Error('denied'), { stderr: 'dmesg: 读取内核缓冲区失败: 不允许的操作' }); })()),
+});
+assert.equal(partialLog.text, null, '只能看到部分日志时必须当作读不到，不能当成"累计 0 条"');
+assert.ok(partialLog.error.includes('权限'), '并要说明是权限问题');
 
 // 硬件健康能不能配成告警规则。关键性质：取不到值时"不触发"，
 // 而不是当成 false/0 —— 把"读不到"当成"没问题"是监控里最危险的错误

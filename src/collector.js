@@ -345,7 +345,9 @@ export function createCollector({
     if (xid.loading || stopped) return;
     if (xid.at && now() - xid.at < options.xidIntervalMs) return;
     xid.loading = true;
-    const timeout = Math.max(4000, options.intervalMs * 4);
+    // 内核日志可能很大，journalctl 冷缓存时几秒到十几秒都正常；
+    // 这是低频后台读，给宽一点，别让超时把一次正常的读取变成"读不到"
+    const timeout = Math.max(15000, options.intervalMs * 10);
 
     (async () => {
       if (xid.indexToBusId.size === 0) {
