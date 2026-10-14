@@ -14,11 +14,12 @@
 - 显卡运行状态：SM / 显存时钟、P-State、风扇转速、编解码占用，以及**节流原因**（功耗墙、温度墙、硬件降速…）。这一栏能回答"这张卡是真忙还是在降频"，驱动不支持的字段会自动隐藏
 - **显存纠错（ECC）**：可纠正 / 不可纠正错误各分「本次驱动加载以来」与「终身累计」两个计数。单看数字没意义，要看的是**有没有在涨**——所以两个计数都摆出来，本次新增会单独标出。不可纠正错误意味着已经在丢数据，用最重的配色；驱动不提供这些字段时整行隐藏
 - **行重映射（Row Remapper）**：显存某一行错误太多时，固件会用备用行顶替它——这既是自愈，也是"这块显存确实坏了一部分"的实锤。只在有情况时才补进那一行（有重映射待生效 / 已重映射过 N 行 / **重映射失败**），健康时不占地方。重映射失败意味着备用行也不够了，是换卡依据
+- **XID**：驱动打在内核日志里的 GPU 错误事件（48 双比特 ECC、64 重映射记录失败、79 掉出 PCIe 总线…），相当于显卡的黑匣子。需要读内核日志，因此涉及权限，详见下面的「硬件健康」一节
 - 宿主系统资源：CPU 使用率、内存使用率、交换分区、系统负载、磁盘容量、网络吞吐，CPU 与内存单独一条曲线
 - 一键下载：`下载 CSV` 导出 GPU 曲线原始数据，`下载系统 CSV` 导出宿主指标，`下载 JSON` 导出当前完整状态（含进程列表与宿主指标）
 - 历史存档：按 SQLite 落库（`data/gpu-monitor.db`），重启不丢；页面顶部可切 实时 / 3 天 / 7 天 / 30 天 / 60 天 / 90 天 / 全部，导出会跟着当前选择走（切到历史区间时曲线是历史值，顶部指标与右侧卡片仍是当前实时值，界面上会标注清楚）
 - 实时推送：默认用 SSE 把每一帧推给浏览器，比轮询更省；推送不可用时自动退回轮询（`--no-push` 可强制关掉）
-- 告警：显存 / 温度 / 节流 / 利用率 / 宿主内存 / 磁盘 / 采集中断都能配阈值，还能**按服务**（哪个容器、哪个 systemd 单元占了多少）单独设规则；支持"持续多久才算触发"和冷却抑制；通知渠道内置**邮件**、Webhook 和控制台日志
+- 告警：显存 / 温度 / 节流 / 利用率 / 宿主内存 / 磁盘 / 采集中断都能配阈值，还能**按服务**（哪个容器、哪个 systemd 单元占了多少）单独设规则；**硬件健康类**（ECC、行重映射、XID）同样能配；支持"持续多久才算触发"和冷却抑制；通知渠道内置**邮件**、Webhook 和控制台日志
 - 90% 警戒线、≥90% 与高温的配色告警，异常时给出可复制的排查命令
 - 跨平台：同一份代码在 Linux / Windows 上自动探测 `nvidia-smi`，macOS 上明确提示"平台不支持"而不是笼统报错
 - 空闲降频：页面关掉之后自动把采集间隔放慢（默认 30 秒无人访问后降到 10 秒），窗口保持连续、回来时曲线不断档
@@ -202,6 +203,16 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 - 用 root 运行服务（`deploy/` 里的 systemd 模板默认就是 root，顺带也能看全占用进程）
 - 把运行用户加进 `systemd-journal` 组，改走 `journalctl`
 - 给 node 二进制加读日志的 capability：`sudo setcap cap_syslog+ep /opt/node24/bin/node`
+
+想知道某台机器能不能读，跑这三条就行：
+
+```bash
+journalctl -k --no-pager -o short-iso -n 3 2>/tmp/je.txt | tail -3
+cat /tmp/je.txt     # 出现 "not seeing messages" 之类的 Hint，说明只能看到部分日志
+id                  # 有 adm 或 systemd-journal 组即可
+```
+
+实测：运行用户在 **`adm`** 组里时 `journalctl -k` 就能拿到完整内核日志（stderr 为空），不必换成 root。反过来，`journalctl` 在权限不足时会**退出码 0 却只给部分日志**——所以服务会识别那句 Hint 并当作"读不到"，否则就会把"看不到"显示成"累计 0 条"。
 
 XID 的累计计数由服务自己维护：内核日志会轮转、重启就清空，所以不能每次只读当前缓冲。
 
@@ -401,19 +412,24 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 | `GET /api/stream` | SSE 推送：每采集一帧推一条，内容与 `/api/state` 同构；`--no-push` 时返回 404 |
 | `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
 | `GET /api/history?range=7d` | 历史区间（`3d` / `7d` / `30d` / `60d` / `90d` / `all`，或 `from`/`to`、`step`） |
-| `GET /api/processes?range=24h&limit=200` | 进程占用事件（谁在什么时候占上了哪张卡），区间写法同 `/api/history`，另返回 `total` 总数 |
+| `GET /api/processes?range=24h&limit=50` | 进程占用事件（谁在什么时候占上了哪张卡），区间写法同 `/api/history`，另返回 `total` 总数。`limit` 一次取多少条（上限 2000），`min` 是**占用下限**（MiB，如 `&min=1024` 只看 ≥ 1 GiB 的），默认取启动参数里的 `--proc-min` |
 | `GET /api/export.csv` | 下载曲线原始数据（每行 = 一个采样点 × 一张卡）；加 `&fields=full` 会带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流等扩展列（需要历史库） |
 | `GET /api/export.system.csv` | 下载宿主指标（每行 = 一个采样点；磁盘只导出第一个挂载点，完整明细在 JSON 里） |
 | `GET /api/export.json` | 下载当前完整状态 + 采样窗口 |
 
-`/api/state` 在原有字段之外新增了：
+`/api/state` 里几个值得单独说明的字段：
 
+- `gpus[]`：每张卡的实时指标。硬件健康相关的在 `eccMode` / `eccCorrectedVolatile` / `eccUncorrectedVolatile` / `eccCorrectedAggregate` / `eccUncorrectedAggregate`，以及 `remap`（`correctable` / `uncorrectable` / `pending` / `failure` / `banksMax`）和 `xid`（`count` / `lastCode` / `lastAt` / `recent`）。**读不到时这几个是 `null` / 缺失，不是 0**——"看不到"和"没有错误"必须能区分
+- `services[]`：按服务汇总的显存占用（`service` / `memMiB` / `sharePct` / `processes` / `users[]`）
+- `storage`：历史库状态（`mode` / `path` / `written` / `oldestTs` / `retentionDays` / `procMinMiB` …）
+- `alerts`：告警状态（`enabled` / `ruleCount` / `rules[]` / `firing[]` / `warnings[]` / `notifiedCount` …）
+- `remapStatus` / `xidStatus`：这两项的**采集状态**（是否读到、从哪读的、失败原因），对应页面「采集信息」里那两行
 - `system`：宿主指标快照（`cpu` / `mem` / `swap` / `load` / `disk[]` / `net` / `uptimeSec` / `unsupported[]`）
 - `fields`：扩展指标探测结果（`enabled`、`extended`、`count`、`unsupported[]`）
 - `idle`：空闲降频状态（`active`、`currentIntervalMs`、`idleAfterMs`、`idleIntervalMs`）
-- `systemEnabled`、`systemWarning`
+- `systemEnabled`、`systemWarning`、`storeWarning`
 
-原有的 `gpus`、`processes`、`platform`、`collector`、`error` 等字段语义未变，`/api/history` 的采样点新增了 `system` 字段。
+`/api/history` 的采样点与 `/api/state` 的 `gpus[]` 同构（含上面那些硬件健康字段），另外多一个 `system`。
 
 导出接口接受与 `/api/history` 相同的区间参数（`?range=7d` / `?from=…&to=…` / `?step=`），带区间时会**流式写出**——90 天那种几十万行的导出不会先整块读进内存。不带区间参数时行为与以前完全一致（导出内存窗口）。
 
@@ -486,6 +502,16 @@ node tools/notify-test.mjs --dry-run                     # 只看要发给谁、
 **规则里的 for 好像没生效？** 看页面「采集信息 → 告警」那一行，它会写明长周期规则当前是查历史库、按内存窗口，还是分桶判定。没有历史库时（`--no-db` 或 Node 低于 22.13）长周期的 `for` 会被夹到内存窗口长度，启动日志里也有提示。
 
 **SMTP 连不上？** 内置的 SMTP 客户端只覆盖明文、STARTTLS、隐式 TLS（465）与 AUTH LOGIN/PLAIN，够用于内网 relay。如果你们的邮件服务要求 OAuth 或其他认证方式，可以先把通知渠道换成 `webhook`（指向自建脚本），由脚本去发信。
+
+**温度 / 节流告警一直响？** 先分清这是"事件"还是"状态"。如果一张卡在正常重负载下就长期坐在 85°C，那**任何低于 85 的阈值都会常驻满足**——它就不再是告警，而是状态播报。三条出路：
+
+- 把阈值提到稳态之上（卡常年 85°C 跑，警告线就设 88 之类）
+- 关掉这条规则（`"enabled": false`）。**节流类规则尤其容易变成噪声**：温度在临界点附近时硬件温度墙会反复开关（实测十几分钟里翻转了 16 次），于是"触发 + 恢复"成对发信
+- 把顶层 `cooldown` 调大（如 `"cooldown": "30m"`）：同一条规则在这段时间内不再重复通知；首次触发仍然立即发出，不会延误
+
+但抑制告警只是让邮件安静下来。**如果一张卡长期贴着温度墙跑（功耗远低于上限却仍在降频），那是散热问题**——该查机箱风扇档位与进风温度，而不是继续抬阈值。
+
+**改完 `alerts.json` 后，正在触发的告警消失了、「已通知 N 次」也归零了？** 这是预期行为：改配置会**整体重建告警引擎**，新引擎不带旧状态。所以那些"触发中"的条目会直接消失，**也不会补发"恢复"邮件**；「已通知 N 次」的含义是"自上次加载配置以来"，不是服务启动以来的累计。
 
 ## 本地自检
 
