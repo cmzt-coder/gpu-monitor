@@ -20,7 +20,6 @@ const refs = {
   alertsRulesSummary: $('alerts-rules-summary'),
   alertsRuleList: $('alerts-rule-list'),
   btnRetry: $('btn-retry'),
-  btnRefresh: $('btn-refresh'),
   btnExport: $('btn-export'),
   exportDialog: $('export-dialog'),
   exportClose: $('export-close'),
@@ -108,6 +107,8 @@ const state = {
   fetchedAt: null,
   consecutiveErrors: 0,
   pushActive: false,
+  // 上一次看到的进程身份签名：变了就说明库里有新事件，进程历史该刷新了
+  processSignature: null,
   // 曲线时间范围：live = 实时窗口，其它值是历史区间（也直接决定导出的范围）
   range: 'live',
   historyPoints: null,
@@ -160,6 +161,8 @@ const PROC_HIST_MIN_PRESETS = [
 let eventSource = null;
 let pollTimer = null;
 let pushRetryTimer = null;
+// 进程历史的重载防抖计时器（见 scheduleProcessHistoryReload）
+let processHistoryTimer = null;
 let pushFailures = 0;
 
 const HIGH_THRESHOLD = 90;
@@ -359,10 +362,38 @@ function applyState(data) {
   state.gpus = data.gpus || [];
   state.processes = data.processes || [];
   state.meta = data;
+  noteProcessIdentity();
   if (state.gpus.length > 0 || data.system) {
     appendSample({ t: data.ts || Date.now(), gpus: state.gpus, system: data.system });
   }
   render();
+}
+
+/**
+ * 进程历史那张表不跟实时帧更新（它的数据源是独立的接口）。
+ * 与其按固定间隔盲刷，不如**盯着进程身份有没有变**：变了说明库里刚写进一条新事件，
+ * 那时再刷一次。没变化就一个查询都不发——比"每 5 分钟刷一次"既更及时也更省。
+ */
+function noteProcessIdentity() {
+  const signature = state.processes
+    .map((proc) => `${proc.gpuIndex ?? '-'}:${proc.pid ?? '-'}:${proc.name ?? '-'}`)
+    .sort()
+    .join('|');
+  if (signature === state.processSignature) return;
+  state.processSignature = signature;
+  scheduleProcessHistoryReload();
+}
+
+/**
+ * 进程churn 起来时（容器反复重启）可能几秒内变好几次，攒一下再刷。
+ * 留 8 秒是因为库里最多每 5 秒落一行，刷太早会查不到那条。
+ */
+function scheduleProcessHistoryReload() {
+  if (processHistoryTimer) window.clearTimeout(processHistoryTimer);
+  processHistoryTimer = window.setTimeout(() => {
+    processHistoryTimer = null;
+    if (!document.hidden && !state.processHistory.loading) loadProcessHistory();
+  }, 8000);
 }
 
 async function poll() {
@@ -2173,12 +2204,6 @@ refs.exportConfirm.addEventListener('click', () => {
   closeExportPanel();
   triggerDownload(item.path, params);
 });
-refs.btnRefresh.addEventListener('click', async () => {
-  refs.btnRefresh.disabled = true;
-  // 手动刷新时连历史数据一起刷：进程历史是独立拉取的，不随实时帧更新
-  await Promise.all([poll(), loadProcessHistory()]);
-  refs.btnRefresh.disabled = false;
-});
 refs.btnRetry.addEventListener('click', () => poll());
 
 // 加载更多：把取回条数加一页再拉一次。服务端每次都按"最近 N 条"返回，
@@ -2218,12 +2243,13 @@ async function boot() {
     // 首次回填失败不阻塞，直接进入轮询
   }
   await poll();
-  // 进程历史是独立的一次性拉取，不参与每秒的实时更新
+  // 进程历史是独立的一次性拉取：开页拉一次，之后靠"进程身份变化"触发重载
   loadProcessHistory();
-  // 但页面开久了"最近 24 小时"这个窗口会滑动，所以每 5 分钟悄悄刷一次
+  // 兜底：页面开很久时"最近 24 小时"这个窗口会滑动，偶尔刷一次让边界跟上。
+  // 这个间隔可以很宽松——新事件已经由 noteProcessIdentity() 负责了
   window.setInterval(() => {
     if (!document.hidden && !state.processHistory.loading) loadProcessHistory();
-  }, 5 * 60 * 1000);
+  }, 15 * 60 * 1000);
   // 先用轮询兜住，再尝试升级成 SSE 推送；推送连上后会自动停掉轮询
   schedulePolling();
   startPush();

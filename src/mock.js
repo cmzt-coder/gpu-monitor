@@ -146,10 +146,13 @@ export function createMockSource({
       .map((gpu, i) => {
         if (gpu.memUsedPct < 12) return null;
         const mock = MOCK_PROCESSES[i % MOCK_PROCESSES.length];
+        // 让 0 号卡的进程每 30 秒换一次 PID：真实机器上容器重启就是这样，
+        // 有了这个轮换，进程历史的"身份变化留档"和页面的自动重载才跑得起来
+        const rotated = i === 0 ? Math.floor(elapsed / 30) : 0;
         return {
           gpuUuid: gpu.uuid,
           gpuIndex: gpu.index,
-          pid: 10000 + i * 137,
+          pid: 10000 + i * 137 + rotated,
           ...mock,
           usedMemMiB: Math.round(gpu.memUsedMiB * 0.82),
         };
