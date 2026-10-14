@@ -321,8 +321,9 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .app[data-dense="1"] .kpi__value { margin-top: 0; font-size: 17px; }
 .app[data-dense="1"] .kpi__unit { font-size: 12px; }
 .app[data-dense="1"] .kpi__foot { margin-top: 0; font-size: 12px; }
-/* 进度条在横排里塞不下，占用率已经由脚注用数字说清了 */
-.app[data-dense="1"] .meter { display: none; }
+/* KPI 那条进度条在横排里塞不下，占用率已经由脚注用数字说清了。
+   只针对 KPI：各卡当前占用与系统资源里的进度条是主信息，不能一起藏掉 */
+.app[data-dense="1"] .kpis .meter { display: none; }
 /* 顶栏常驻 50px 左右，右列的粘性起点要让开它 */
 .app[data-dense="1"] .evidence-col { top: 62px; }
 
