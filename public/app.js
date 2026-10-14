@@ -26,6 +26,8 @@ const refs = {
   btnExport: $('btn-export'),
   viewSwitch: $('view-switch'),
   viewNav: $('view-nav'),
+  viewTopbar: $('topbar'),
+  appEl: document.querySelector('.app'),
   work: $('work'),
   exportDialog: $('export-dialog'),
   exportClose: $('export-close'),
@@ -118,6 +120,8 @@ const state = {
   // 展示模式：single = 所有卡片一页铺开；nav = 分页签看，每页一到两张卡
   view: 'single',
   page: 'overview',
+  // 导航模式下页头 / 告警 / KPI 走紧凑排版的标记（样式在 styles.css 的 [data-dense="1"]）
+  dense: false,
   // 曲线时间范围：live = 实时窗口，其它值是历史区间（也直接决定导出的范围）
   range: 'live',
   historyPoints: null,
@@ -702,6 +706,9 @@ function renderAlerts(meta) {
 /* ---------- 渲染：KPI ---------- */
 function renderKpis() {
   const gpus = state.gpus;
+  // 导航模式的顶栏要横着排五个 KPI，脚注只能占几个字：这里出短文案，
+  // 完整说法挂到 title 上（鼠标一停就能看到），单页模式照旧出全文
+  const dense = !!state.dense;
   const totalMem = gpus.reduce((sum, gpu) => sum + (gpu.memTotalMiB || 0), 0);
   const usedMem = gpus.reduce((sum, gpu) => sum + (gpu.memUsedMiB || 0), 0);
   const usedPct = totalMem > 0 ? (usedMem / totalMem) * 100 : null;
@@ -718,7 +725,10 @@ function renderKpis() {
     : '--<span class="kpi__unit">/ --</span>';
   refs.kpiMemFill.style.width = usedPct == null ? '0%' : `${Math.min(100, usedPct).toFixed(1)}%`;
   refs.kpiMemFill.dataset.tone = toneFor(usedPct) || '';
-  refs.kpiMemFoot.textContent = usedPct == null ? '占用率 --' : `整机占用率 ${usedPct.toFixed(1)}%`;
+  refs.kpiMemFoot.textContent = usedPct == null
+    ? '占用率 --'
+    : (dense ? `${usedPct.toFixed(1)}%` : `整机占用率 ${usedPct.toFixed(1)}%`);
+  refs.kpiMemFoot.title = dense && usedPct != null ? `整机占用率 ${usedPct.toFixed(1)}%` : '';
   refs.kpiMemFoot.dataset.tone = toneFor(usedPct) || '';
 
   // 「平均 GPU 利用率」是跨时间的：服务端把历史库里近 1 小时的采样点整体平均好给过来。
@@ -734,16 +744,18 @@ function renderKpis() {
   refs.kpiUtil.innerHTML = utilView.value == null
     ? '--<span class="kpi__unit">%</span>'
     : `${utilView.value.toFixed(0)}<span class="kpi__unit">%</span>`;
-  refs.kpiUtilFoot.textContent = utilView.foot;
+  refs.kpiUtilFoot.textContent = dense ? utilView.footShort : utilView.foot;
   refs.kpiUtilFoot.title = utilView.title;
 
   const maxTemp = temps.length ? Math.max(...temps) : null;
   refs.kpiTemp.innerHTML = maxTemp == null
     ? '--<span class="kpi__unit">°C</span>'
     : `${Math.round(maxTemp)}<span class="kpi__unit">°C</span>`;
-  refs.kpiTempFoot.textContent = maxTemp == null
+  const hotIndex = maxTemp == null ? null : (gpus.find((gpu) => gpu.tempC === maxTemp)?.index ?? '--');
+  refs.kpiTempFoot.textContent = hotIndex == null
     ? '等待采集'
-    : `最高温度来自 GPU ${gpus.find((gpu) => gpu.tempC === maxTemp)?.index ?? '--'}`;
+    : (dense ? `GPU ${hotIndex}` : `最高温度来自 GPU ${hotIndex}`);
+  refs.kpiTempFoot.title = dense && hotIndex != null ? `最高温度来自 GPU ${hotIndex}` : '';
   refs.kpiTempFoot.dataset.tone = tempTone(maxTemp) || '';
 
   const procCount = state.processes.length;
@@ -752,8 +764,9 @@ function renderKpis() {
     : '--<span class="kpi__unit">个</span>';
   const procMem = state.processes.reduce((sum, proc) => sum + (proc.usedMemMiB || 0), 0);
   refs.kpiProcFoot.textContent = state.meta?.status === 'ok'
-    ? `合计占用 ${fmtGiB(procMem)}`
+    ? (dense ? fmtGiB(procMem) : `合计占用 ${fmtGiB(procMem)}`)
     : '等待采集';
+  refs.kpiProcFoot.title = dense && state.meta?.status === 'ok' ? `合计占用 ${fmtGiB(procMem)}` : '';
 }
 
 /* ---------- 渲染：曲线 ---------- */
@@ -2110,11 +2123,16 @@ function applyView() {
   const choice = readViewChoice();
   state.view = choice.view;
   state.page = choice.page;
+  // 导航模式套紧凑顶栏：页头并一行、告警没触发时压一条、KPI 五格并成一条。
+  // 只是加个属性，具体怎么压全在 styles.css 的 [data-dense="1"] 里，
+  // 单页模式不带这个属性，样式和以前一模一样。
+  state.dense = choice.view === 'nav';
+  refs.appEl.dataset.dense = state.dense ? '1' : '0';
 
   for (const card of document.querySelectorAll('.card[data-page]')) {
     card.hidden = choice.view === 'nav' && card.dataset.page !== choice.page;
   }
-  refs.viewNav.hidden = choice.view !== 'nav';
+  refs.viewTopbar.hidden = !state.dense;
   for (const tab of refs.viewNav.querySelectorAll('.view-nav__tab')) {
     if (tab.dataset.page === choice.page) tab.setAttribute('aria-current', 'page');
     else tab.removeAttribute('aria-current');
@@ -2132,6 +2150,8 @@ function applyView() {
 
   // canvas 在隐藏时尺寸为 0、什么都画不出来，所以每次切换都要重画一遍
   render();
+  // 顶栏厚薄变了，右列"能不能粘"的判定也要跟着重算
+  syncEvidenceSticky();
 }
 
 /**
@@ -2141,7 +2161,9 @@ function applyView() {
 function syncEvidenceSticky() {
   const col = document.querySelector('.evidence-col');
   if (!col) return;
-  col.dataset.sticky = col.scrollHeight > window.innerHeight - 48 ? 'off' : 'on';
+  // 导航模式下顶上还压着一条常驻页签栏，它能用的高度要把这条让出来
+  const stickyBar = refs.viewTopbar && !refs.viewTopbar.hidden ? refs.viewTopbar.offsetHeight : 0;
+  col.dataset.sticky = col.scrollHeight > window.innerHeight - 48 - stickyBar ? 'off' : 'on';
 }
 
 /* ---------- 导出面板 ---------- */
@@ -2364,6 +2386,8 @@ window.addEventListener('resize', () => {
     renderCharts();
     renderServiceChart();
     renderSystemCard();
+    // 窗口一变，右列能用的高度也变了（导航模式下还得减去常驻页签栏）
+    syncEvidenceSticky();
   }, 180);
 });
 document.addEventListener('visibilitychange', () => {

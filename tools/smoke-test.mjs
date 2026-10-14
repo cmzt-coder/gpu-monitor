@@ -522,6 +522,7 @@ const utilFull = utilKpiView({
 });
 assert.equal(utilFull.value, 63.4, '有跨时间均值时要用它，而不是这一帧的 12');
 assert.equal(utilFull.foot, '近 1 小时 · 8 张卡');
+assert.equal(utilFull.footShort, '近 1 小时', '紧凑顶栏里只要几个字，卡数在别的 KPI 里已经有了');
 assert.ok(utilFull.title.includes('5760'), '悬停说明里要交代样本量，方便核对口径');
 
 // 服务刚部署：库里只有 20 分钟，数字照给，但脚注必须说清覆盖面
@@ -532,6 +533,7 @@ const utilPartial = utilKpiView({
   now: kpiNow,
 });
 assert.equal(utilPartial.foot, '近 1 小时未满 · 实为最近 20 分钟', '覆盖不足要如实说，不能假装是一小时');
+assert.equal(utilPartial.footShort, '实为最近 20 分钟', '紧凑模式可以省略前半句，"其实只覆盖了 20 分钟"这句不能省');
 assert.equal(utilPartial.value, 40);
 
 // 差一个采样间隙就算满：5 秒落库，少 1 分钟不该被当成"没覆盖满"
@@ -550,16 +552,48 @@ const utilNoSamples = utilKpiView({
 });
 assert.equal(utilNoSamples.value, 15, '历史库还空着时先给这一帧的数，别让卡片空着');
 assert.equal(utilNoSamples.foot, '近 1 小时暂无历史');
+assert.equal(utilNoSamples.footShort, '暂无历史');
 
 // 降级：整个服务都没有历史库（Node 太旧 / --no-db）
 const utilNoHistory = utilKpiView({ avgUtilNow: 42, crossTime: null, cardCount: 8, now: kpiNow });
 assert.equal(utilNoHistory.value, 42);
 assert.equal(utilNoHistory.foot, '按 8 张卡平均（无历史库）', '降级口径必须显式标注，否则会被误读成跨时间均值');
+assert.equal(utilNoHistory.footShort, '无历史库', '紧凑模式也得让人看出这是降级口径');
 
 // 一点数据都没有
 assert.equal(utilKpiView({ now: kpiNow }).value, null);
 assert.equal(utilKpiView({ now: kpiNow }).foot, '等待采集');
+assert.equal(utilKpiView({ now: kpiNow }).footShort, '等待采集');
 assert.equal(utilKpiView({ avgUtilNow: 0, cardCount: 1, now: kpiNow }).value, 0, '0% 是有效值，不能当成"没数据"');
+
+/* ---------- 前端：导航模式的紧凑顶栏（静态结构） ---------- */
+// 顶栏瘦身靠"导航模式打 data-dense，CSS 认这个属性"来落地，这里守住几条一改就坏的约定：
+// 页签栏待在网格里 sticky 粘不住、紧凑规则一旦漏出 [data-dense] 就会污染单页模式。
+const indexHtml = fs.readFileSync(path.join(HERE, '..', 'public', 'index.html'), 'utf8');
+const stylesCss = fs.readFileSync(path.join(HERE, '..', 'public', 'styles.css'), 'utf8');
+const appJs = fs.readFileSync(path.join(HERE, '..', 'public', 'app.js'), 'utf8');
+
+const topbarAt = indexHtml.indexOf('id="topbar"');
+const navAt = indexHtml.indexOf('id="view-nav"');
+const gridAt = indexHtml.indexOf('id="work"');
+assert.ok(topbarAt > 0, '页签栏要装在一个独立的 #topbar 里');
+assert.ok(navAt > topbarAt && navAt < topbarAt + 600, '页签栏要放在 #topbar 里面');
+assert.ok(topbarAt < gridAt, '页签栏要在卡片网格之前：待在 .work-grid 里 sticky 粘不住（可粘范围只有自己那一行）');
+
+assert.match(stylesCss, /\.topbar\s*\{[^}]*position:\s*sticky/, '页签栏要 sticky，否则滚到页面下面就得先滚回去才能切页');
+// 紧凑规则一律挂在 .app[data-dense="1"] 下：导航模式才加这个属性，单页模式一个像素都不变
+for (const match of stylesCss.matchAll(/\[data-dense/g)) {
+  assert.equal(
+    stylesCss.slice(match.index - 4, match.index),
+    '.app',
+    `紧凑规则没限定在 .app[data-dense="1"] 下，会污染单页模式：${stylesCss.slice(match.index - 30, match.index + 30)}`,
+  );
+}
+assert.ok(stylesCss.includes('.app[data-dense="1"] .kpis'), 'KPI 行要有紧凑版式');
+assert.ok(stylesCss.includes('.app[data-dense="1"] .alerts[data-state="idle"]'), '告警面板只在"没触发"时才压成一行');
+assert.ok(appJs.includes('refs.appEl.dataset.dense'), 'app.js 要按展示模式打上 data-dense');
+assert.ok(appJs.includes('utilView.footShort'), 'KPI 脚注在紧凑模式下要用短文案');
+assert.ok(appJs.includes('syncEvidenceSticky'), '右列 sticky 的判定要跟着顶栏厚薄重算');
 
 /* ---------- 硬件健康：XID（内核日志） ---------- */
 // 两种来源的总线号写法必须归一到一起，否则日志里的 XID 落不到具体的卡上
@@ -2340,5 +2374,5 @@ process.stdout.write(
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
   + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
-  + '平均利用率的跨时间口径与覆盖不足标注\n',
+  + '平均利用率的跨时间口径与覆盖不足标注 / 导航模式紧凑顶栏（结构约定）\n',
 );

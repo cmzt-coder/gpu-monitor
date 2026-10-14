@@ -243,11 +243,18 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 
 /* 导航模式：页签栏 + 只显示当前页的卡片（显隐由 JS 打在卡片自身的 hidden 上）。
    某一列在本页没有卡片时让它占满整行，免得留一条空栏 */
-.view-nav {
-  grid-column: span 12;
-  display: flex; flex-wrap: wrap; gap: 6px;
-  margin-bottom: -8px;
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  margin-top: 16px;
+  padding: 6px 0 8px;
+  /* 背景必须不透明：页签之下压着正在滚动的卡片 */
+  background: var(--jf-color-canvas);
 }
+/* 页签栏与卡片区之间的间距原来由网格 gap 出，搬出来之后自己补上 */
+.topbar:not([hidden]) + .work-grid { margin-top: 12px; }
+.view-nav { display: flex; flex-wrap: wrap; gap: 6px; }
 .view-nav__tab {
   padding: 7px 16px;
   border: 1px solid var(--jf-color-border);
@@ -266,9 +273,58 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 }
 .work-grid[data-cols="left"] .work-col { grid-column: span 12; }
 .work-grid[data-cols="right"] .evidence-col { grid-column: span 12; }
+/* 导航模式下总有一列是空的：那列虽然高 0，却照样占掉一行，行间距白白多出 24px
+   （实测「各卡当前占用」被推到了 293px）——一列的时候就不要行间距了 */
+.work-grid[data-cols="left"], .work-grid[data-cols="right"] { row-gap: 0; }
 .view-switch { display: flex; gap: 0; }
 .view-switch .chip:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .view-switch .chip:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
+
+/* ---------- 导航模式的紧凑顶栏 ---------- */
+/* 导航模式下页头 / 告警 / KPI 三块常驻区本来就够用，按宽松排版铺开却在 720px 高的窗口里
+   吃掉 511px——内容是四张卡，首屏只剩 209px，第一张图都露不全。这里把它们各自压成一两行：
+   页头并成一行、告警没触发时压成一条、KPI 五格并成一条。
+   规则全挂在 data-dense="1" 下，只有导航模式加这个属性，单页模式一个像素都不变。 */
+.app[data-dense="1"] .orient { gap: 12px; align-items: center; padding-bottom: 10px; }
+.app[data-dense="1"] .orient__main { align-items: center; }
+.app[data-dense="1"] .orient__text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
+.app[data-dense="1"] .page-title { font-size: 20px; }
+.app[data-dense="1"] .orient__sub { margin-top: 0; font-size: 12.5px; }
+.app[data-dense="1"] .status-pill { min-height: 30px; padding: 0 12px; font-size: 12.5px; }
+.app[data-dense="1"] .orient__actions .btn { min-height: 32px; font-size: 13px; }
+.app[data-dense="1"] .orient__actions .chip { padding: 6px 12px; font-size: 12.5px; }
+
+/* 没触发告警时压成一行（有告警时保持原样展开，该醒目就得醒目） */
+.app[data-dense="1"] .alerts[data-state="idle"] {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px;
+  margin-top: 10px; padding: 9px 16px;
+}
+.app[data-dense="1"] .alerts[data-state="idle"] .alerts__status,
+.app[data-dense="1"] .alerts[data-state="idle"] .alerts__empty,
+.app[data-dense="1"] .alerts[data-state="idle"] .alerts__rules { margin-top: 0; }
+/* 规则清单展开时独占一行，别和上面那几行文字挤在一起 */
+.app[data-dense="1"] .alerts[data-state="idle"] .alerts__rules[open] { flex-basis: 100%; }
+
+/* KPI 五格并成一条：小字标签 + 数值 + 简短脚注，横向流动，窄了自动换行 */
+.app[data-dense="1"] .kpis {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 26px;
+  margin-top: 10px; padding: 9px 16px;
+  background: var(--jf-color-surface);
+  border: 1px solid var(--jf-color-border);
+  border-radius: var(--jf-radius-md);
+}
+.app[data-dense="1"] .kpi {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px;
+  padding: 0; border: none; background: none; border-radius: 0;
+}
+.app[data-dense="1"] .kpi__label { font-size: 12.5px; }
+.app[data-dense="1"] .kpi__value { margin-top: 0; font-size: 17px; }
+.app[data-dense="1"] .kpi__unit { font-size: 12px; }
+.app[data-dense="1"] .kpi__foot { margin-top: 0; font-size: 12px; }
+/* 进度条在横排里塞不下，占用率已经由脚注用数字说清了 */
+.app[data-dense="1"] .meter { display: none; }
+/* 顶栏常驻 50px 左右，右列的粘性起点要让开它 */
+.app[data-dense="1"] .evidence-col { top: 62px; }
 
 .card {
   background: var(--jf-color-surface);
@@ -611,6 +667,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 @media (max-width: 720px) {
   .app { padding: 18px 16px 36px; }
   .orient { align-items: flex-start; }
+  /* 手机宽度下按钮要占满整行，紧凑模式也得让页头回到上对齐 */
+  .app[data-dense="1"] .orient { align-items: flex-start; }
   .orient__actions { width: 100%; }
   .orient__actions .btn { flex: 1 1 auto; justify-content: center; }
   .status-pill { width: 100%; justify-content: center; }

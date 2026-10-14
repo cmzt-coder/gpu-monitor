@@ -13,18 +13,21 @@
 /** 一小时，跨时间口径的固定窗口 */
 export const UTIL_WINDOW_MS = 3600000;
 
-/** 库里最早一条采样点距今不足一小时时，补一句"实为最近 N 分钟" */
+/** 库里最早一条采样点距今不足一小时时，算出"实际只覆盖了 N 分钟" */
 function describeCoverage({ oldestTs, windowMs, now, intervalMs }) {
   // 采样点之间本身有间隔，差一个间隔左右就算覆盖满窗口了，不必抠那几秒
   const slack = Math.max(120000, intervalMs * 3);
   const coveredMs = Math.max(0, now - oldestTs);
   if (coveredMs >= windowMs - slack) return null;
-  const minutes = Math.max(1, Math.round(coveredMs / 60000));
-  return `近 1 小时未满 · 实为最近 ${minutes} 分钟`;
+  return Math.max(1, Math.round(coveredMs / 60000));
 }
 
 /**
  * 算出平均利用率卡片要显示的数值、脚注与悬停说明。
+ *
+ * 脚注给两份：`foot` 是完整说法（单页模式、悬停提示用），`footShort` 是导航模式
+ * 紧凑顶栏里那一行的短说法——顶栏要横着排五个 KPI，脚注只能占几个字，
+ * 但"其实只覆盖了 20 分钟"这类口径说明不能省，短说也得说。
  *
  * @param {object} input
  * @param {number|null} input.avgUtilNow 这一帧的跨卡平均（降级口径）
@@ -32,7 +35,7 @@ function describeCoverage({ oldestTs, windowMs, now, intervalMs }) {
  * @param {number} input.cardCount       这一帧有利用率的卡数
  * @param {number} input.now             当前时间（算覆盖时长用）
  * @param {number} input.intervalMs      采集间隔
- * @returns {{ value: number|null, foot: string, title: string }}
+ * @returns {{ value: number|null, foot: string, footShort: string, title: string }}
  */
 export function utilKpiView({
   avgUtilNow = null,
@@ -43,32 +46,39 @@ export function utilKpiView({
 } = {}) {
   const crossAvg = Number.isFinite(crossTime?.avg) ? crossTime.avg : null;
   const value = crossAvg ?? (Number.isFinite(avgUtilNow) ? avgUtilNow : null);
-  if (value == null) return { value: null, foot: '等待采集', title: '' };
+  if (value == null) return { value: null, foot: '等待采集', footShort: '等待采集', title: '' };
 
   // 降级：服务端没有历史库（Node 太旧 / --no-db），只能给这一帧的跨卡平均
   if (!crossTime) {
-    if (!cardCount) return { value: null, foot: '等待采集', title: '' };
+    if (!cardCount) return { value: null, foot: '等待采集', footShort: '等待采集', title: '' };
     return {
       value,
       foot: `按 ${cardCount} 张卡平均（无历史库）`,
+      footShort: '无历史库',
       title: '没有历史库，这里是当前这一帧所有显卡的平均；接上历史库后会改成近 1 小时的平均',
     };
   }
 
   // 有历史库但近 1 小时一条都没落（刚启动）：数字先跟着这一帧走，口径如实标注
   if (!crossTime.samples) {
-    return { value, foot: '近 1 小时暂无历史', title: '历史库里近 1 小时还没有采样点' };
+    return {
+      value,
+      foot: '近 1 小时暂无历史',
+      footShort: '暂无历史',
+      title: '历史库里近 1 小时还没有采样点',
+    };
   }
 
   const windowMs = crossTime.windowMs || UTIL_WINDOW_MS;
   const cards = crossTime.cards || cardCount;
-  const partial = crossTime.oldestTs ? describeCoverage({
+  const shortMinutes = crossTime.oldestTs ? describeCoverage({
     oldestTs: crossTime.oldestTs, windowMs, now, intervalMs,
   }) : null;
   const title = `把历史库里近 1 小时的采样点整体平均（跨时间、跨卡），共 ${crossTime.samples} 个采样点`;
   return {
     value,
-    foot: partial || `近 1 小时 · ${cards} 张卡`,
+    foot: shortMinutes ? `近 1 小时未满 · 实为最近 ${shortMinutes} 分钟` : `近 1 小时 · ${cards} 张卡`,
+    footShort: shortMinutes ? `实为最近 ${shortMinutes} 分钟` : '近 1 小时',
     title,
   };
 }

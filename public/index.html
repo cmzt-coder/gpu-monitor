@@ -125,13 +125,18 @@
     </article>
   </section>
 
-  <div class="work-grid" id="work">
-    <nav class="view-nav" id="view-nav" aria-label="页面导航" hidden>
+  <!-- 页签栏独立成条、不在卡片网格里：导航模式下它要粘在窗口顶上（滚到哪儿都能切页），
+       而网格项的可粘范围只有自己那一行，待在 .work-grid 里根本粘不住 -->
+  <div class="topbar" id="topbar" hidden>
+    <nav class="view-nav" id="view-nav" aria-label="页面导航">
       <button type="button" class="view-nav__tab" data-page="overview">总览</button>
       <button type="button" class="view-nav__tab" data-page="curve">曲线</button>
       <button type="button" class="view-nav__tab" data-page="processes">进程</button>
       <button type="button" class="view-nav__tab" data-page="system">系统</button>
     </nav>
+  </div>
+
+  <div class="work-grid" id="work">
     <main class="work-col">
       <section class="card" data-page="curve" aria-labelledby="charts-h">
         <div class="card__head">
