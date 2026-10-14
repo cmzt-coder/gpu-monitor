@@ -327,6 +327,15 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 /* 顶栏常驻 50px 左右，右列的粘性起点要让开它 */
 .app[data-dense="1"] .evidence-col { top: 62px; }
 
+/* 各卡当前占用：8 张卡平铺时每一行间距都在乘 8，收紧一点就是几十像素。
+   再加一层 .work-grid 是为了盖过上面「两栏平铺」那条同名规则（同权重时后者生效） */
+.app[data-dense="1"] .work-grid .gpu-cards { gap: 14px 26px; margin-top: 12px; }
+.app[data-dense="1"] .gpu-card__mem { margin-top: 6px; }
+.app[data-dense="1"] .gpu-card .meter { margin-top: 8px; }
+.app[data-dense="1"] .gpu-card__foot { margin-top: 6px; font-size: 12px; gap: 4px 12px; }
+.app[data-dense="1"] .gpu-card__health { margin-top: 5px; font-size: 12px; }
+.app[data-dense="1"] .gpu-card__chips { margin-top: 6px; }
+
 .card {
   background: var(--jf-color-surface);
   border: 1px solid var(--jf-color-border);

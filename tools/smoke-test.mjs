@@ -14,6 +14,7 @@ import {
 import { createXidTracker, parseXidLines, readKernelLog } from '../src/xid.js';
 import { resampleToGrid } from '../public/resample.js';
 import { utilKpiView, UTIL_WINDOW_MS } from '../public/kpi-util.js';
+import { throttleParts, healthParts } from '../public/gpu-card-parts.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -632,6 +633,73 @@ assert.equal(utilKpiView({ now: kpiNow }).foot, '等待采集');
 assert.equal(utilKpiView({ now: kpiNow }).footShort, '等待采集');
 assert.equal(utilKpiView({ avgUtilNow: 0, cardCount: 1, now: kpiNow }).value, 0, '0% 是有效值，不能当成"没数据"');
 
+/* ---------- 各卡当前占用：节流状态与硬件健康 ---------- */
+// 这两行决定单张卡的高度，单张卡的高度又决定 8 张卡要不要滚两三屏，
+// 所以判定抽成了纯函数，在这里钉住"什么该单开一行、什么可以并进健康行"。
+
+// 节流：字段没读到 ≠ 没在降频
+assert.deepEqual(throttleParts({}), { known: false, reasons: [] }, '驱动没给这组字段时是"状态未知"，不能当成"没节流"');
+assert.deepEqual(throttleParts({ throttle: {} }), { known: true, reasons: [] }, '全是 false 才是真的没在降频');
+assert.deepEqual(
+  throttleParts({ throttle: { swPowerCap: true, hwThermal: false } }).reasons,
+  [{ text: '功耗墙', tone: 'warning' }],
+);
+assert.deepEqual(
+  throttleParts({ throttle: { hwSlowdown: true } }).reasons,
+  [{ text: '硬件降速', tone: 'danger' }],
+);
+assert.deepEqual(
+  throttleParts({ throttle: { someFutureKey: true } }).reasons,
+  [{ text: 'someFutureKey', tone: 'warning' }],
+  '认不出来的原因也要显示出来，不能悄悄吞掉',
+);
+
+// 硬件健康：一切正常时也要出字——"ECC 无错误"本身就是有用的信息
+assert.deepEqual(
+  healthParts({ eccMode: 'Enabled', eccCorrectedAggregate: 0, eccUncorrectedAggregate: 0 }),
+  { visible: true, parts: ['ECC 无错误'], tone: '' },
+);
+assert.equal(healthParts({}).visible, false, '消费卡 / 老驱动两样都拿不到时整行隐藏，不显示一排 "--"');
+assert.equal(healthParts({ eccMode: 'Disabled' }).parts[0], 'ECC 已关闭（Disabled）');
+assert.equal(
+  healthParts({ eccMode: 'Enabled', eccUncorrectedAggregate: 1, eccUncorrectedVolatile: 1 }).tone,
+  'danger',
+  '不可纠正错误意味着已经在丢数据，得用最重的配色',
+);
+assert.equal(
+  healthParts({ eccMode: 'Enabled', eccCorrectedAggregate: 4800, eccCorrectedVolatile: 3 }).parts[0],
+  'ECC 可纠正 4800（本次 3）',
+  '终身累计与本次新增要分开写：看的是"有没有在涨"',
+);
+assert.equal(
+  healthParts({ eccMode: 'Enabled', eccCorrectedAggregate: 4800, eccCorrectedVolatile: 0 }).parts[0],
+  'ECC 可纠正 4800',
+);
+
+// 行重映射只在"有情况"时才补字
+const remapFail = healthParts({
+  eccMode: 'Enabled', eccCorrectedAggregate: 0, eccUncorrectedAggregate: 0,
+  remap: { failure: true, banksMax: 640 },
+});
+assert.ok(remapFail.parts.includes('行重映射失败'));
+assert.equal(remapFail.tone, 'danger', '重映射失败是换卡依据');
+assert.deepEqual(
+  healthParts({ remap: { banksMax: 640, correctable: 0, uncorrectable: 0, pending: false } }).parts,
+  [],
+  '重映射一切正常时不占字，免得这一行变成没人看的长句',
+);
+assert.equal(healthParts({ remap: { pending: true } }).tone, 'warning');
+
+// XID：48 / 64 / 79 这几个编号要按"这张卡要处理了"对待，其余也报但不必同等紧张
+const xidFatal = healthParts(
+  { xid: { count: 2, lastCode: 79, lastAt: kpiNow, recent: true } },
+  { relativeText: () => '10 分钟前' },
+);
+assert.equal(xidFatal.tone, 'danger');
+assert.ok(xidFatal.parts[0].includes('XID 79'), 'XID 编号要写出来，别只说"有错误"');
+assert.ok(xidFatal.parts[0].includes('10 分钟前'), '要说清最近一次是什么时候，方便对着时间线看');
+assert.equal(healthParts({ xid: { count: 1, lastCode: 12345 } }).tone, 'warning');
+
 /* ---------- 前端：导航模式的紧凑顶栏（静态结构） ---------- */
 // 顶栏瘦身靠"导航模式打 data-dense，CSS 认这个属性"来落地，这里守住几条一改就坏的约定：
 // 页签栏待在网格里 sticky 粘不住、紧凑规则一旦漏出 [data-dense] 就会污染单页模式。
@@ -660,6 +728,7 @@ assert.ok(stylesCss.includes('.app[data-dense="1"] .alerts[data-state="idle"]'),
 assert.ok(appJs.includes('refs.appEl.dataset.dense'), 'app.js 要按展示模式打上 data-dense');
 assert.ok(appJs.includes('utilView.footShort'), 'KPI 脚注在紧凑模式下要用短文案');
 assert.ok(appJs.includes('syncEvidenceSticky'), '右列 sticky 的判定要跟着顶栏厚薄重算');
+assert.ok(appJs.includes("from './gpu-card-parts.js'"), '各卡的两行判定要用抽出来的纯函数，别再各写一份');
 
 /* ---------- 前端：导出弹窗的时间口径说明（静态结构） ---------- */
 // 导出的时间列有两列（本地时间 + UTC），说明文字必须跟着列名走：
@@ -2447,6 +2516,7 @@ process.stdout.write(
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
   + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
-  + '平均利用率的跨时间口径与覆盖不足标注 / 导航模式紧凑顶栏（结构约定）/ '
+  + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流与硬件健康的行内判定 / '
+  + '导航模式紧凑顶栏（结构约定）/ '
   + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）\n',
 );

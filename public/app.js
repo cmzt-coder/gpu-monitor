@@ -1,5 +1,6 @@
 import { resampleToGrid } from './resample.js';
 import { utilKpiView } from './kpi-util.js';
+import { throttleParts, healthParts } from './gpu-card-parts.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -182,16 +183,6 @@ let pushFailures = 0;
 const HIGH_THRESHOLD = 90;
 const TEMP_WARN = 75;
 const TEMP_DANGER = 85;
-
-// 节流原因的中文名与告警级别（gpuIdle 只是"显卡空闲"，不是故障）
-const THROTTLE_LABELS = {
-  swPowerCap: { text: '功耗墙', tone: 'warning' },
-  hwSlowdown: { text: '硬件降速', tone: 'danger' },
-  hwThermal: { text: '温度墙', tone: 'danger' },
-  hwPowerBrake: { text: '功耗刹车', tone: 'danger' },
-  swThermal: { text: '软件温度墙', tone: 'warning' },
-  gpuIdle: { text: '空闲', tone: null },
-};
 
 const SYSTEM_FIELD_LABELS = {
   cpu: 'CPU',
@@ -1313,13 +1304,11 @@ function renderSystemCard() {
 function renderThrottleChips(gpu) {
   const wrap = document.createElement('div');
   wrap.className = 'gpu-card__chips';
-  if (!gpu.throttle) {
+  const { known, reasons } = throttleParts(gpu);
+  if (!known) {
     wrap.appendChild(stateChip('节流状态未知', null));
     return wrap;
   }
-  const reasons = Object.entries(gpu.throttle)
-    .filter(([, value]) => value === true)
-    .map(([key]) => THROTTLE_LABELS[key] || { text: key, tone: 'warning' });
 
   if (reasons.length === 0) {
     wrap.appendChild(stateChip('无节流', null));
@@ -1419,91 +1408,40 @@ function renderGpuCards() {
     encdecNode.hidden = !hasEncdec;
     if (hasEncdec) encdecNode.textContent = `编解码 ${fmtPct(gpu.encUtilPct, 0)} / ${fmtPct(gpu.decUtilPct, 0)}`;
 
-    card.querySelector('[data-role="throttle"]').replaceChildren(renderThrottleChips(gpu));
-    renderHealthNode(card.querySelector('[data-role="health"]'), gpu);
+    // 导航模式（紧凑版）下，一切正常时把「无节流」并进硬件健康行尾，不再单开一行——
+    // 8 张卡铺开就是 8 行"无节流"，那是整整一行在说"没出事"。真在降频、或驱动
+    // 根本没给这组字段时，照旧单独成行带色，那种信号得一眼看见。
+    const throttle = throttleParts(gpu);
+    const mergeThrottle = state.dense && throttle.known && throttle.reasons.length === 0;
+    const healthShown = renderHealthNode(
+      card.querySelector('[data-role="health"]'),
+      gpu,
+      mergeThrottle ? ['无节流'] : [],
+    );
+    const throttleNode = card.querySelector('[data-role="throttle"]');
+    if (mergeThrottle && healthShown) throttleNode.replaceChildren();
+    else throttleNode.replaceChildren(renderThrottleChips(gpu));
   }
 }
 
 /**
- * 硬件健康那一行：显存纠错（ECC）+ 行重映射。
+ * 硬件健康那一行：显存纠错（ECC）+ 行重映射 + XID。
  *
- * 关键不是"有没有错"，而是"有没有在涨"：aggregate 是终身累计、volatile 是本次驱动
- * 加载以来，所以两个都写出来，并单独标出本次的新增。不可纠正错误意味着已经在丢数据，
- * 用最重的配色。
+ * 写什么全部交给 healthParts()（纯计算，单独测），这里只管落到 DOM。
+ * extraParts 是紧凑版并进来的「无节流」这类补充说明。
  *
- * 行重映射只在"有情况"时补上去（待生效 / 已重映射过 / 重映射失败），
- * 健康时不留字，免得这一行变成没人看的长句。
+ * @returns {boolean} 这一行最终是否可见——调用方要知道，否则会把"无节流"
+ *   并进一行根本不显示的文本里，节流状态就丢了。
  */
-// 看到这几个编号就该按"这张卡要处理了"来对待；其余编号也值得看见，但不必同等紧张
-const XID_FATAL = new Set([48, 64, 79, 95, 119, 120, 140]);
-
-function renderHealthNode(node, gpu) {
-  const ce = gpu.eccCorrectedAggregate;
-  const ue = gpu.eccUncorrectedAggregate;
-  const eccKnown = !(gpu.eccMode == null && ce == null && ue == null);
-  const remap = gpu.remap || null;
-  const remapKnown = Boolean(remap && (remap.correctable != null || remap.uncorrectable != null
-    || remap.pending != null || remap.failure != null || remap.banksMax != null));
-  // 两样都拿不到（老驱动 / 消费卡）时整行隐藏，不显示一排 "--"
-  if (!eccKnown && !remapKnown) {
-    node.hidden = true;
-    return;
-  }
-  node.hidden = false;
-
-  const ceV = gpu.eccCorrectedVolatile;
-  const ueV = gpu.eccUncorrectedVolatile;
-  const since = (volatileValue, total) => (
-    volatileValue > 0 && volatileValue !== total ? `（本次 ${volatileValue}）` : ''
-  );
-  const parts = [];
-  let tone = '';
-
-  if (eccKnown) {
-    if (gpu.eccMode && gpu.eccMode !== 'Enabled') {
-      parts.push(`ECC 已关闭（${gpu.eccMode}）`);
-    } else if (!(ce > 0) && !(ue > 0)) {
-      // 全 0 本身就是有用的信息：以后任何一个非 0 都是"从干净状态开始的变化"
-      parts.push('ECC 无错误');
-    } else {
-      const ecc = [];
-      if (ue > 0) {
-        ecc.push(`不可纠正 ${ue}${since(ueV, ue)}`);
-        tone = 'danger';
-      }
-      if (ce > 0) {
-        ecc.push(`可纠正 ${ce}${since(ceV, ce)}`);
-        if (!tone) tone = 'warning';
-      }
-      parts.push(`ECC ${ecc.join(' · ')}`);
-    }
-  }
-
-  if (remapKnown) {
-    const remapped = (remap.correctable ?? 0) + (remap.uncorrectable ?? 0);
-    if (remap.failure === true) {
-      // 备用行都不够用了，这是换卡依据
-      parts.push('行重映射失败');
-      tone = 'danger';
-    } else if (remap.pending === true) {
-      parts.push('有行重映射待生效（下次 GPU 复位时应用）');
-      if (tone !== 'danger') tone = 'warning';
-    } else if (remapped > 0) {
-      parts.push(`已重映射 ${remapped} 行`);
-      if (!tone) tone = 'warning';
-    }
-  }
-
-  if (gpu.xid && gpu.xid.count > 0) {
-    const when = gpu.xid.lastAt ? `，最近 ${fmtRelative(gpu.xid.lastAt)}` : '';
-    const code = gpu.xid.lastCode == null ? '未知编号' : `XID ${gpu.xid.lastCode}`;
-    parts.push(`${code}（累计 ${gpu.xid.count} 次${when}）`);
-    if (XID_FATAL.has(gpu.xid.lastCode)) tone = 'danger';
-    else if (tone !== 'danger') tone = 'warning';
-  }
-
-  node.dataset.tone = tone;
+function renderHealthNode(node, gpu, extraParts = []) {
+  const view = healthParts(gpu, { relativeText: fmtRelative });
+  const parts = extraParts.length > 0 ? view.parts.concat(extraParts) : view.parts;
+  const visible = view.visible || parts.length > 0;
+  node.hidden = !visible;
+  if (!visible) return false;
+  node.dataset.tone = view.tone;
   node.textContent = parts.join(' · ');
+  return true;
 }
 
 /* ---------- 渲染：进程表与过滤 ---------- */
