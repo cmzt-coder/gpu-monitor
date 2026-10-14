@@ -7,6 +7,44 @@ set -euo pipefail
 # 项目根目录 = 本文件所在目录，脚本从哪个路径调用都能找到 server.js
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# 本机部署配置：放 TZ / SMTP_PASS / PORT 这类"只属于这台机器"的值。
+# 不进版本库（见 .gitignore），模板见 gpu-monitor.conf.example。
+# 可用 GPU_MONITOR_CONF 指到别处（冒烟测试靠它隔离，免得读到本机的配置）。
+CONF_FILE="${GPU_MONITOR_CONF:-$PROJECT_DIR/gpu-monitor.conf}"
+
+info() { printf '[gpu-monitor] %s\n' "$*"; }
+warn() { printf '[gpu-monitor] 提示：%s\n' "$*" >&2; }
+fail() { printf '[gpu-monitor] 错误：%s\n' "$*" >&2; exit 1; }
+
+# 读 KEY=VALUE 形式的配置文件，逐行解析而不是 source。
+# 为什么不用 source：source 会把文件里的值盖到显式传进来的环境变量上，
+# 那样 `TZ=UTC ./start-bg.sh` 这种临时覆盖就失效了，排查问题时很要命。
+load_conf_file() {
+  local file="$1" line key value
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in '' | '#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac   # 没有等号的行忽略掉
+    key="${line%%=*}"
+    value="${line#*=}"
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    [ -n "$key" ] || continue
+    # 去掉值两边的空白与成对的引号，方便写 SMTP_PASS='带 空格 的密码'
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$value" in
+      \"*\" | \'*\') value="${value#?}"; value="${value%?}" ;;
+    esac
+    # 只补默认值：已经存在的环境变量优先，命令行给的开关永远是最后的决定
+    if ! printenv "$key" >/dev/null 2>&1; then
+      export "$key=$value"
+    fi
+  done < "$file"
+}
+
+# 必须在下面算内置默认值之前读：否则端口之类已经被填上默认值，配置文件就永远轮不到
+load_conf_file "$CONF_FILE"
+
 PORT="${PORT:-8090}"
 LISTEN_HOST="${HOST:-0.0.0.0}"
 INTERVAL_MS="${INTERVAL:-1000}"
@@ -20,10 +58,6 @@ LOG_FILE="$PROJECT_DIR/gpu-monitor.log"
 
 # 未识别的参数原样透传给 server.js（比如 --mock）
 EXTRA_ARGS=()
-
-info() { printf '[gpu-monitor] %s\n' "$*"; }
-warn() { printf '[gpu-monitor] 提示：%s\n' "$*" >&2; }
-fail() { printf '[gpu-monitor] 错误：%s\n' "$*" >&2; exit 1; }
 
 # 解析启动参数；-h/--help 调用各脚本自己定义的 print_usage
 parse_start_args() {

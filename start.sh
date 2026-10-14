@@ -37,6 +37,10 @@ print_usage() {
 
 其余 server.js 支持的参数会原样透传，完整列表见 node server.js --help
 
+本机部署配置：gpu-monitor.conf（模板 gpu-monitor.conf.example，不进版本库）
+  可放 TZ / SMTP_PASS / PORT / INTERVAL / NODE_BIN 这些"只属于这台机器"的值，
+  放进去之后启动就不用每次带参数。优先级：命令行 > 本文件 > 内置默认。
+
 示例：
   ./start.sh
   ./start.sh --port 8091
@@ -49,6 +53,7 @@ USAGE
 parse_start_args "$@"
 validate_port
 resolve_node
+if [ -r "$CONF_FILE" ]; then info "本机配置：${CONF_FILE}"; fi
 check_port_free
 
 info "正在前台启动，按 Ctrl+C 结束"

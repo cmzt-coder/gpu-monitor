@@ -1842,6 +1842,53 @@ for (const reference of referencedScripts) {
   assert.ok(fs.existsSync(path.join(HERE, '..', path.basename(reference))), `模板引用的脚本不存在：${reference}`);
 }
 
+/* ---------- 本机部署配置（gpu-monitor.conf）：只补默认值，不盖显式给的环境变量 ---------- */
+// 服务器系统时区是 UTC 时，靠这个文件把 TZ 固定下来，之后 ./start-bg.sh 不必每次带参数。
+const commonSh = path.join(HERE, '..', '_common.sh');
+const commonShText = fs.readFileSync(commonSh, 'utf8');
+assert.ok(
+  commonShText.indexOf('load_conf_file "$CONF_FILE"') < commonShText.indexOf('PORT="${PORT:-8090}"'),
+  '配置文件必须在算内置默认值之前读：否则端口这类值已经被填上默认值，配置永远轮不到',
+);
+
+// 这三个脚本本身只在 Linux / macOS 上跑，Windows 上跳过（服务本体不受影响）
+if (process.platform !== 'win32') {
+  const confDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-conf-'));
+  const confFile = path.join(confDir, 'gpu-monitor.conf');
+  fs.writeFileSync(confFile, [
+    '# 整行注释不该被当成配置',
+    '',
+    'TZ=Asia/Shanghai',
+    "SMTP_PASS='带 空格 的密码'",
+    '  PORT  =  8099  ',
+    '这行没有等号，应被忽略',
+  ].join('\n'));
+  const confProbe = execFileSync('bash', ['-c', [
+    'source ' + JSON.stringify(commonSh),
+    'unset PORT',                                   // 默认值是 source 时填上的，这里只想看配置文件的解析结果
+    'load_conf_file ' + JSON.stringify(confFile),
+    'printf "%s|%s|%s|" "${TZ:-}" "${SMTP_PASS:-}" "${PORT:-}"',
+    // 显式给过的环境变量应当压过配置文件，否则 TZ=UTC ./start-bg.sh 这种临时覆盖会失效
+    // （要真 export 出去，不能写成 `TZ=UTC load_conf_file …`：那种临时赋值在函数返回就还原了）
+    'TZ=UTC; export TZ',
+    'load_conf_file ' + JSON.stringify(confFile),
+    'printf "%s|" "${TZ:-}"',
+    // 文件不存在时什么都不做，也不能报错
+    'load_conf_file ' + JSON.stringify(path.join(confDir, '不存在.conf')),
+    'printf "ok"',
+  ].join('\n')], {
+    encoding: 'utf8',
+    // 只留最基本的变量：TZ 必须干净，否则测不到"配置文件补默认值"这条
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, GPU_MONITOR_CONF: path.join(confDir, '不存在.conf') },
+  });
+  assert.equal(
+    confProbe,
+    'Asia/Shanghai|带 空格 的密码|8099|UTC|ok',
+    `配置文件解析不对：${confProbe}`,
+  );
+  fs.rmSync(confDir, { recursive: true, force: true });
+}
+
 /* ---------- 推送订阅（SSE 底座） ---------- */
 const pushCollector = createCollector({
   options: baseOptions,

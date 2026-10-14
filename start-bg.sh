@@ -40,6 +40,10 @@ print_usage() {
 运行时文件：
   PID：.run/gpu-monitor.pid    日志：gpu-monitor.log
 
+本机部署配置：gpu-monitor.conf（模板 gpu-monitor.conf.example，不进版本库）
+  可放 TZ / SMTP_PASS / PORT / INTERVAL / NODE_BIN 这些"只属于这台机器"的值，
+  放进去之后启动就不用每次带参数。优先级：命令行 > 本文件 > 内置默认。
+
 示例：
   ./start-bg.sh
   ./start-bg.sh --port 8091
@@ -52,6 +56,7 @@ USAGE
 parse_start_args "$@"
 validate_port
 resolve_node
+if [ -r "$CONF_FILE" ]; then info "本机配置：${CONF_FILE}"; fi
 
 if pid="$(running_pid)"; then
   fail "服务已经在运行（PID ${pid}）。要重启请先执行：$SCRIPT_DIR/stop.sh"

@@ -332,7 +332,22 @@ date '+%Z %z'
 node -e 'console.log(Intl.DateTimeFormat().resolvedOptions().timeZone)'
 ```
 
-要固定成本地时间，用 `--tz`：
+要固定成本地时间，推荐一次性写进配置文件（后面不用再管）：
+
+```bash
+cd /opt/gpu-monitor
+cp gpu-monitor.conf.example gpu-monitor.conf
+echo 'TZ=Asia/Shanghai' >> gpu-monitor.conf
+chmod 600 gpu-monitor.conf          # 里面可能还有邮箱密码
+```
+
+之后 `./start-bg.sh --node /opt/node24/bin/node` 不带任何参数就是东八区。临时想换一种（比如排查问题时按 UTC 看一遍）也没问题，显式给的永远优先：
+
+```bash
+TZ=UTC ./start-bg.sh                # 这一次按 UTC 跑，不改配置文件
+```
+
+也可以单次直接给：
 
 ```bash
 SMTP_PASS='你的授权码' ./start-bg.sh --node /opt/node24/bin/node --tz Asia/Shanghai
@@ -344,7 +359,8 @@ SMTP_PASS='你的授权码' ./start-bg.sh --node /opt/node24/bin/node --tz Asia/
 
 | 方式 | 写法 | 适用 |
 | --- | --- | --- |
-| 启动参数 | `./start-bg.sh --tz Asia/Shanghai` | 最直观，推荐 |
+| 配置文件 | `gpu-monitor.conf` 里写一行 `TZ=Asia/Shanghai` | **一次配好，以后启动不用带参数**，见下面「本机部署配置」 |
+| 启动参数 | `./start-bg.sh --tz Asia/Shanghai` | 临时或单次使用最直观 |
 | 环境变量 | `TZ=Asia/Shanghai ./start-bg.sh` | Node 原生支持，写进自己的重启脚本也方便 |
 | systemd | 单元里加 `Environment=TZ=Asia/Shanghai` | 走 systemd 托管时用（模板里有注释示例） |
 
@@ -371,6 +387,33 @@ tail -f gpu-monitor.log                       # 实时看日志
 脚本的默认端口是 **8090**（`server.js` 自身默认还是 8080，脚本会显式传 `--port`，所以以 8090 为准）。
 
 上传后如果可执行位丢了，先 `chmod +x *.sh`，或者用 `bash start-bg.sh` 直接跑。脚本会自己检查 node 是否存在及版本、端口是否被占用、服务是否已在运行、PID 文件是否过期，出问题会直接给中文提示。端口检查是直接让 node 试绑一次端口，被占用时**立即中止启动**（不会把服务拉起来），并打印占用端口的进程和可换的端口号。
+
+### 本机部署配置（gpu-monitor.conf）
+
+放"只属于这台机器"的值：时区、邮箱密码、端口、node 路径。项目根目录的 `gpu-monitor.conf` **不进版本库**（模板是 `gpu-monitor.conf.example`），所以每台机器各配一份，`git pull` 不会互相覆盖、也不会把密码提交上去。
+
+```bash
+cd /opt/gpu-monitor
+cp gpu-monitor.conf.example gpu-monitor.conf
+chmod 600 gpu-monitor.conf
+$EDITOR gpu-monitor.conf
+```
+
+文件就是普通的 `KEY=VALUE` 行，`#` 开头是整行注释。常用几项：
+
+| 键 | 作用 |
+| --- | --- |
+| `TZ` | 固定本服务时区，导出时间列 / CSV 文件名 / 日志时间都跟着走（见「部署到服务器 → 时区」） |
+| `SMTP_PASS` | 告警邮件密码。`alerts.json` 里写 `${SMTP_PASS}` 占位，值放这里，就不必每次启动都在命令行上带一遍 |
+| `PORT` / `INTERVAL` / `WINDOW` | 等价于同名启动参数的默认值 |
+| `NODE_BIN` | 指定 node 路径，等价于 `--node` |
+
+**优先级**：命令行/环境里显式给的 **>** 配置文件 **>** 内置默认。所以 `PORT=9000 ./start-bg.sh` 一定覆盖配置文件里的 `PORT`，排查问题时不会被"藏起来的默认值"绊住。
+
+两点说明：
+
+- 只有 `./start-bg.sh` / `./start.sh` 会读它。直接 `node server.js` 时不读——那种用法请用 `--tz` 或 `TZ=` 环境变量。
+- 想临时指到别处的配置，用 `GPU_MONITOR_CONF=/path/to/other.conf ./start-bg.sh`。
 
 ### 开机自启（systemd，可选）
 

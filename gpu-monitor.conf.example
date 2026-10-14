@@ -1,0 +1,25 @@
+# GPU 显存负载监控 · 本机部署配置
+#
+# 用法：复制成 gpu-monitor.conf 后按需修改，之后 ./start-bg.sh 不带参数也是这些值。
+#   cp gpu-monitor.conf.example gpu-monitor.conf
+#
+# 这里是"只属于这台机器"的值，所以不进版本库（见 .gitignore）。
+# 优先级：命令行/环境里显式给的 > 本文件 > 内置默认，所以临时覆盖照常好使：
+#   TZ=UTC ./start-bg.sh              # 这一次按 UTC 跑，不改文件
+#
+# 格式：每行 KEY=VALUE；以 # 开头的是整行注释；值可以加引号（含空格时建议加）。
+
+# 这台机器的系统时区是 UTC 的话（云主机默认如此），
+# 导出 CSV 里的 time_local 会和 UTC 列一模一样，用 Excel 看着就像差了 8 小时。
+# 固定成东八区即可——只影响本服务进程，不改系统时区，同机其他服务不受影响。
+TZ=Asia/Shanghai
+
+# 告警邮件密码：alerts.json 里写的是 ${SMTP_PASS} 占位符，
+# 值放这里，就不用每次启动都在命令行上带一遍（文件只有你自己能读，权限建议 600）。
+# SMTP_PASS=你的邮箱授权码
+
+# 其他常用项，不写就用内置默认：
+# PORT=8090                 # 监听端口
+# INTERVAL=1000             # 采集间隔（毫秒）；卡多的话 3000 更省 CPU
+# WINDOW=300                # 曲线窗口采样点数
+# NODE_BIN=/opt/node24/bin/node   # 指定 node，等价于 --node
