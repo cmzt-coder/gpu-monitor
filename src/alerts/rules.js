@@ -17,6 +17,16 @@ export const METRICS = {
   // 服务维度：一张卡被多个服务共享时，只看"整卡用了多少"没有意义
   serviceMemMiB: { scope: 'service', label: '服务显存', unit: 'MiB' },
   serviceSharePct: { scope: 'service', label: '服务显存占比', unit: '%' },
+  // 硬件健康：这几个不是"性能"指标，而是"这张卡是不是在变坏"
+  eccCorrectedAggregate: { scope: 'gpu', label: '显存可纠正错误（终身累计）', unit: '' },
+  eccUncorrectedAggregate: { scope: 'gpu', label: '显存不可纠正错误（终身累计）', unit: '' },
+  // volatile 是本次驱动加载以来的，会随重启归零——适合配"出现就告警"
+  eccUncorrectedVolatile: { scope: 'gpu', label: '显存不可纠正错误（本次运行）', unit: '' },
+  // XID 用"最近窗口内的事件数"配规则：累计值只会涨，一旦触发就永远恢复不了
+  xidRecent: { scope: 'gpu', label: 'XID 错误数（最近 30 分钟）', unit: '' },
+  xidCount: { scope: 'gpu', label: 'XID 错误数（累计）', unit: '' },
+  remapPending: { scope: 'gpu', label: '有行重映射待生效', unit: '' },
+  remapFailure: { scope: 'gpu', label: '行重映射失败', unit: '' },
   // 注意：这里的 "collector" 指的是监控服务自身，和上面按"占卡服务"聚合的 service 作用域不是一回事
   collectOk: { scope: 'collector', label: '采集状态', unit: '' },
 };
@@ -118,6 +128,12 @@ export function readGpuMetric(sample, gpuKeyValue, metric) {
     if (typeof gpu.throttled === 'boolean') return gpu.throttled;
     return undefined;
   }
+  // 硬件健康里有两类不是平铺在 gpu 上的：行重映射与 XID 各自挂在子对象里。
+  // 取不到时返回 undefined（而不是 false/0）——"读不到"不能当成"没问题"
+  if (metric === 'remapPending') return gpu.remap?.pending ?? undefined;
+  if (metric === 'remapFailure') return gpu.remap?.failure ?? undefined;
+  if (metric === 'xidRecent') return gpu.xid?.recent ?? undefined;
+  if (metric === 'xidCount') return gpu.xid?.count ?? undefined;
   return gpu[metric];
 }
 

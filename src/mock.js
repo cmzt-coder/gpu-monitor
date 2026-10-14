@@ -121,6 +121,16 @@ export function createMockSource({
             banksMax: card.index === 2 ? 0 : 640 - card.index * 2,
           },
         }),
+        // XID 来自内核日志，模拟数据源没有日志可读：1 号卡演示"读到且干净"，
+        // 2 号卡演示"出现了致命编号"，3 号卡演示"没读到日志"（不显示任何结论）
+        ...(card.index === 3 ? {} : {
+          xid: {
+            count: card.index === 2 ? 2 : 0,
+            lastCode: card.index === 2 ? 48 : null,
+            lastAt: card.index === 2 ? Date.now() - 600000 : null,
+            recent: card.index === 2 ? 2 : 0,
+          },
+        }),
         throttle: {
           swPowerCap: usedRatio > 0.9,
           hwSlowdown: false,

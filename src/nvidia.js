@@ -271,6 +271,38 @@ export function parseRowRemapper(stdout) {
 }
 
 /**
+ * 把各种写法归一成 "bus:device"。
+ * XID 行里是 `PCI:0000:3b:00`（四位域、没有功能号），
+ * nvidia-smi 的 pci.bus_id 是 `00000000:3B:00.0`（八位域、带功能号）——
+ * 只比较"总线:设备"这一段，两边才对得上。
+ */
+export function normalizeBusId(text) {
+  const trimmed = String(text || '').trim().toLowerCase().replace(/^pci:?/, '');
+  const withoutFunction = trimmed.split('.')[0];
+  const parts = withoutFunction.split(':').filter(Boolean);
+  if (parts.length < 2) return null;
+  return parts.slice(-2).join(':');
+}
+
+/**
+ * 查一次"序号 → PCI 总线号（已归一成 bus:device）"。
+ * 内核日志里的 XID 只带总线号，要落到具体的卡上就得先有这张对照表。
+ * 总线号不会变，所以调用方拿一次记住就行。
+ */
+export async function readGpuBusIds({ bin = 'nvidia-smi', timeout = 5000 } = {}) {
+  const pairs = await runSmi(bin, 'gpu', ['index', 'pci.bus_id'], timeout);
+  const byIndex = new Map();
+  for (const line of String(pairs).split('\n')) {
+    if (!line.trim()) continue;
+    const cells = splitRow(line, 2);
+    const index = toNumber(cells[0]);
+    const busId = normalizeBusId(cells[1]);
+    if (index != null && busId) byIndex.set(index, busId);
+  }
+  return byIndex;
+}
+
+/**
  * 读一次行重映射状态，按 GPU 序号给出来。
  * 需要两次调用：重映射字段只在 -q 里，-q 里又只有总线号，所以另一边查一次
  * index + pci.bus_id 把两者接起来。低频调用（默认 5 分钟一次），开销可忽略。

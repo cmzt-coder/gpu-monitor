@@ -8,7 +8,10 @@
     { "id": "util-mem-high", "metric": "utilMemPct", "op": ">=", "threshold": 95, "for": "2m", "level": "warning" },
     { "id": "host-mem-high", "metric": "hostMemUsedPct", "op": ">=", "threshold": 92, "for": "4m", "level": "warning" },
     { "id": "host-disk-high", "metric": "hostDiskUsedPct", "op": ">=", "threshold": 90, "for": "4m", "level": "warning" },
-    { "id": "collect-down", "metric": "collectOk", "op": "==", "value": false, "for": "1m", "level": "critical" }
+    { "id": "collect-down", "metric": "collectOk", "op": "==", "value": false, "for": "1m", "level": "critical" },
+    { "id": "ecc-uncorrected", "metric": "eccUncorrectedVolatile", "op": ">=", "threshold": 1, "for": "0s", "level": "critical", "label": "出现不可纠正的显存错误", "enabled": false },
+    { "id": "remap-failure", "metric": "remapFailure", "op": "==", "value": true, "for": "0s", "level": "critical", "label": "行重映射失败（备用行不够用）", "enabled": false },
+    { "id": "xid-any", "metric": "xidRecent", "op": ">=", "threshold": 1, "for": "0s", "level": "warning", "label": "出现 XID 错误", "enabled": false }
   ],
   "email": {
     "enabled": true,

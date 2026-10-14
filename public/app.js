@@ -1361,6 +1361,9 @@ function renderGpuCards() {
  * 行重映射只在"有情况"时补上去（待生效 / 已重映射过 / 重映射失败），
  * 健康时不留字，免得这一行变成没人看的长句。
  */
+// 看到这几个编号就该按"这张卡要处理了"来对待；其余编号也值得看见，但不必同等紧张
+const XID_FATAL = new Set([48, 64, 79, 95, 119, 120, 140]);
+
 function renderHealthNode(node, gpu) {
   const ce = gpu.eccCorrectedAggregate;
   const ue = gpu.eccUncorrectedAggregate;
@@ -1416,6 +1419,14 @@ function renderHealthNode(node, gpu) {
       parts.push(`已重映射 ${remapped} 行`);
       if (!tone) tone = 'warning';
     }
+  }
+
+  if (gpu.xid && gpu.xid.count > 0) {
+    const when = gpu.xid.lastAt ? `，最近 ${fmtRelative(gpu.xid.lastAt)}` : '';
+    const code = gpu.xid.lastCode == null ? '未知编号' : `XID ${gpu.xid.lastCode}`;
+    parts.push(`${code}（累计 ${gpu.xid.count} 次${when}）`);
+    if (XID_FATAL.has(gpu.xid.lastCode)) tone = 'danger';
+    else if (tone !== 'danger') tone = 'warning';
   }
 
   node.dataset.tone = tone;
@@ -1748,6 +1759,23 @@ function describeStorage(meta) {
   return parts.join(' · ');
 }
 
+/**
+ * XID 的读取状态。
+ * 这一行存在的意义是区分"没有错误"和"看不到错误"——读不到内核日志时，
+ * 界面上必须说清楚是权限问题，否则会被理解成"这块卡很干净"。
+ */
+function describeXid(meta) {
+  const xid = meta?.xidStatus;
+  if (!xid) return '--';
+  if (meta?.mock) return '模拟数据源不支持（真机上才有）';
+  if (!xid.available) return xid.error || '未读到内核日志';
+  const source = xid.source === 'journalctl' ? 'journalctl' : 'dmesg';
+  const parts = [`已读（${source}）`];
+  parts.push(xid.total > 0 ? `累计 ${xid.total} 条` : '累计 0 条');
+  if (xid.updatedAt) parts.push(`检查于 ${fmtClock(xid.updatedAt)}`);
+  return parts.join(' · ');
+}
+
 function describeAlerts(meta) {
   const alerts = meta.alerts;
   if (!alerts) return '--';
@@ -1796,6 +1824,7 @@ function renderMeta() {
         ? `开启${(meta.system.unsupported || []).length ? `（${meta.system.unsupported.map((key) => SYSTEM_FIELD_LABELS[key] || key).join(' / ')} 不可用）` : ''}`
         : '等待采集'],
     ['历史库', describeStorage(meta)],
+    ['XID 日志', describeXid(meta)],
     ['告警', describeAlerts(meta)],
     ['数据源', meta.mock
       ? '模拟数据（--mock）'

@@ -8,8 +8,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  normalizeBusId,
   readGpuSnapshot, readRowRemapper, resolveGpuFields, parseGpuCsv, parseRowRemapper, splitRow, defaultGpuFields,
 } from '../src/nvidia.js';
+import { createXidTracker, parseXidLines, readKernelLog } from '../src/xid.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -442,6 +444,153 @@ while (Date.now() < remapDeadline && !remapGpu) {
 assert.ok(remapGpu, '行重映射状态应被后台读进来并贴到卡上');
 assert.equal(remapGpu.remap.banksMax, 640);
 assert.equal(remapGpu.remap.failure, false);
+
+// XID 的读取同样是后台异步的。这里不假设测试机读不读得到内核日志，
+// 只断言那条安全性质：读不到时绝不能显示"0 次"——那会被读成"这块卡很干净"
+const xidDeadline = Date.now() + 3000;
+let xidState = collector.getState();
+while (Date.now() < xidDeadline && !xidState.xidStatus.updatedAt) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  xidState = collector.getState();
+}
+assert.ok(xidState.xidStatus.updatedAt, 'XID 读取应该跑过至少一次');
+assert.ok(
+  xidState.xidStatus.available || xidState.xidStatus.error,
+  '读不到内核日志时必须给出原因，不能静默',
+);
+if (!xidState.xidStatus.available) {
+  assert.equal(
+    xidState.gpus.some((gpu) => gpu.xid),
+    false,
+    '读不到内核日志时不能显示"XID 0 次"，那是假的"一切正常"',
+  );
+}
+
+/* ---------- 硬件健康：XID（内核日志） ---------- */
+// 两种来源的总线号写法必须归一到一起，否则日志里的 XID 落不到具体的卡上
+assert.equal(normalizeBusId('00000000:3B:00.0'), '3b:00', 'nvidia-smi 的八位域 + 功能号');
+assert.equal(normalizeBusId('0000:3b:00'), '3b:00', 'XID 行里的四位域、无功能号');
+assert.equal(normalizeBusId('PCI:0000:3b:00'), '3b:00', '带 PCI: 前缀');
+assert.equal(normalizeBusId('乱写'), null);
+
+const xidLog = [
+  '[12345.678] NVRM: Xid (PCI:0000:3b:00): 48, pid=41381, name=python3',
+  '2026-10-14T12:37:51,123456+08:00 host kernel: NVRM: Xid (PCI:0000:3b:00): 48, pid=41381',
+  'NVRM: Xid (PCI:0000:5c:00): 79, pid=0',
+  '这一行和 XID 无关',
+].join('\n');
+const parsedXid = parseXidLines(xidLog);
+assert.equal(parsedXid.length, 3, '只挑出 XID 行');
+assert.equal(parsedXid[0].busId, '3b:00');
+assert.equal(parsedXid[0].code, 48);
+assert.equal(parsedXid[0].pid, 41381);
+assert.equal(parsedXid[2].code, 79);
+
+const xidTracker = createXidTracker();
+assert.equal(xidTracker.observe(parsedXid, 1000), 3, '第一次应全部算作新事件');
+assert.equal(xidTracker.observe(parsedXid, 2000), 0, '同一份日志再读一遍不能重复计数');
+assert.equal(
+  xidTracker.observe([...parsedXid, ...parseXidLines('NVRM: Xid (PCI:0000:3b:00): 48, pid=999')], 3000),
+  1,
+  '多出来的一条才算新事件',
+);
+assert.equal(xidTracker.forBusId('3b:00').count, 3, '累计次数按卡统计');
+assert.equal(xidTracker.forBusId('3b:00').lastCode, 48);
+assert.equal(xidTracker.forBusId('5c:00').count, 1, '另一张卡互不影响');
+assert.equal(xidTracker.forBusId('aa:00').count, 0, '没出过事的卡是 0 次，不是 null');
+// 日志轮转掉一部分时计数会变小：只更新基准，不把同一批错误重复报成新的
+assert.equal(xidTracker.observe(parsedXid.slice(0, 1), 4000), 0, '日志变短时不应算作新事件');
+assert.equal(xidTracker.forBusId('3b:00').count, 3, '累计次数不倒退');
+// 最近窗口会把过期事件滑出去
+const windowTracker = createXidTracker({ recentMs: 1000 });
+windowTracker.observe(parsedXid, 10_000);
+assert.equal(windowTracker.forBusId('3b:00').recent, 2);
+windowTracker.observe(parsedXid, 20_000);
+assert.equal(windowTracker.forBusId('3b:00').recent, 0, '超过窗口的事件要从"最近"里滑出去');
+assert.equal(windowTracker.forBusId('3b:00').count, 2, '滑出去不影响累计');
+// 多卡机器上每张卡各出各的问题，"最近"必须是按卡分开的
+assert.equal(windowTracker.forBusId('5c:00').count, 1, '另一张卡的累计要分开算');
+
+// 读内核日志：按 dmesg → journalctl 退让，全失败时给一句能看懂的话
+const xidArgs = [];
+const okLog = await readKernelLog({
+  runner: async (bin, args) => { xidArgs.push(bin); return { stdout: xidLog }; },
+});
+assert.equal(okLog.source, 'dmesg');
+assert.equal(okLog.error, null);
+assert.equal(xidArgs[0], 'dmesg', '应该先试 dmesg');
+
+const fallbackArgs = [];
+const fallbackLog = await readKernelLog({
+  runner: async (bin, args) => {
+    fallbackArgs.push(bin);
+    if (bin === 'dmesg') throw Object.assign(new Error('Operation not permitted'), { stderr: 'dmesg: Operation not permitted' });
+    return { stdout: xidLog };
+  },
+});
+assert.equal(fallbackLog.source, 'journalctl', 'dmesg 读不到要退到 journalctl');
+assert.deepEqual(fallbackArgs, ['dmesg', 'dmesg', 'journalctl'], '两种 dmesg 参数都试过后才换 journalctl');
+
+const deniedLog = await readKernelLog({
+  runner: async () => { throw Object.assign(new Error('denied'), { stderr: 'dmesg: Operation not permitted' }); },
+});
+assert.equal(deniedLog.text, null);
+assert.ok(deniedLog.error.includes('权限'), '权限不足要直说，并给出下一步');
+assert.ok(deniedLog.error.includes('dmesg_restrict'));
+
+// 硬件健康能不能配成告警规则。关键性质：取不到值时"不触发"，
+// 而不是当成 false/0 —— 把"读不到"当成"没问题"是监控里最危险的错误
+let healthClock = 9_000_000;
+let healthSamples = [];
+const healthLogger = { warn() {}, info() {}, error() {} };
+const healthEngine = createAlertEngine({
+  config: {
+    window: 60000,
+    rules: [
+      { id: 'remap-fail', metric: 'remapFailure', op: '==', value: true, level: 'critical' },
+      { id: 'xid-any', metric: 'xidRecent', op: '>=', threshold: 1, level: 'warning' },
+      { id: 'ecc-ue', metric: 'eccUncorrectedVolatile', op: '>=', threshold: 1, level: 'critical' },
+      { id: 'ecc-agg', metric: 'eccCorrectedAggregate', op: '>=', threshold: 10, level: 'warning' },
+    ],
+  },
+  getSamples: () => healthSamples,
+  notifier: null,
+  logger: healthLogger,
+});
+
+// 拿不到硬件健康信息（老驱动 / 读不到日志）时，四条规则都不该触发
+healthSamples = [{ t: healthClock, gpus: [{ index: 0, uuid: 'g0', memUsedPct: 10 }] }];
+assert.equal(healthEngine.evaluate({ status: 'ok', gpus: [] }).firing.length, 0, '读不到硬件健康信息时不该触发');
+
+// 真的出现行重映射失败 / XID / 不可纠正错误 → 各自触发
+healthClock += 1000;
+healthSamples = [{
+  t: healthClock,
+  gpus: [{
+    index: 0,
+    uuid: 'g0',
+    remap: { failure: true, pending: true },
+    xid: { count: 2, recent: 1 },
+    eccUncorrectedVolatile: 1,
+    eccCorrectedAggregate: 4800,
+  }],
+}];
+const healthResult = healthEngine.evaluate({ status: 'ok', gpus: [] });
+assert.equal(healthResult.firing.length, 4, '四类硬件健康规则都应触发');
+assert.equal(
+  healthResult.firing.filter((item) => item.rule.level === 'critical').length,
+  2,
+  '行重映射失败与不可纠正错误都该是严重级',
+);
+
+// 只在"有情况"时才报：健康状态下四条都不触发
+healthClock += 1000;
+healthSamples = [{
+  t: healthClock,
+  gpus: [{ index: 0, uuid: 'g0', remap: { failure: false, pending: false }, xid: { count: 0, recent: 0 }, eccUncorrectedVolatile: 0, eccCorrectedAggregate: 0 }],
+}];
+assert.equal(healthEngine.evaluate({ status: 'ok', gpus: [] }).firing.length, 0, '健康状态不该触发');
+assert.equal(healthResult.firing.length, 4, '上一轮的结果不该被后续求值改写');
 assert.equal(state.fields.extended, true);
 assert.equal(state.system.mem.usedPct, 40, '/api/state 应带上宿主指标');
 assert.equal(state.idle.active, false);
@@ -733,6 +882,7 @@ const gpuAt = (i) => ({
   eccCorrectedAggregate: 100 + i,
   eccUncorrectedAggregate: 0,
   remap: { correctable: i, uncorrectable: 0, pending: i === 2, failure: false, banksMax: 640 - i },
+  xid: { count: i, lastCode: i > 0 ? 48 : null, lastAt: i > 0 ? dbNow - 60000 : null, recent: i > 0 ? 1 : 0 },
 });
 const procAt = (pid) => [{
   gpuUuid: 'GPU-test', gpuIndex: 0, pid, name: 'train.py', usedMemMiB: 90,
@@ -781,6 +931,10 @@ assert.equal(rawQuery.samples[2].gpus[0].eccCorrectedVolatile, 2, 'volatile 与 
 assert.equal(rawQuery.samples[0].gpus[0].remap.banksMax, 640, '行重映射要能往返');
 assert.equal(rawQuery.samples[2].gpus[0].remap.pending, true, 'Pending 是真假值，存回来也要是布尔');
 assert.equal(rawQuery.samples[0].gpus[0].remap.failure, false);
+assert.equal(rawQuery.samples[2].gpus[0].xid.count, 2, 'XID 累计要能往返');
+assert.equal(rawQuery.samples[2].gpus[0].xid.lastCode, 48);
+assert.equal(rawQuery.samples[0].gpus[0].xid.count, 0, '"读到且为 0 次"要能和"没读到"区分开');
+assert.equal(rawQuery.samples[0].gpus[0].xid.lastCode, null);
 assert.equal(rawQuery.samples[0].system.cpu.usagePct, 10);
 assert.equal(rawQuery.samples[0].system.mem.usedPct, 50);
 

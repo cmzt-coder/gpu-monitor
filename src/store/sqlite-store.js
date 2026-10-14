@@ -52,6 +52,10 @@ const TABLES = [
       ['remap_pending', 'INTEGER'],
       ['remap_failure', 'INTEGER'],
       ['remap_banks_max', 'INTEGER'],
+      ['xid_count', 'INTEGER'],
+      ['xid_last_code', 'INTEGER'],
+      ['xid_last_at', 'INTEGER'],
+      ['xid_recent', 'INTEGER'],
     ],
   },
   {
@@ -501,7 +505,9 @@ export async function createSqliteStore({
                    MAX(remap_uncorrectable) AS remap_uncorrectable,
                    MAX(remap_pending) AS remap_pending,
                    MAX(remap_failure) AS remap_failure,
-                   MAX(remap_banks_max) AS remap_banks_max
+                   MAX(remap_banks_max) AS remap_banks_max,
+                   MAX(xid_count) AS xid_count, MAX(xid_last_code) AS xid_last_code,
+                   MAX(xid_last_at) AS xid_last_at, MAX(xid_recent) AS xid_recent
             FROM gpu_sample
             WHERE ts >= ? AND ts <= ?
             GROUP BY bucket, uuid_c
@@ -519,6 +525,7 @@ export async function createSqliteStore({
                  throttle_mask, throttle_any,
                  ecc_mode, ecc_ce_volatile, ecc_ue_volatile, ecc_ce_aggregate, ecc_ue_aggregate
                  , remap_correctable, remap_uncorrectable, remap_pending, remap_failure, remap_banks_max
+                 , xid_count, xid_last_code, xid_last_at, xid_recent
           FROM gpu_sample
           WHERE ts >= ? AND ts <= ? AND (ts, COALESCE(uuid, '')) > (?, ?)
           ORDER BY ts ASC, uuid_c ASC

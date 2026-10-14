@@ -138,7 +138,26 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 | `hostCpuPct` / `hostMemUsedPct` / `hostSwapUsedPct` / `hostDiskUsedPct` | 整机 | 宿主指标，磁盘取所有挂载点里最满的那个 |
 | `serviceMemMiB` | 每个服务 | 该服务占用的显存合计（服务 = 容器 / systemd 单元 / 用户会话，见上面的「服务归属」） |
 | `serviceSharePct` | 每个服务 | 该服务占用占整机显存总量的比例（多张卡时按各卡总量之和算） |
+| `eccCorrectedAggregate` / `eccUncorrectedAggregate` | 每张卡 | 显存纠错计数（终身累计）；看趋势，不看单点 |
+| `eccUncorrectedVolatile` | 每张卡 | 本次驱动加载以来的不可纠正错误数，适合配"出现就告警" |
+| `xidRecent` / `xidCount` | 每张卡 | XID 错误数：最近 30 分钟 / 累计。**规则用 `xidRecent`**——累计值只涨，一旦触发就永远恢复不了 |
+| `remapPending` / `remapFailure` | 每张卡 | 布尔值，行重映射"有待生效" / "失败"（失败是换卡依据） |
 | `collectOk` | 服务 | 布尔值，`{"value": false}` 表示采集中断（至少持续 30 秒才触发） |
+
+硬件健康类指标（ECC / XID / 行重映射）在**读不到数据时不会触发**——比如驱动不提供 ECC 字段、或没权限读内核日志拿到 XID。把"读不到"当成"没问题"是监控里最危险的错误，所以这里一律按"未知 = 不告警"处理，页面的「采集信息」里会写明读不到的原因。
+
+几个现成的规则写法：
+
+```json
+{ "id": "ecc-uncorrected", "metric": "eccUncorrectedVolatile", "op": ">=", "threshold": 1,
+  "for": "0s", "level": "critical", "label": "出现不可纠正的显存错误" }
+{ "id": "remap-failure", "metric": "remapFailure", "op": "==", "value": true,
+  "for": "0s", "level": "critical", "label": "行重映射失败（备用行不够用）" }
+{ "id": "xid-any", "metric": "xidRecent", "op": ">=", "threshold": 1,
+  "for": "0s", "level": "warning", "label": "出现 XID 错误" }
+{ "id": "ecc-trend", "metric": "eccCorrectedAggregate", "op": ">=", "threshold": 100,
+  "for": "0s", "level": "warning", "label": "可纠正错误累计过百（显存在退化）" }
+```
 
 **一张卡被多个服务共享时，服务维度的规则比整卡阈值有用得多。** 整卡只能告诉你"这张卡快满了"，服务维度能告诉你"是谁快把卡吃满了"：
 
@@ -164,6 +183,27 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 - **改完配置不用重启**：`alerts.json` 一保存就自动重新加载（监听目录，所以编辑器"写临时文件再改名"的保存方式也能识别）。**配置写坏时不会把告警弄丢**——沿用上一次可用的规则，并在日志和页面「采集信息 → 告警」里写明原因；监控系统最怕的就是自己悄悄失效。想关掉热加载用 `--no-alerts-reload`。
 
 先确认规则能不能触发、会发什么内容，用 `--alerts-dry-run`：只打印"本来要发什么"，不真的连 SMTP。
+
+### 硬件健康：ECC / 行重映射 / XID
+
+性能指标回答"这张卡忙不忙"，这三样回答的是**"这张卡是不是在变坏"**——推理卡长期高负载跑，显存老化是真实风险，而这几项出事时通常先表现为"任务莫名其妙报 CUDA 错误"，看性能曲线完全看不出来。
+
+| 指标 | 是什么 | 怎么看 |
+| --- | --- | --- |
+| **ECC 可纠正** | 单比特错误，硬件自己纠了，程序无感 | 单个不危险，**危险的是增长速率** |
+| **ECC 不可纠正** | 双比特错误，纠不回来 | 正在跑的任务可能拿到错误数据，要立刻处理 |
+| **行重映射** | 某一行错误太多，固件用备用行顶替它 | 每重映射一次就是"这块显存确实坏了一部分"的实锤；**重映射失败 = 备用行也不够了，换卡依据** |
+| **XID** | 驱动打在内核日志里的错误编号 | 编号跨度极大：63 只是记录了一次重映射，79 是 GPU 掉出 PCIe 总线 |
+
+界面上这些信息在「各卡当前占用」每张卡的最后一行，**只在有情况时出现**（健康的那张卡不会写一堆 0）。ECC 的计数分两个尺度：`volatile` 是本次驱动加载以来、`aggregate` 是终身累计——判断"现在是不是在变坏"看前者。
+
+**XID 需要读内核日志，因此要权限。** Ubuntu 默认 `kernel.dmesg_restrict=1`，非 root 读不到 `dmesg`。服务会按 `dmesg` → `journalctl -k` 的顺序尝试，都失败就在页面「采集信息 → XID 日志」里写明原因（**而不是显示 0 次**——"读不到"和"没有错误"是两回事，把前者当成后者是监控里最危险的错误）。想让它工作，选一条：
+
+- 用 root 运行服务（`deploy/` 里的 systemd 模板默认就是 root，顺带也能看全占用进程）
+- 把运行用户加进 `systemd-journal` 组，改走 `journalctl`
+- 给 node 二进制加读日志的 capability：`sudo setcap cap_syslog+ep /opt/node24/bin/node`
+
+XID 的累计计数由服务自己维护：内核日志会轮转、重启就清空，所以不能每次只读当前缓冲。
 
 ## 快速开始
 

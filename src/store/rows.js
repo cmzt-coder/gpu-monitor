@@ -71,6 +71,10 @@ export function gpuRow(nodeId, ts, gpu) {
     remap_pending: gpu.remap?.pending == null ? null : (gpu.remap.pending ? 1 : 0),
     remap_failure: gpu.remap?.failure == null ? null : (gpu.remap.failure ? 1 : 0),
     remap_banks_max: gpu.remap?.banksMax ?? null,
+    xid_count: gpu.xid?.count ?? null,
+    xid_last_code: gpu.xid?.lastCode ?? null,
+    xid_last_at: gpu.xid?.lastAt ?? null,
+    xid_recent: gpu.xid?.recent ?? null,
   };
 }
 
@@ -174,6 +178,15 @@ export function gpuFromRow(row) {
         pending: row.remap_pending == null ? null : row.remap_pending === 1,
         failure: row.remap_failure == null ? null : row.remap_failure === 1,
         banksMax: row.remap_banks_max ?? null,
+      },
+    // XID 四项全空说明这次采集没读到内核日志，给 null 而不是 0 次
+    xid: row.xid_count == null && row.xid_last_code == null && row.xid_last_at == null && row.xid_recent == null
+      ? null
+      : {
+        count: row.xid_count ?? null,
+        lastCode: row.xid_last_code ?? null,
+        lastAt: row.xid_last_at ?? null,
+        recent: row.xid_recent ?? null,
       },
   };
 }

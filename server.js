@@ -113,6 +113,8 @@ function parseArgs(argv) {
     procMinMiB: 0,
     // 行重映射状态基本不变，低频读一次就够（单位毫秒）
     remapIntervalMs: 300000,
+    // 内核日志里的 XID 要读得快一点，但也不必每帧都读
+    xidIntervalMs: 60000,
     reclaimOnStart: false,
     version: VERSION,
     help: false,

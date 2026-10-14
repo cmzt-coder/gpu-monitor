@@ -5,7 +5,10 @@ import os from 'node:os';
 
 import { History } from './history.js';
 import { detectPlatform, resolveNvidiaSmi } from './platform.js';
-import { BASE_FIELDS, defaultGpuFields, readGpuSnapshot, readRowRemapper, resolveGpuFields } from './nvidia.js';
+import {
+  BASE_FIELDS, defaultGpuFields, readGpuBusIds, readGpuSnapshot, readRowRemapper, resolveGpuFields,
+} from './nvidia.js';
+import { createXidTracker, parseXidLines, readKernelLog } from './xid.js';
 import { createProcessInfoReader } from './procinfo.js';
 import { summarizeServices } from './services.js';
 import { createSystemCollector } from './system.js';
@@ -38,6 +41,8 @@ function toCurveGpu(gpu) {
     eccUncorrectedAggregate: gpu.eccUncorrectedAggregate ?? null,
     // 行重映射：同样是"卡有没有在变坏"的证据，告警要用到，必须进样本
     remap: gpu.remap ? { ...gpu.remap } : null,
+    // XID：读不到日志时这里是 undefined，与"读到且为 0 次"区分开
+    xid: gpu.xid ? { ...gpu.xid } : null,
   };
 }
 
@@ -100,6 +105,17 @@ export function createCollector({
   let inFlight = null;
   // 行重映射状态：这些值基本不变，低频读一次就行，读到的结果贴在每一帧的卡上
   const remap = { at: 0, loading: false, byIndex: new Map(), error: null, unsupported: false };
+  // XID：内核日志里的 GPU 错误事件。同样低频读，累计器负责去重与跨轮转计数
+  const xid = {
+    at: 0,
+    loading: false,
+    source: null,
+    error: null,
+    tried: [],
+    tracker: createXidTracker(),
+    // 序号 → 总线号，用来把日志里的 XID 落到具体的卡上（读一次就够，总线号不会变）
+    indexToBusId: new Map(),
+  };
   let timer = null;
   let lastClientAt = 0;
   let lastDelayMs = options.intervalMs;
@@ -202,6 +218,8 @@ export function createCollector({
       // 绝不能让这一拍因为多问一次 nvidia-smi 而变慢或失败
       if (!mockSource && runtime.smi?.ok) refreshRemap(runtime.smi.bin);
       applyRemap(snapshot.gpus);
+      if (!mockSource && runtime.smi?.ok) refreshXid(runtime.smi.bin);
+      applyXid(snapshot.gpus);
 
       let systemSample = null;
       if (system) {
@@ -318,6 +336,52 @@ export function createCollector({
     }
   }
 
+  /**
+   * 低频读内核日志，累计 XID 事件。
+   * 刻意不 await，理由同行重映射；读不到日志（权限）时只记原因，
+   * 绝不把 gpu.xid 写成 0——"读不到"和"没有错误"是两回事。
+   */
+  function refreshXid(bin) {
+    if (xid.loading || stopped) return;
+    if (xid.at && now() - xid.at < options.xidIntervalMs) return;
+    xid.loading = true;
+    const timeout = Math.max(4000, options.intervalMs * 4);
+
+    (async () => {
+      if (xid.indexToBusId.size === 0) {
+        xid.indexToBusId = await readGpuBusIds({ bin, timeout });
+      }
+      const log = await readKernelLog({ timeout });
+      xid.source = log.source;
+      xid.error = log.error;
+      xid.tried = log.tried;
+      if (log.text) {
+        xid.tracker.observe(parseXidLines(log.text), now());
+        applyXid(runtime.latest?.gpus);
+      }
+    })()
+      .catch((error) => {
+        xid.error = error?.message || String(error);
+      })
+      .finally(() => {
+        xid.loading = false;
+        xid.at = now();
+      });
+  }
+
+  /**
+   * 把 XID 状态贴到卡上。
+   * 只有成功读到过日志才贴——否则界面会显示"XID 0 次"，
+   * 那会被读成"这块卡没问题"，而实际情况是"我们根本看不到"。
+   */
+  function applyXid(gpus) {
+    if (!xid.source) return;
+    for (const gpu of gpus || []) {
+      const busId = xid.indexToBusId.get(gpu.index);
+      if (busId) gpu.xid = xid.tracker.forBusId(busId);
+    }
+  }
+
   function cadence() {
     // 有 SSE 订阅者就说明确实有人在看屏幕，联网状态直接算作活跃
     const currentTime = now();
@@ -407,6 +471,15 @@ export function createCollector({
         supported: remap.byIndex.size > 0,
         updatedAt: remap.at || null,
         error: remap.error,
+      },
+      // XID 的读取状态：读不到时页面要能说清是权限问题，而不是装作没有错误
+      xidStatus: {
+        available: Boolean(xid.source),
+        source: xid.source,
+        updatedAt: xid.at || null,
+        error: xid.error,
+        tried: xid.tried,
+        total: xid.tracker.summary().total,
       },
       storage: store
         ? store.stats()
