@@ -38,6 +38,12 @@ const GPUS = [
     'clocks_throttle_reasons.hw_power_brake_slowdown': 'Not Active',
     'clocks_throttle_reasons.sw_thermal_slowdown': 'Not Active',
     'clocks_throttle_reasons.gpu_idle': 'Active',
+    // 一张干净但有历史的卡：本次运行没错，终身累计过 12 次可纠正错误
+    'ecc.mode.current': 'Enabled',
+    'ecc.errors.corrected.volatile.total': '0',
+    'ecc.errors.uncorrected.volatile.total': '0',
+    'ecc.errors.corrected.aggregate.total': '12',
+    'ecc.errors.uncorrected.aggregate.total': '0',
   },
   {
     index: '1',
@@ -66,6 +72,7 @@ const GPUS = [
     'clocks_throttle_reasons.hw_power_brake_slowdown': 'Not Active',
     'clocks_throttle_reasons.sw_thermal_slowdown': 'Not Active',
     'clocks_throttle_reasons.gpu_idle': 'Not Active',
+    // 1 号卡故意不提供 ECC 字段：覆盖"驱动不支持时留空"这条路径
   },
   {
     index: '2',
@@ -94,6 +101,12 @@ const GPUS = [
     'clocks_throttle_reasons.hw_power_brake_slowdown': 'Not Active',
     'clocks_throttle_reasons.sw_thermal_slowdown': 'Not Active',
     'clocks_throttle_reasons.gpu_idle': 'Not Active',
+    // 一张在变坏的卡：本次运行已经有 3 次可纠正、1 次终身不可纠正
+    'ecc.mode.current': 'Enabled',
+    'ecc.errors.corrected.volatile.total': '3',
+    'ecc.errors.uncorrected.volatile.total': '0',
+    'ecc.errors.corrected.aggregate.total': '4800',
+    'ecc.errors.uncorrected.aggregate.total': '1',
   },
 ];
 

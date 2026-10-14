@@ -46,6 +46,14 @@ export const EXTENDED_FIELDS = [
   { key: 'pcieWidth', field: 'pcie.link.width.current', type: 'int' },
   { key: 'encUtilPct', field: 'utilization.encoder', type: 'int' },
   { key: 'decUtilPct', field: 'utilization.decoder', type: 'int' },
+  // 显存纠错（ECC）：单比特错误硬件会自动纠正，双比特纠不回来。
+  // 单个计数不说明问题，要看的是"有没有在涨"——所以四个计数都留着，
+  // volatile 是本次驱动加载以来、aggregate 是终身累计。
+  { key: 'eccMode', field: 'ecc.mode.current', type: 'string' },
+  { key: 'eccCorrectedVolatile', field: 'ecc.errors.corrected.volatile.total', type: 'int' },
+  { key: 'eccUncorrectedVolatile', field: 'ecc.errors.uncorrected.volatile.total', type: 'int' },
+  { key: 'eccCorrectedAggregate', field: 'ecc.errors.corrected.aggregate.total', type: 'int' },
+  { key: 'eccUncorrectedAggregate', field: 'ecc.errors.uncorrected.aggregate.total', type: 'int' },
   ...THROTTLE_REASONS.map(({ key, field }) => ({
     key: `throttle_${key}`,
     field,

@@ -396,6 +396,12 @@ assert.ok(Array.isArray(state.services) && state.services.length >= 1, '状态�
 assert.ok(state.services[0].memMiB > 0, '服务汇总应包含占用显存');
 assert.equal(typeof state.services[0].sharePct, 'number', '服务占比按整机显存算');
 assert.ok(state.services.every((entry, index, list) => index === 0 || list[index - 1].memMiB >= entry.memMiB), '服务汇总按占用从大到小');
+assert.equal(state.gpus[0].eccMode, 'Enabled', 'ECC 模式要能读到');
+assert.equal(state.gpus[0].eccCorrectedAggregate, 12, '终身累计的可纠正错误数要能读到');
+assert.equal(state.gpus[0].eccUncorrectedAggregate, 0);
+assert.equal(state.gpus[1].eccMode, null, '驱动不提供 ECC 字段时应留空，而不是当成 0');
+assert.equal(state.gpus[1].eccCorrectedAggregate, null);
+assert.equal(state.gpus[2].eccCorrectedVolatile, 3, '本次驱动加载以来的计数要单独保留');
 assert.equal(state.fields.extended, true);
 assert.equal(state.system.mem.usedPct, 40, '/api/state 应带上宿主指标');
 assert.equal(state.idle.active, false);
@@ -680,6 +686,12 @@ const gpuAt = (i) => ({
   pstate: 'P2',
   fanPct: 40,
   throttle: { swPowerCap: i === 2, hwThermal: false, gpuIdle: false },
+  // ECC 计数：跟着采样点走，历史里才能看出"有没有在涨"
+  eccMode: 'Enabled',
+  eccCorrectedVolatile: i,
+  eccUncorrectedVolatile: 0,
+  eccCorrectedAggregate: 100 + i,
+  eccUncorrectedAggregate: 0,
 });
 const procAt = (pid) => [{
   gpuUuid: 'GPU-test', gpuIndex: 0, pid, name: 'train.py', usedMemMiB: 90,
@@ -722,6 +734,9 @@ assert.equal(rawQuery.samples[0].gpus[0].throttle.swPowerCap, false, '节流位�
 assert.equal(rawQuery.samples[2].gpus[0].throttle.swPowerCap, true);
 assert.equal(rawQuery.samples[0].gpus[0].throttled, false);
 assert.equal(rawQuery.samples[2].gpus[0].throttled, true);
+assert.equal(rawQuery.samples[0].gpus[0].eccMode, 'Enabled', 'ECC 模式要能往返');
+assert.equal(rawQuery.samples[0].gpus[0].eccCorrectedAggregate, 100, 'ECC 累计计数要能往返');
+assert.equal(rawQuery.samples[2].gpus[0].eccCorrectedVolatile, 2, 'volatile 与 aggregate 要分开存');
 assert.equal(rawQuery.samples[0].system.cpu.usagePct, 10);
 assert.equal(rawQuery.samples[0].system.mem.usedPct, 50);
 
@@ -1050,6 +1065,9 @@ assert.ok(GPU_CSV_HEADER_FULL.startsWith(GPU_CSV_HEADER), '扩展表头要在基
 for (const column of ['pcie_gen', 'enc_util_pct', 'clock_mem_mhz', 'throttled']) {
   assert.ok(GPU_CSV_HEADER_FULL.includes(column), `扩展表头缺少 ${column}`);
 }
+for (const column of ['ecc_mode', 'ecc_corrected_volatile', 'ecc_uncorrected_aggregate']) {
+  assert.ok(GPU_CSV_HEADER_FULL.includes(column), `扩展表头缺少 ECC 列 ${column}`);
+}
 assert.equal(GPU_CSV_HEADER.includes('pcie_gen'), false, '默认表头不应被改动');
 const fullCsv = samplesToCsv([{
   t: Date.UTC(2026, 0, 1),
@@ -1057,11 +1075,16 @@ const fullCsv = samplesToCsv([{
     index: 0, name: 'A, B', memUsedMiB: 10, memTotalMiB: 20, memUsedPct: 50, utilGpuPct: 30,
     utilMemPct: 40, tempC: 50, powerW: 60, clockSmMHz: 2500, clockMemMHz: 9001, pstate: 'P2',
     fanPct: 41, pcieGen: 4, pcieWidth: 16, encUtilPct: 3, decUtilPct: 1, throttled: true,
+    eccMode: 'Enabled', eccCorrectedVolatile: 0, eccUncorrectedVolatile: 0,
+    eccCorrectedAggregate: 12, eccUncorrectedAggregate: 0,
   }],
 }], { full: true });
 const fullLines = fullCsv.trim().split('\n');
 assert.equal(fullLines[0], GPU_CSV_HEADER_FULL);
-assert.ok(fullLines[1].endsWith(',2500,9001,P2,41,4,16,3,1,1'), `扩展列内容不对：${fullLines[1]}`);
+assert.ok(
+  fullLines[1].endsWith(',2500,9001,P2,41,4,16,3,1,1,Enabled,0,0,12,0'),
+  `扩展列内容不对：${fullLines[1]}`,
+);
 // 没拿到节流信息时留空，不要写成 0（那是"明确没有节流"的意思）
 assert.ok(
   gpuRowToCsv('2026-01-01T00:00:00.000Z', { index: 0, name: 'X', throttled: null }, { full: true }).endsWith(','),

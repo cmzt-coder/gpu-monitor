@@ -61,6 +61,11 @@ export function gpuRow(nodeId, ts, gpu) {
     dec_util_pct: gpu.decUtilPct ?? null,
     throttle_mask: packThrottle(gpu.throttle),
     throttle_any: hasThrottle(gpu.throttle),
+    ecc_mode: gpu.eccMode ?? null,
+    ecc_ce_volatile: gpu.eccCorrectedVolatile ?? null,
+    ecc_ue_volatile: gpu.eccUncorrectedVolatile ?? null,
+    ecc_ce_aggregate: gpu.eccCorrectedAggregate ?? null,
+    ecc_ue_aggregate: gpu.eccUncorrectedAggregate ?? null,
   };
 }
 
@@ -148,6 +153,11 @@ export function gpuFromRow(row) {
     decUtilPct: row.dec_util_pct ?? null,
     throttle: unpackThrottle(row.throttle_mask ?? null),
     throttled: row.throttle_any == null ? null : row.throttle_any === 1,
+    eccMode: row.ecc_mode ?? null,
+    eccCorrectedVolatile: row.ecc_ce_volatile ?? null,
+    eccUncorrectedVolatile: row.ecc_ue_volatile ?? null,
+    eccCorrectedAggregate: row.ecc_ce_aggregate ?? null,
+    eccUncorrectedAggregate: row.ecc_ue_aggregate ?? null,
   };
 }
 

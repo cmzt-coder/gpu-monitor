@@ -1295,6 +1295,7 @@ function renderGpuCards() {
           <span data-role="fan" hidden></span>
           <span data-role="encdec" hidden></span>
         </div>
+        <div class="gpu-card__ecc" data-role="ecc" hidden></div>
         <div data-role="throttle"></div>`;
       card.querySelector('.gpu-card__name').textContent = gpu.name;
       card.querySelector('.gpu-card__index').textContent = `GPU ${gpu.index}`;
@@ -1346,7 +1347,50 @@ function renderGpuCards() {
     if (hasEncdec) encdecNode.textContent = `编解码 ${fmtPct(gpu.encUtilPct, 0)} / ${fmtPct(gpu.decUtilPct, 0)}`;
 
     card.querySelector('[data-role="throttle"]').replaceChildren(renderThrottleChips(gpu));
+    renderEccNode(card.querySelector('[data-role="ecc"]'), gpu);
   }
+}
+
+/**
+ * 显存纠错（ECC）那一行。
+ *
+ * 关键不是"有没有错"，而是"有没有在涨"：aggregate 是终身累计、volatile 是本次驱动
+ * 加载以来，所以两个都写出来，并单独标出本次的新增。不可纠正错误意味着已经在丢数据，
+ * 用最重的配色。
+ */
+function renderEccNode(node, gpu) {
+  const ce = gpu.eccCorrectedAggregate;
+  const ue = gpu.eccUncorrectedAggregate;
+  // 驱动没提供这些字段（老驱动 / 消费卡）时整行隐藏，不显示一排 "--"
+  if (gpu.eccMode == null && ce == null && ue == null) {
+    node.hidden = true;
+    return;
+  }
+  node.hidden = false;
+  if (gpu.eccMode && gpu.eccMode !== 'Enabled') {
+    node.dataset.tone = '';
+    node.textContent = `ECC 已关闭（${gpu.eccMode}），上面的错误计数不代表实际风险`;
+    return;
+  }
+
+  const ceV = gpu.eccCorrectedVolatile;
+  const ueV = gpu.eccUncorrectedVolatile;
+  const since = (volatileValue, total) => (
+    volatileValue > 0 && volatileValue !== total ? `（本次 ${volatileValue}）` : ''
+  );
+
+  if (!(ce > 0) && !(ue > 0)) {
+    // 全 0 本身就是有用的信息：以后任何一个非 0 都是"从干净状态开始的变化"
+    node.dataset.tone = '';
+    node.textContent = 'ECC 无错误（可纠正 0 · 不可纠正 0）';
+    return;
+  }
+
+  const parts = [];
+  if (ue > 0) parts.push(`不可纠正 ${ue}${since(ueV, ue)}`);
+  if (ce > 0) parts.push(`可纠正 ${ce}${since(ceV, ce)}`);
+  node.dataset.tone = ue > 0 ? 'danger' : 'warning';
+  node.textContent = `ECC ${parts.join(' · ')}`;
 }
 
 /* ---------- 渲染：进程表与过滤 ---------- */

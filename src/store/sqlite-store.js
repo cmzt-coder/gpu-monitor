@@ -42,6 +42,11 @@ const TABLES = [
       ['dec_util_pct', 'REAL'],
       ['throttle_mask', 'INTEGER'],
       ['throttle_any', 'INTEGER'],
+      ['ecc_mode', 'TEXT'],
+      ['ecc_ce_volatile', 'INTEGER'],
+      ['ecc_ue_volatile', 'INTEGER'],
+      ['ecc_ce_aggregate', 'INTEGER'],
+      ['ecc_ue_aggregate', 'INTEGER'],
     ],
   },
   {
@@ -483,7 +488,10 @@ export async function createSqliteStore({
                    MAX(fan_pct) AS fan_pct,
                    MAX(pcie_gen) AS pcie_gen, MAX(pcie_width) AS pcie_width,
                    AVG(enc_util_pct) AS enc_util_pct, AVG(dec_util_pct) AS dec_util_pct,
-                   MAX(throttle_any) AS throttle_any
+                   MAX(throttle_any) AS throttle_any,
+                   MAX(ecc_mode) AS ecc_mode,
+                   MAX(ecc_ce_volatile) AS ecc_ce_volatile, MAX(ecc_ue_volatile) AS ecc_ue_volatile,
+                   MAX(ecc_ce_aggregate) AS ecc_ce_aggregate, MAX(ecc_ue_aggregate) AS ecc_ue_aggregate
             FROM gpu_sample
             WHERE ts >= ? AND ts <= ?
             GROUP BY bucket, uuid_c
@@ -498,7 +506,8 @@ export async function createSqliteStore({
                  util_gpu_pct, util_mem_pct, temp_c, power_w,
                  clock_sm_mhz, clock_mem_mhz, pstate, fan_pct,
                  pcie_gen, pcie_width, enc_util_pct, dec_util_pct,
-                 throttle_mask, throttle_any
+                 throttle_mask, throttle_any,
+                 ecc_mode, ecc_ce_volatile, ecc_ue_volatile, ecc_ce_aggregate, ecc_ue_aggregate
           FROM gpu_sample
           WHERE ts >= ? AND ts <= ? AND (ts, COALESCE(uuid, '')) > (?, ?)
           ORDER BY ts ASC, uuid_c ASC

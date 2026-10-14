@@ -30,6 +30,12 @@ function toCurveGpu(gpu) {
     // 之前只留了画曲线要用的字段，导致这个指标在内存窗口里永远是 undefined，
     // 规则一次都不会触发（长周期走历史库才碰巧没受影响）。
     throttled: gpu.throttle ? Object.values(gpu.throttle).some((value) => value === true) : null,
+    // ECC 计数同理：告警要判"有没有在涨"，必须进内存窗口和历史样本
+    eccMode: gpu.eccMode ?? null,
+    eccCorrectedVolatile: gpu.eccCorrectedVolatile ?? null,
+    eccUncorrectedVolatile: gpu.eccUncorrectedVolatile ?? null,
+    eccCorrectedAggregate: gpu.eccCorrectedAggregate ?? null,
+    eccUncorrectedAggregate: gpu.eccUncorrectedAggregate ?? null,
   };
 }
 

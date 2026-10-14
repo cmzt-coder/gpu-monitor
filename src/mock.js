@@ -103,6 +103,14 @@ export function createMockSource({
         pcieWidth: 16,
         encUtilPct: card.index % 2 === 0 ? Math.round(usedRatio * 6) : 0,
         decUtilPct: card.index === 2 ? Math.round(usedRatio * 4) : 0,
+        // ECC 也模拟：2 号卡演示"累计过错误、本次又在涨"，3 号卡演示"驱动不提供该字段"
+        ...(card.index === 3 ? {} : {
+          eccMode: 'Enabled',
+          eccCorrectedVolatile: card.index === 2 ? 3 : 0,
+          eccUncorrectedVolatile: 0,
+          eccCorrectedAggregate: card.index === 2 ? 4800 : card.index * 6,
+          eccUncorrectedAggregate: card.index === 2 ? 1 : 0,
+        }),
         throttle: {
           swPowerCap: usedRatio > 0.9,
           hwSlowdown: false,

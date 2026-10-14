@@ -25,6 +25,11 @@ const GPU_FULL_HEADERS = [
   'enc_util_pct',
   'dec_util_pct',
   'throttled',
+  'ecc_mode',
+  'ecc_corrected_volatile',
+  'ecc_uncorrected_volatile',
+  'ecc_corrected_aggregate',
+  'ecc_uncorrected_aggregate',
 ];
 export const GPU_CSV_HEADER_FULL = `${GPU_CSV_HEADER},${GPU_FULL_HEADERS.join(',')}`;
 
@@ -78,6 +83,11 @@ export function gpuRowToCsv(timestampIso, gpu, { full = false } = {}) {
     round(gpu.decUtilPct, 1),
     // 节流导出成 0/1：空值表示这次采集没拿到节流信息，与"明确没有节流"区分开
     gpu.throttled == null ? '' : (gpu.throttled ? 1 : 0),
+    cell(gpu.eccMode),
+    gpu.eccCorrectedVolatile ?? '',
+    gpu.eccUncorrectedVolatile ?? '',
+    gpu.eccCorrectedAggregate ?? '',
+    gpu.eccUncorrectedAggregate ?? '',
   ].join(',');
 }
 
