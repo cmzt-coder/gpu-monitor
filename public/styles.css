@@ -237,6 +237,38 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 }
 .work-col { grid-column: span 8; display: flex; flex-direction: column; gap: 24px; min-width: 0; }
 .evidence-col { grid-column: span 4; display: flex; flex-direction: column; gap: 24px; min-width: 0; position: sticky; top: 24px; }
+/* 右列比视口还高时，sticky 会把它的下半截永远裁在屏幕外（实测「采集信息」够不着）——
+   那种情况下不如让它跟着页面正常滚。高度由 JS 量，见 syncEvidenceSticky() */
+.evidence-col[data-sticky="off"] { position: static; }
+
+/* 导航模式：页签栏 + 只显示当前页的卡片（显隐由 JS 打在卡片自身的 hidden 上）。
+   某一列在本页没有卡片时让它占满整行，免得留一条空栏 */
+.view-nav {
+  grid-column: span 12;
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: -8px;
+}
+.view-nav__tab {
+  padding: 7px 16px;
+  border: 1px solid var(--jf-color-border);
+  border-radius: 999px;
+  background: var(--jf-color-surface);
+  color: var(--jf-color-ink);
+  font: inherit; font-size: 13.5px;
+  cursor: pointer;
+}
+.view-nav__tab:hover { border-color: var(--jf-color-control-border); }
+.view-nav__tab[aria-current="page"] {
+  border-color: var(--jf-color-primary);
+  background: var(--jf-color-primary);
+  color: var(--jf-color-on-primary);
+  font-weight: 600;
+}
+.work-grid[data-cols="left"] .work-col { grid-column: span 12; }
+.work-grid[data-cols="right"] .evidence-col { grid-column: span 12; }
+.view-switch { display: flex; gap: 0; }
+.view-switch .chip:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.view-switch .chip:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
 
 .card {
   background: var(--jf-color-surface);
@@ -380,6 +412,13 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 
 .gpu-card { padding: 14px 0 0; border-top: 1px solid var(--jf-color-border); }
 .gpu-card:first-child { border-top: none; padding-top: 0; }
+/* 导航模式下这一列会占满整行，8 张卡竖着排要滚两三屏——
+   这时改成两栏平铺。分隔线只在每栏第一行去掉，免得出现"半条线" */
+.work-grid[data-cols="right"] .gpu-cards {
+  flex-direction: row; flex-wrap: wrap; gap: 22px 30px;
+}
+.work-grid[data-cols="right"] .gpu-card { flex: 1 1 calc(50% - 15px); min-width: 0; }
+.work-grid[data-cols="right"] .gpu-card:nth-child(-n+2) { border-top: none; padding-top: 0; }
 .gpu-card__head { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; }
 .gpu-card__name {
   font-size: 13.5px; font-weight: 500; min-width: 0;

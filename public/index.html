@@ -59,6 +59,10 @@
         <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
         导出
       </button>
+      <div class="view-switch" id="view-switch" role="group" aria-label="展示模式">
+        <button type="button" class="chip" data-view="single">单页</button>
+        <button type="button" class="chip" data-view="nav">导航</button>
+      </div>
     </div>
   </header>
 
@@ -122,8 +126,14 @@
   </section>
 
   <div class="work-grid" id="work">
+    <nav class="view-nav" id="view-nav" aria-label="页面导航" hidden>
+      <button type="button" class="view-nav__tab" data-page="overview">总览</button>
+      <button type="button" class="view-nav__tab" data-page="curve">曲线</button>
+      <button type="button" class="view-nav__tab" data-page="processes">进程</button>
+      <button type="button" class="view-nav__tab" data-page="system">系统</button>
+    </nav>
     <main class="work-col">
-      <section class="card" aria-labelledby="charts-h">
+      <section class="card" data-page="curve" aria-labelledby="charts-h">
         <div class="card__head">
           <div>
             <h2 class="card__title" id="charts-h">曲线</h2>
@@ -146,7 +156,7 @@
         </div>
       </section>
 
-      <section class="card" aria-labelledby="svc-h">
+      <section class="card" data-page="curve" aria-labelledby="svc-h">
         <div class="card__head card__head--stack">
           <div>
             <h2 class="card__title" id="svc-h">服务显存曲线</h2>
@@ -164,7 +174,7 @@
         </div>
       </section>
 
-      <section class="card" aria-labelledby="sys-h">
+      <section class="card" data-page="system" aria-labelledby="sys-h">
         <div class="card__head">
           <div>
             <h2 class="card__title" id="sys-h">系统资源</h2>
@@ -188,7 +198,7 @@
         </div>
       </section>
 
-      <section class="card" aria-labelledby="proc-h">
+      <section class="card" data-page="processes" aria-labelledby="proc-h">
         <div class="card__head card__head--stack">
           <div>
             <h2 class="card__title" id="proc-h">当前占用进程</h2>
@@ -218,7 +228,7 @@
         </div>
       </section>
 
-      <section class="card" aria-labelledby="proc-hist-h">
+      <section class="card" data-page="processes" aria-labelledby="proc-hist-h">
         <div class="card__head">
           <div>
             <h2 class="card__title" id="proc-hist-h">进程占用历史</h2>
@@ -257,14 +267,14 @@
     </main>
 
     <aside class="evidence-col" aria-label="当前占用与采集信息">
-      <section class="card" aria-labelledby="cards-h">
+      <section class="card" data-page="overview" aria-labelledby="cards-h">
         <div class="card__head">
           <h2 class="card__title" id="cards-h">各卡当前占用</h2>
         </div>
         <div class="gpu-cards" id="gpu-cards"></div>
       </section>
 
-      <section class="card" aria-labelledby="meta-h">
+      <section class="card" data-page="system" aria-labelledby="meta-h">
         <div class="card__head">
           <h2 class="card__title" id="meta-h">采集信息</h2>
         </div>

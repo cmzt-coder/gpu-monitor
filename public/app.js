@@ -23,6 +23,9 @@ const refs = {
   alertsRuleList: $('alerts-rule-list'),
   btnRetry: $('btn-retry'),
   btnExport: $('btn-export'),
+  viewSwitch: $('view-switch'),
+  viewNav: $('view-nav'),
+  work: $('work'),
   exportDialog: $('export-dialog'),
   exportClose: $('export-close'),
   exportCancel: $('export-cancel'),
@@ -111,6 +114,9 @@ const state = {
   pushActive: false,
   // 上一次看到的进程身份签名：变了就说明库里有新事件，进程历史该刷新了
   processSignature: null,
+  // 展示模式：single = 所有卡片一页铺开；nav = 分页签看，每页一到两张卡
+  view: 'single',
+  page: 'overview',
   // 曲线时间范围：live = 实时窗口，其它值是历史区间（也直接决定导出的范围）
   range: 'live',
   historyPoints: null,
@@ -1933,6 +1939,9 @@ function render() {
   } else {
     refs.footerText.textContent = `数据来自 ${sources.join(' + ')}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}）。`;
   }
+
+  // 放在最后：这时各卡的内容才都渲染完，量出来的高度才是准的
+  syncEvidenceSticky();
 }
 
 /* ---------- 交互 ---------- */
@@ -2046,6 +2055,82 @@ function triggerDownload(path, params = new URLSearchParams()) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+/* ---------- 展示模式：单页 / 导航 ---------- */
+// 单页是把 7 张卡一屏铺开（看趋势和状态方便对照），导航是按用途分页签、
+// 每页一到两张卡（排查时不用滚六屏）。两种模式共存，用户自己选，选择记在
+// URL 里（能分享、刷新保持）和 localStorage 里（下次打开还是上次那个）。
+// 告警面板和整机概览 KPI 不参与分页——它们在任何一页都得看得见。
+const VIEW_KEY = 'gpu-monitor-view';
+const VIEW_PAGES = ['overview', 'curve', 'processes', 'system'];
+
+/** 当前模式从哪来：URL 优先（可分享），其次上次的选择，最后默认单页 */
+function readViewChoice() {
+  const params = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
+  let saved = null;
+  try {
+    saved = JSON.parse(window.localStorage.getItem(VIEW_KEY) || 'null');
+  } catch {
+    // 无痕模式 / 存储被禁：只用 URL 和默认值
+  }
+  const view = params.get('view') || saved?.view || 'single';
+  const page = params.get('page') || saved?.page || 'overview';
+  return {
+    view: view === 'nav' ? 'nav' : 'single',
+    page: VIEW_PAGES.includes(page) ? page : 'overview',
+  };
+}
+
+function setView(view, page) {
+  const next = { view: view === 'nav' ? 'nav' : 'single', page: page || state.page };
+  try {
+    window.localStorage.setItem(VIEW_KEY, JSON.stringify(next));
+  } catch {
+    // 存不进去也不影响本次切换
+  }
+  // 用 replaceState 而不是直接改 hash：切页签不该在浏览历史里堆一堆记录
+  const hash = next.view === 'nav' ? `#view=nav&page=${next.page}` : '';
+  window.history.replaceState(null, '', hash || `${window.location.pathname}${window.location.search}`);
+  applyView();
+}
+
+function applyView() {
+  const choice = readViewChoice();
+  state.view = choice.view;
+  state.page = choice.page;
+
+  for (const card of document.querySelectorAll('.card[data-page]')) {
+    card.hidden = choice.view === 'nav' && card.dataset.page !== choice.page;
+  }
+  refs.viewNav.hidden = choice.view !== 'nav';
+  for (const tab of refs.viewNav.querySelectorAll('.view-nav__tab')) {
+    if (tab.dataset.page === choice.page) tab.setAttribute('aria-current', 'page');
+    else tab.removeAttribute('aria-current');
+  }
+  for (const button of refs.viewSwitch.querySelectorAll('.chip')) {
+    button.setAttribute('aria-pressed', button.dataset.view === choice.view ? 'true' : 'false');
+  }
+
+  // 本页某列一张卡都没有时让它占满整行，否则会留一条空白栏
+  const visibleIn = (selector) => [...document.querySelectorAll(`${selector} .card[data-page]`)]
+    .some((card) => !card.hidden);
+  const hasLeft = visibleIn('.work-col');
+  const hasRight = visibleIn('.evidence-col');
+  refs.work.dataset.cols = hasLeft && hasRight ? 'both' : (hasLeft ? 'left' : 'right');
+
+  // canvas 在隐藏时尺寸为 0、什么都画不出来，所以每次切换都要重画一遍
+  render();
+}
+
+/**
+ * 右列比视口还高时，sticky 只会把它的下半截永远裁在屏幕外
+ * （实测「采集信息」滚到底也只能看到一半）——那种情况不如让它跟着页面正常滚。
+ */
+function syncEvidenceSticky() {
+  const col = document.querySelector('.evidence-col');
+  if (!col) return;
+  col.dataset.sticky = col.scrollHeight > window.innerHeight - 48 ? 'off' : 'on';
 }
 
 /* ---------- 导出面板 ---------- */
@@ -2225,6 +2310,16 @@ function closeExportPanel() {
 }
 
 refs.btnExport.addEventListener('click', openExportPanel);
+refs.viewSwitch.addEventListener('click', (event) => {
+  const button = event.target.closest('.chip[data-view]');
+  if (button) setView(button.dataset.view);
+});
+refs.viewNav.addEventListener('click', (event) => {
+  const tab = event.target.closest('.view-nav__tab');
+  if (tab) setView('nav', tab.dataset.page);
+});
+// 手动改 URL 里的 hash（或从别处点进来）也要跟着切
+window.addEventListener('hashchange', () => applyView());
 refs.exportClose.addEventListener('click', closeExportPanel);
 refs.exportCancel.addEventListener('click', closeExportPanel);
 refs.exportFull.addEventListener('change', () => {
@@ -2271,6 +2366,8 @@ async function boot() {
   // 与"切回实时"走同一条路：它内部会先从库里补出重启后那段空白
   await reloadLiveWindow();
   await poll();
+  // 模式要在第一帧数据之后应用：applyView 会重绘 canvas，那时画布才有尺寸
+  applyView();
   // 进程历史是独立的一次性拉取：开页拉一次，之后靠"进程身份变化"触发重载
   loadProcessHistory();
   // 兜底：页面开很久时"最近 24 小时"这个窗口会滑动，偶尔刷一次让边界跟上。
