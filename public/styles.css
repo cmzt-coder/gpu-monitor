@@ -319,6 +319,9 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .table-wrap { margin-top: 14px; overflow-x: auto; }
 /* 进程历史最多能带到 200 条，不设上限的话这张表会把页面撑到上万像素高 */
 .table-wrap--scroll { max-height: 420px; overflow-y: auto; }
+/* 「加载更多」贴在表格下面：读完一屏再决定要不要往下翻 */
+.proc-hist-more { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+.proc-hist-more__hint { color: var(--jf-color-ink-muted); font-size: 12.5px; }
 .table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .table thead th {
   position: sticky; top: 0; z-index: 1;

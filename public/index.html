@@ -240,7 +240,10 @@
             <h2 class="card__title" id="proc-hist-h">进程占用历史</h2>
             <p class="card__sub" id="proc-hist-sub">按进程身份变化留档</p>
           </div>
-          <div class="range-picker" id="proc-hist-range" role="group" aria-label="选择进程历史的时间范围"></div>
+          <div class="chart-head-actions">
+            <div class="range-picker" id="proc-hist-range" role="group" aria-label="选择进程历史的时间范围"></div>
+            <div class="range-picker" id="proc-hist-min" role="group" aria-label="只看占用超过该值的进程"></div>
+          </div>
         </div>
         <div class="table-wrap table-wrap--scroll" id="proc-hist-wrap" hidden>
           <table class="table" id="proc-hist-table">
@@ -257,6 +260,10 @@
             </thead>
             <tbody id="proc-hist-body"></tbody>
           </table>
+        </div>
+        <div class="proc-hist-more" id="proc-hist-more" hidden>
+          <button type="button" class="btn btn--ghost btn--sm" id="proc-hist-more-btn">加载更多</button>
+          <p class="proc-hist-more__hint" id="proc-hist-more-hint"></p>
         </div>
         <div class="state-block" id="proc-hist-empty" hidden>
           <p class="state-block__title" id="proc-hist-empty-title">暂无进程记录</p>

@@ -91,6 +91,7 @@ export async function createStore({ options, nodeId, logger = console, createSql
       storeIntervalMs: options.storeIntervalMs,
       retentionDays: options.retentionDays,
       storeProcesses: options.storeProcesses,
+      procMinMiB: options.procMinMiB,
       reclaimOnStart: options.reclaimOnStart,
     });
   } catch (error) {

@@ -65,8 +65,12 @@ const refs = {
   procEmptyText: $('proc-empty-text'),
   procHistSub: $('proc-hist-sub'),
   procHistRange: $('proc-hist-range'),
+  procHistMin: $('proc-hist-min'),
   procHistWrap: $('proc-hist-wrap'),
   procHistBody: $('proc-hist-body'),
+  procHistMore: $('proc-hist-more'),
+  procHistMoreBtn: $('proc-hist-more-btn'),
+  procHistMoreHint: $('proc-hist-more-hint'),
   procHistEmpty: $('proc-hist-empty'),
   procHistEmptyTitle: $('proc-hist-empty-title'),
   procHistEmptyText: $('proc-hist-empty-text'),
@@ -106,6 +110,9 @@ const state = {
     range: '24h',
     rows: [],
     total: 0,
+    // 每次取回多少条（"加载更多"就把它加一页），以及只看多大的进程
+    limit: 0,
+    minMiB: null,
     loading: false,
     notice: null,
   },
@@ -129,6 +136,17 @@ const PROC_HIST_RANGES = [
   { value: '30d', label: '30 天' },
 ];
 const PROC_HIST_LIMIT = 200;
+// 进程历史一次画多少条：卡片高度直接跟这个数走，50 条大约一屏半。
+// 「加载更多」一页一页加，而不是一次取 200 条堆上去
+const PROC_HIST_PAGE = 50;
+const PROC_HIST_MAX = 2000;
+// 占用下限的快捷选项：小进程（几十 MiB 到几百 MiB）在历史里基本是噪声
+const PROC_HIST_MIN_PRESETS = [
+  { value: 0, label: '全部' },
+  { value: 512, label: '≥ 512 MiB' },
+  { value: 1024, label: '≥ 1 GiB' },
+  { value: 4096, label: '≥ 4 GiB' },
+];
 
 let eventSource = null;
 let pollTimer = null;
@@ -1487,6 +1505,8 @@ function renderProcHistRange() {
     button.addEventListener('click', () => {
       if (state.processHistory.range === item.value) return;
       state.processHistory.range = item.value;
+      // 换区间就回到第一页：上一个区间的"已加载条数"对新区间没有意义
+      state.processHistory.limit = PROC_HIST_PAGE;
       renderProcHistRange();
       loadProcessHistory();
     });
@@ -1495,15 +1515,57 @@ function renderProcHistRange() {
   refs.procHistRange.dataset.signature = signature;
 }
 
+/**
+ * 占用下限的快捷选项。
+ * 这是查询侧过滤——库里一条都不少，只是页面上不看小的那些；真想少写库用 --proc-min。
+ */
+function renderProcHistMin() {
+  const history = state.processHistory;
+  // 服务端给了 --proc-min 时把它并进选项里，否则用户看不到自己实际设了多大的下限
+  const serverMin = state.meta?.storage?.procMinMiB || 0;
+  const options = [...PROC_HIST_MIN_PRESETS];
+  if (serverMin > 0 && !options.some((item) => item.value === serverMin)) {
+    options.push({ value: serverMin, label: `≥ ${fmtMiB(serverMin)}` });
+    options.sort((a, b) => a.value - b.value);
+  }
+  if (history.minMiB == null) history.minMiB = serverMin;
+
+  const signature = `${options.map((item) => item.value).join('|')}#${history.minMiB}`;
+  if (refs.procHistMin.dataset.signature === signature) return;
+  refs.procHistMin.replaceChildren();
+  for (const item of options) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = item.label;
+    button.dataset.value = String(item.value);
+    button.setAttribute('aria-pressed', item.value === history.minMiB ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      if (state.processHistory.minMiB === item.value) return;
+      state.processHistory.minMiB = item.value;
+      state.processHistory.limit = PROC_HIST_PAGE;
+      renderProcHistMin();
+      loadProcessHistory();
+    });
+    refs.procHistMin.appendChild(button);
+  }
+  refs.procHistMin.dataset.signature = signature;
+}
+
 async function loadProcessHistory() {
   const history = state.processHistory;
+  if (!(history.limit > 0)) history.limit = PROC_HIST_PAGE;
   history.loading = true;
   history.error = null;
   renderProcHistory();
   try {
-    const data = await fetchJson(`/api/processes?range=${encodeURIComponent(history.range)}&limit=${PROC_HIST_LIMIT}`);
+    const params = new URLSearchParams({ range: history.range, limit: String(history.limit) });
+    if (history.minMiB > 0) params.set('min', String(history.minMiB));
+    const data = await fetchJson(`/api/processes?${params.toString()}`);
     history.rows = data.processes || [];
     history.total = data.total ?? history.rows.length;
+    // 服务端可能因为更小的 --proc-min 而过滤掉一些行，这里如实记下实际生效的下限
+    history.effectiveMin = data.minMiB ?? 0;
     // 没启用历史库时后端会明确说原因，这里如实显示，而不是给个空表让人以为"这段时间没进程"
     history.notice = data.source === 'memory' ? (data.reason || '未启用历史库') : null;
   } catch (error) {
@@ -1527,19 +1589,28 @@ function renderProcHistory() {
   else if (history.notice) refs.procHistSub.textContent = `最近 ${label}：${history.notice}`;
   else if (history.total === 0) refs.procHistSub.textContent = `最近 ${label}没有进程占用记录`;
   else {
-    const shown = history.total > rows.length ? `，显示最近 ${rows.length} 条` : '';
-    refs.procHistSub.textContent = `最近 ${label}共 ${history.total} 条记录${shown}`;
+    const shown = history.total > rows.length ? `，已显示最近 ${rows.length} 条` : '';
+    const min = history.effectiveMin > 0 ? `，只看 ≥ ${fmtMiB(history.effectiveMin)}` : '';
+    refs.procHistSub.textContent = `最近 ${label}共 ${history.total} 条记录${min}${shown}`;
   }
 
   refs.procHistBody.replaceChildren();
   const empty = rows.length === 0;
   refs.procHistWrap.hidden = empty;
   refs.procHistEmpty.hidden = !empty;
+  // 「加载更多」只在还有没取回来的记录时出现
+  const more = !empty && history.total > rows.length && rows.length < PROC_HIST_MAX;
+  refs.procHistMore.hidden = !more;
+  if (more) {
+    refs.procHistMoreHint.textContent = `已显示 ${rows.length} / ${history.total} 条`;
+  }
   if (empty) {
     refs.procHistEmptyTitle.textContent = (history.error || history.notice) ? '进程历史不可用' : '这段时间没有进程记录';
     refs.procHistEmptyText.textContent = history.error
       || history.notice
-      || '进程只在身份变化（或每 5 分钟补一次快照）时留档，这段时间没有新的占用出现。';
+      || (history.effectiveMin > 0
+        ? `这段时间没有占用 ≥ ${fmtMiB(history.effectiveMin)} 的进程。把上面的「占用下限」调回全部试试。`
+        : '进程只在身份变化（或每 5 分钟补一次快照）时留档，这段时间没有新的占用出现。');
     return;
   }
 
@@ -1698,6 +1769,8 @@ function render() {
   renderProcFilter();
   renderProcTable();
   renderMeta();
+  // 放在这里而不是 boot：服务端的 --proc-min 要等第一帧 /api/state 才知道
+  renderProcHistMin();
 
   const windowText = `${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒`;
   const idleNote = state.meta?.idle?.active ? ` · 空闲降频中（每 ${state.meta.idle.currentIntervalMs} ms）` : '';
@@ -1822,6 +1895,17 @@ refs.btnRefresh.addEventListener('click', async () => {
 });
 refs.btnRetry.addEventListener('click', () => poll());
 
+// 加载更多：把取回条数加一页再拉一次。服务端每次都按"最近 N 条"返回，
+// 所以这里不会出现重复行，也不需要前端拼接
+refs.procHistMoreBtn.addEventListener('click', async () => {
+  const history = state.processHistory;
+  if (history.loading) return;
+  refs.procHistMoreBtn.disabled = true;
+  history.limit = Math.min(PROC_HIST_MAX, history.limit + PROC_HIST_PAGE);
+  await loadProcessHistory();
+  refs.procHistMoreBtn.disabled = false;
+});
+
 let resizeTimer = null;
 window.addEventListener('resize', () => {
   window.clearTimeout(resizeTimer);
@@ -1838,6 +1922,7 @@ document.addEventListener('visibilitychange', () => {
 async function boot() {
   renderRangePicker();
   renderProcHistRange();
+  renderProcHistMin();
   try {
     const history = await fetchJson('/api/history');
     state.intervalMs = history.intervalMs || state.intervalMs;

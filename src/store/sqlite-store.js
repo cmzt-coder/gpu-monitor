@@ -171,6 +171,9 @@ export async function createSqliteStore({
   // 默认 0 = 永久保留：漏传这个参数时应该"什么都不删"，而不是悄悄按时限删历史
   retentionDays = 0,
   storeProcesses = true,
+  // 进程记录下限（MiB）：大于 0 时，占用不到这个值的进程行不写进库。
+  // 默认 0 = 全记，因为写入过滤是不可逆的——只看不要的用查询侧的 minMiB 就够了
+  procMinMiB = 0,
   // 进程身份没变时也按这个间隔补一次快照，避免记录到的显存数值离现实太远
   processRefreshMs = 300000,
   flushRows = 400,
@@ -291,7 +294,11 @@ export async function createSqliteStore({
       if (changed || stale || lastProcessAt === 0) {
         lastProcessSignature = signature;
         lastProcessAt = sample.t;
-        buffer.process.push(...processRows(nodeId, sample.t, sample.processes));
+        // 记录下限只拦写入，不拦"身份变化"这个判断：否则一个进程一直被下限挡着，
+        // 等它涨过阈值时反而因为签名没变而不补写
+        const rows = processRows(nodeId, sample.t, sample.processes)
+          .filter((row) => !(procMinMiB > 0) || (row.used_mem_mib ?? 0) >= procMinMiB);
+        buffer.process.push(...rows);
       }
     }
 
@@ -638,14 +645,18 @@ export async function createSqliteStore({
     };
   }
 
-  function queryProcesses({ from, to, limit = 5000 } = {}) {
+  /** 查询侧的占用下限：只看大进程时不用改写入策略，历史照样完整留着 */
+  const procFilter = (minMiB) => (minMiB > 0 ? ' AND used_mem_mib >= ?' : '');
+
+  function queryProcesses({ from, to, limit = 5000, minMiB = 0 } = {}) {
+    const args = minMiB > 0 ? [from, to, minMiB, limit] : [from, to, limit];
     return db.prepare(`
       SELECT ts, uuid, gpu_index, pid, name, used_mem_mib, service, user_name
       FROM gpu_process
-      WHERE ts >= ? AND ts <= ?
+      WHERE ts >= ? AND ts <= ?${procFilter(minMiB)}
       ORDER BY ts DESC
       LIMIT ?
-    `).all(from, to, limit).map((row) => ({
+    `).all(...args).map((row) => ({
       t: row.ts,
       gpuUuid: row.uuid,
       gpuIndex: row.gpu_index,
@@ -657,9 +668,13 @@ export async function createSqliteStore({
     }));
   }
 
-  /** 区间内的进程事件总数：表格只展示最近若干条，但要能告诉用户一共有多少 */
-  function countProcesses({ from, to } = {}) {
-    const row = db.prepare('SELECT COUNT(*) AS n FROM gpu_process WHERE ts >= ? AND ts <= ?').get(from, to);
+  /**
+   * 区间内的进程事件总数：表格只展示最近若干条，但要能告诉用户一共有多少。
+   * 必须和应用了同一个下限，否则会出现"共 200 条却只显示 12 条"这种对不上的数字。
+   */
+  function countProcesses({ from, to, minMiB = 0 } = {}) {
+    const args = minMiB > 0 ? [from, to, minMiB] : [from, to];
+    const row = db.prepare(`SELECT COUNT(*) AS n FROM gpu_process WHERE ts >= ? AND ts <= ?${procFilter(minMiB)}`).get(...args);
     return Number(row?.n ?? 0);
   }
 
@@ -676,6 +691,7 @@ export async function createSqliteStore({
       processRefreshMs,
       retentionDays,
       storeProcesses,
+      procMinMiB,
     };
   }
 

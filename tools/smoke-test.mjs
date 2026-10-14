@@ -774,6 +774,37 @@ assert.equal(
 );
 assert.equal(sqliteStore.countProcesses({ from: 0, to: dbNow - 1 }), 0, '区间外应统计为 0');
 
+// 查询侧的占用下限：只看大进程时不改写入策略，历史照样完整留着
+const procWindow = { from: dbNow - 1, to: dbNow + 10000 };
+assert.equal(sqliteStore.queryProcesses({ ...procWindow, minMiB: 50 }).length, 4, '下限低于实际占用时不该滤掉任何行');
+assert.equal(sqliteStore.queryProcesses({ ...procWindow, minMiB: 200 }).length, 0, '下限高于实际占用时应全部滤掉');
+assert.equal(
+  sqliteStore.countProcesses({ ...procWindow, minMiB: 200 }),
+  0,
+  '总数必须和查询用同一个下限，否则会出现"共 4 条却显示 0 条"这种对不上的数字',
+);
+assert.equal(sqliteStore.queryProcesses({ ...procWindow, minMiB: 200, limit: 50 }).length, 0, '下限与 limit 要能同时生效');
+
+// 写入侧的占用下限（--proc-min）：只有显式设了值才丢数据，默认必须一条不落
+const procFloorStore = await createSqliteStore({
+  file: ':memory:', nodeId: 'test-node', storeIntervalMs: 1, retentionDays: 0, procMinMiB: 500, now: () => dbNow,
+});
+procFloorStore.appendSample({
+  t: dbNow,
+  gpus: [gpuAt(0)],
+  processes: [
+    { gpuUuid: 'GPU-test', gpuIndex: 0, pid: 1, name: 'big.py', usedMemMiB: 800, service: null, user: null },
+    { gpuUuid: 'GPU-test', gpuIndex: 0, pid: 2, name: 'small.py', usedMemMiB: 100, service: null, user: null },
+  ],
+  system: null,
+});
+procFloorStore.flush();
+const floorRows = procFloorStore.queryProcesses({ from: dbNow - 1, to: dbNow + 1 });
+assert.equal(floorRows.length, 1, '设了写入下限时只有超过它的进程进库');
+assert.equal(floorRows[0].pid, 1, '留下来的应该是占用大的那个');
+assert.equal(procFloorStore.stats().procMinMiB, 500, '下限要在状态里露出来，页面才知道当前是多少');
+procFloorStore.close();
+
 // 保留策略：超出保留期的行会被清掉
 const retentionStore = await createSqliteStore({
   file: ':memory:',

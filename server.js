@@ -68,6 +68,8 @@ const HELP = `GPU 显存负载监控服务
       --store-interval <毫秒> 落库间隔，与页面刷新间隔解耦（默认 5000）
       --retention-days <天>   历史保留天数；默认 0 = 永久保留，填天数则按天自动清理
       --no-store-processes    不把占用进程写入历史库
+      --proc-min <MiB>        占用不到这个值的进程不写进历史库；默认 0 = 全记
+                              （只想看得清爽点用页面上的「占用下限」，那个不会丢数据）
       --reclaim           启动时把历史库做一次整库重写（开启增量回收，释放已删数据占用的空间）
 
       --mock              使用模拟数据，便于无 GPU 环境本地开发
@@ -106,6 +108,9 @@ function parseArgs(argv) {
     // 真要限制就显式给 --retention-days <天>。
     retentionDays: 0,
     storeProcesses: true,
+    // 进程记录下限（MiB）：0 = 全记。只看大进程请用页面上的「占用下限」，
+    // 那是查询侧过滤、历史照样完整；这里设了值就是真的不写进库
+    procMinMiB: 0,
     reclaimOnStart: false,
     version: VERSION,
     help: false,
@@ -176,6 +181,9 @@ function parseArgs(argv) {
         break;
       case '--no-store-processes':
         options.storeProcesses = false;
+        break;
+      case '--proc-min':
+        options.procMinMiB = Math.max(0, Number(next()) || 0);
         break;
       case '--reclaim':
         options.reclaimOnStart = true;
@@ -485,12 +493,18 @@ const server = http.createServer(async (req, res) => {
     // 支持和 /api/history 一样的区间写法（range=24h / from+to），默认看最近一小时
     const resolved = range ?? { from: Date.now() - 3600000, to: Date.now() };
     const limit = Math.max(1, Math.min(2000, Number(url.searchParams.get('limit')) || 200));
+    // 占用下限：不带参数时用启动参数里的 --proc-min，页面上的「占用下限」会显式传
+    const minParam = url.searchParams.get('min');
+    const minMiB = minParam == null
+      ? (options.procMinMiB || 0)
+      : Math.max(0, Number(minParam) || 0);
     if (!store.supportsHistory) {
       sendJson(res, 200, {
         source: 'memory',
         from: resolved.from,
         to: resolved.to,
         limit,
+        minMiB,
         count: 0,
         total: 0,
         processes: [],
@@ -498,14 +512,15 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
-    const processes = store.queryProcesses({ from: resolved.from, to: resolved.to, limit });
+    const processes = store.queryProcesses({ from: resolved.from, to: resolved.to, limit, minMiB });
     sendJson(res, 200, {
       source: 'db',
       from: resolved.from,
       to: resolved.to,
       limit,
+      minMiB,
       count: processes.length,
-      total: store.countProcesses({ from: resolved.from, to: resolved.to }),
+      total: store.countProcesses({ from: resolved.from, to: resolved.to, minMiB }),
       processes,
     });
     return;
