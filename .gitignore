@@ -18,3 +18,7 @@ TODO.md
 # 按机器改好的 systemd 单元（含本机路径 / 用户名 / 主机名），只留本地；
 # 面向所有人的模板仍是 deploy/gpu-monitor.service，那个才提交
 deploy/local/
+# Docker 的本机配置（SMTP 密码、时区、端口、采集间隔），只提交 .env.example
+.env
+# 本机对 compose 的临时覆盖（比如没有 GPU 的机器上跑 --mock 验收）
+docker-compose.override.yml

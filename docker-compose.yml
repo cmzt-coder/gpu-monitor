@@ -1,0 +1,88 @@
+# GPU 显存负载监控 · Docker 编排
+#
+# 用法（在仓库根目录）：
+#   cp .env.example .env        # 填 SMTP_PASS；8 卡机器再加一行 INTERVAL=3000
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose restart      # 改完代码 git pull 之后，重启容器即可生效
+#   docker compose exec gpu-monitor node tools/notify-test.mjs     # 验邮件通道
+#   docker compose exec gpu-monitor node tools/db-maintenance.mjs  # 历史库维护
+#
+# 每台机器的差异（端口 / 采集间隔 / 时区 / 邮件密码 / 磁盘挂载点）都在 .env 里，不进版本库。
+# 这个看板的工作是"看透宿主"，所以下面 pid / 挂载 / SYSLOG 这几处不能省，注释里写了各自为了什么。
+services:
+  gpu-monitor:
+    build: .
+    image: gpu-monitor-runtime:latest
+    container_name: gpu-monitor
+    restart: unless-stopped
+
+    # 和宿主共用进程与网络命名空间：占用进程表、服务归属、宿主指标全靠它。
+    # 少了 pid: host，nvidia-smi 报出来的是宿主 PID，容器里根本找不到这些 PID。
+    pid: host
+    network_mode: host
+
+    # 共用宿主的主机名。容器默认的 hostname 就是容器 ID，而这个服务拿 os.hostname()
+    # 当主机标识（页面上「主机 xxx」、采集信息里的主机名、历史库里的 node_id 都用它），
+    # 不共用的话这三处会显示成一串容器 ID，而且重建容器就变一次，历史库里的标识会漂。
+    uts: host
+
+    # 读内核日志（XID）：Ubuntu 默认 kernel.dmesg_restrict=1，非 CAP_SYSLOG 读不到 /dev/kmsg
+    cap_add:
+      - SYSLOG
+    devices:
+      - /dev/kmsg:/dev/kmsg
+
+    # nvidia-smi 来自宿主驱动，需要 NVIDIA Container Toolkit（宿主上跑 GPU 容器就说明已装好）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # alerts.json 里写的是 ${SMTP_PASS} 占位，少了它邮件发不出去，所以这里直接报错提醒
+      SMTP_PASS: ${SMTP_PASS:?请在 .env 里填 SMTP_PASS}
+
+    working_dir: /app
+    command:
+      - node
+      - server.js
+      - --port
+      - "${PORT:-8090}"
+      - --host
+      - 0.0.0.0
+      - --interval
+      - "${INTERVAL:-1000}"
+      - --db
+      - /app/data/gpu-monitor.db
+      - --store-interval
+      - "5000"
+      # 容器里的 / 是 overlay 层，报它没有意义；/hostfs 才是宿主根分区。
+      # 宿主别的挂载点（比如 /data）照这个格式再加两行即可：- --disk  /hostfs/data
+      - --disk
+      - "${DISK:-/hostfs}"
+
+    volumes:
+      # 代码只读挂载：容器不碰代码，升级就是 git pull + restart
+      - .:/app:ro
+      # 历史库单独可写（注意：容器以 root 写，宿主上这个目录的属主会变成 root）
+      - ./data:/app/data
+      # 占用进程的 PID → 用户名
+      - /etc/passwd:/etc/passwd:ro
+      - /etc/group:/etc/group:ro
+      # 容器 ID → 容器名。左边是宿主真实路径（docker info 里的 DockerRootDir），
+      # 右边固定不变；挂目录而不是 docker.sock，是为了不给容器 docker 控制权
+      - /var/lib/docker:/var/lib/docker:ro
+      # 宿主根分区（磁盘容量要的是真实挂载点的 statfs，容器自己的 overlay 不准）
+      - /:/hostfs:ro
+
+    # journald 在这个方案里用不上，日志交给 Docker，自带轮转、不再无限增长
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

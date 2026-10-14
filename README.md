@@ -1,6 +1,6 @@
 # GPU 显存负载监控
 
-一台机器、多张显卡的显存负载实时看板。零依赖：只用 Node 内置模块 + `nvidia-smi`，不需要 Docker，不需要 `npm install`。
+一台机器、多张显卡的显存负载实时看板。零依赖：只用 Node 内置模块 + `nvidia-smi`，不需要 `npm install`。直接在宿主上跑（脚本或 systemd）最省事；不想在宿主装 Node 也可以用仓库自带的 [Docker 编排](#用-docker-跑可选)。
 
 ![界面预览](docs/preview.png)
 
@@ -435,6 +435,33 @@ journalctl -u gpu-monitor -f
 - 附带了基础加固（`ProtectSystem=full`、`ProtectHome=read-only` 等）；历史库若放在别处，按注释放开 `ReadWritePaths`。
 
 > 手动启动过的话，先用 `./stop.sh` 停掉再交给 systemd，避免两边抢同一个端口。
+
+### 用 Docker 跑（可选）
+
+不想在宿主上装 Node、或者希望"升级 = 改挂载 + 重启容器"，可以用仓库自带的编排。镜像里只有运行时底座（Node 24 + `dmesg` + 时区数据），**代码不打进镜像**、从宿主只读挂载，所以 `git pull` 后 `docker compose restart` 就生效，不需要重建。
+
+```bash
+cp .env.example .env        # 填 SMTP_PASS；8 卡机器再加 INTERVAL=3000
+docker compose up -d --build
+docker compose logs -f
+docker compose exec gpu-monitor node tools/notify-test.mjs     # 验邮件通道
+```
+
+难点只有一个：**这个看板的工作是"看透宿主"，所以容器拿到的权限比一般容器多**，`docker-compose.yml` 里逐条写了各自为了什么：
+
+| 配置 | 为了什么 |
+| --- | --- |
+| `pid: host` | 占用进程表与「服务归属」要读宿主 `/proc/<pid>`；少了它，nvidia-smi 报的是宿主 PID，容器里找不到 |
+| `uts: host` | 主机名用宿主的。容器默认的 hostname 是容器 ID，会被当成"主机标识"写进页面和历史库，重建容器还会变一次 |
+| `network_mode: host` | 直接监听宿主 8090，行为和脚本方式一致（反代 / SSE 都不受影响） |
+| `cap_add: [SYSLOG]` + `/dev/kmsg` | 读内核日志拿 XID（`kernel.dmesg_restrict=1` 时非 CAP_SYSLOG 读不到） |
+| `/etc/passwd`、`/etc/group`、`/var/lib/docker` 只读挂载 | PID → 用户名、容器 ID → 容器名（挂目录而不是 `docker.sock`，不给容器 docker 控制权） |
+| `/:/hostfs:ro` + `--disk /hostfs` | 磁盘容量要真实挂载点的 `statfs`；容器自己的 `/` 是 overlay 层，报它没意义 |
+| `deploy.reservations.devices` | nvidia-smi 来自宿主驱动，需要 NVIDIA Container Toolkit |
+
+也就是说：这个容器不是隔离沙箱，它和"在宿主上用 root 跑一个服务"的安全边界差不多——真正的边界是"谁能访问 8090"。**顺带一个好处**：XID 不用再单独配权限（容器以 root 跑且带 `CAP_SYSLOG`），systemd 方案里那句 `SupplementaryGroups=adm` 在这里就不需要了。
+
+宿主上的差异（端口 / 采集间隔 / 时区 / 邮件密码 / 监控哪个磁盘）全放 `.env`，不进版本库。历史库仍在宿主 `./data` 下，只是属主会变成 root——**回滚回脚本方式前记得 `sudo chown -R <用户>:<用户组> data`**。
 
 ### 健康检查
 
