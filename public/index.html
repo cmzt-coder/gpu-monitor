@@ -59,13 +59,9 @@
         <svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
         立即刷新
       </button>
-      <button type="button" class="btn btn--ghost" id="btn-json">
-        <svg class="icon" aria-hidden="true"><use href="#icon-braces"></use></svg>
-        下载 JSON
-      </button>
-      <button type="button" class="btn btn--primary" id="btn-csv">
+      <button type="button" class="btn btn--primary" id="btn-export">
         <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
-        下载 CSV
+        导出
       </button>
     </div>
   </header>
@@ -139,10 +135,6 @@
           </div>
           <div class="chart-head-actions">
             <div class="range-picker" id="range-picker" role="group" aria-label="选择曲线时间范围"></div>
-            <button type="button" class="btn btn--ghost btn--sm" id="btn-csv-full">
-              <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
-              扩展字段 CSV
-            </button>
             <div class="legend" aria-hidden="true">
               <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>显存占用</span>
               <span class="legend__item"><span class="legend__swatch legend__swatch--util"></span>GPU 利用率</span>
@@ -185,10 +177,6 @@
           <div class="sys-actions">
             <span class="legend__item"><span class="legend__swatch legend__swatch--cpu"></span>CPU 使用率</span>
             <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>内存使用率</span>
-            <button type="button" class="btn btn--ghost btn--sm" id="btn-sys-csv">
-              <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
-              下载系统 CSV
-            </button>
           </div>
         </div>
         <div class="sys-meters" id="sys-meters"></div>
@@ -293,6 +281,42 @@
     <p id="footer-text">数据来自 nvidia-smi，仅保留内存中的最近采样窗口，不落盘、不做历史归档。</p>
   </footer>
 </div>
+
+<dialog class="export" id="export-dialog" aria-labelledby="export-title">
+  <div class="export__head">
+    <h2 class="export__title" id="export-title">导出数据</h2>
+    <button type="button" class="export__close" id="export-close" aria-label="关闭">✕</button>
+  </div>
+
+  <div class="export__body">
+    <fieldset class="export__group">
+      <legend class="export__legend">导出内容</legend>
+      <div class="export__options" id="export-content"></div>
+    </fieldset>
+
+    <fieldset class="export__group" id="export-range-group">
+      <legend class="export__legend">时间范围</legend>
+      <div class="range-picker" id="export-range" role="group" aria-label="选择导出的时间范围"></div>
+      <p class="export__hint" id="export-range-hint"></p>
+    </fieldset>
+
+    <div class="export__group" id="export-full-group">
+      <label class="export__check">
+        <input type="checkbox" id="export-full">
+        <span>包含扩展指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流 / ECC）</span>
+      </label>
+      <p class="export__hint" id="export-full-hint"></p>
+    </div>
+  </div>
+
+  <div class="export__foot">
+    <p class="export__summary" id="export-summary"></p>
+    <div class="export__actions">
+      <button type="button" class="btn btn--ghost" id="export-cancel">取消</button>
+      <button type="button" class="btn btn--primary" id="export-confirm">下载</button>
+    </div>
+  </div>
+</dialog>
 
 <script type="module" src="./app.js"></script>
 </body>

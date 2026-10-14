@@ -16,8 +16,10 @@ import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
   GPU_CSV_HEADER_FULL,
+  PROCESS_CSV_HEADER,
   SYSTEM_CSV_HEADER,
   gpuRowToCsv,
+  processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
   systemRowToCsv,
@@ -28,7 +30,9 @@ import { createSystemCollector, parseMeminfo, parseNetDev, cpuUsagePct } from '.
 import { createCollector, resolveCadence } from '../src/collector.js';
 import { createSqliteStore } from '../src/store/sqlite-store.js';
 import { createMemoryStore, createStore, describeStorageError } from '../src/store/store.js';
-import { gpuFromRow, packThrottle, processesSignature, systemFromRow, unpackThrottle } from '../src/store/rows.js';
+import {
+  gpuFromRow, packThrottle, processFromRow, processesSignature, systemFromRow, unpackThrottle,
+} from '../src/store/rows.js';
 import { compare, normalizeRules, parseDuration } from '../src/alerts/rules.js';
 import { readServiceMetric } from '../src/alerts/rules.js';
 import { serviceSharePct, summarizeServices } from '../src/services.js';
@@ -1022,6 +1026,25 @@ assert.equal(
   '总数必须和查询用同一个下限，否则会出现"共 4 条却显示 0 条"这种对不上的数字',
 );
 assert.equal(sqliteStore.queryProcesses({ ...procWindow, minMiB: 200, limit: 50 }).length, 0, '下限与 limit 要能同时生效');
+
+// 进程事件的流式遍历（导出用）：游标必须能跨页继续，且不能靠 limit 把数据截掉
+const allProcessPages = [...sqliteStore.processPages({ from: dbNow - 1, to: dbNow + 10000 })];
+assert.equal(allProcessPages.length, 4, '遍历要拿全区间内的事件，不受单页条数限制');
+assert.equal(allProcessPages[0].ts <= allProcessPages[3].ts, true, '遍历应按时间正序');
+const processOrdered = allProcessPages.every((row, index) => {
+  if (index === 0) return true;
+  const prev = allProcessPages[index - 1];
+  // 游标是 (ts, pid)：同一时刻内也要有稳定次序，否则翻页会漏行
+  return row.ts > prev.ts || (row.ts === prev.ts && (row.pid ?? -1) >= (prev.pid ?? -1));
+});
+assert.equal(processOrdered, true, '遍历必须按 (时间, pid) 正序，否则游标翻页会漏行');
+assert.equal([...sqliteStore.processPages({ ...procWindow, minMiB: 200 })].length, 0, '遍历也要认占用下限');
+assert.equal([...sqliteStore.processPages({ ...procWindow, limit: 2 })].length, 2, '可以只取前 N 条');
+// 导出的一行：字段要齐，且不用查库就能拼出来
+assert.equal(
+  processRowToCsv('2026-01-01T00:00:00.000Z', processFromRow(allProcessPages[0])),
+  '2026-01-01T00:00:00.000Z,0,GPU-test,7,train.py,90,容器 vllm-server,root',
+);
 
 // 写入侧的占用下限（--proc-min）：只有显式设了值才丢数据，默认必须一条不落
 const procFloorStore = await createSqliteStore({

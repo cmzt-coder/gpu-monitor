@@ -114,6 +114,33 @@ const SYSTEM_HEADERS = [
 
 export const SYSTEM_CSV_HEADER = SYSTEM_HEADERS.join(',');
 
+// 进程事件导出：一行 = 一次"谁在什么时候占上了哪张卡"的留档
+const PROCESS_HEADERS = [
+  'timestamp_iso',
+  'gpu_index',
+  'gpu_uuid',
+  'pid',
+  'name',
+  'used_mem_mib',
+  'service',
+  'user',
+];
+export const PROCESS_CSV_HEADER = PROCESS_HEADERS.join(',');
+
+/** 单独一行进程事件，供流式导出复用 */
+export function processRowToCsv(timestampIso, proc) {
+  return [
+    timestampIso,
+    proc.gpuIndex ?? '',
+    cell(proc.gpuUuid),
+    proc.pid ?? '',
+    cell(proc.name),
+    round(proc.usedMemMiB, 1),
+    cell(proc.service),
+    cell(proc.user),
+  ].join(',');
+}
+
 /** 单独一行宿主指标，供流式导出复用 */
 export function systemRowToCsv(timestampIso, system) {
   // 速率为 0 也要如实导出，所以不能用 `value || ''`

@@ -13,7 +13,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { serviceSharePct } from '../services.js';
-import { gpuFromRow, gpuRow, hostRow, processRows, processesSignature, serviceRows, systemFromRow } from './rows.js';
+import {
+  gpuFromRow, gpuRow, hostRow, processFromRow, processRows, processesSignature, serviceRows, systemFromRow,
+} from './rows.js';
 
 // 表结构写成数据结构而不是一整段 SQL：建表、补列迁移、以及"哪些列要写要读"都从这一份生成，
 // 避免加了字段却忘了改另一个地方。新增字段只要在这里加一行。
@@ -683,16 +685,43 @@ export async function createSqliteStore({
       WHERE ts >= ? AND ts <= ?${procFilter(minMiB)}
       ORDER BY ts DESC
       LIMIT ?
-    `).all(...args).map((row) => ({
-      t: row.ts,
-      gpuUuid: row.uuid,
-      gpuIndex: row.gpu_index,
-      pid: row.pid,
-      name: row.name,
-      usedMemMiB: row.used_mem_mib,
-      service: row.service,
-      user: row.user_name,
-    }));
+    `).all(...args).map(processFromRow);
+  }
+
+  /**
+   * 按时间正序分页迭代进程事件，供流式导出用。
+   * 游标用 (ts, pid) 行值比较：同一次采样里多个进程共享 ts，
+   * 只按 ts 翻页会在页边界丢行。
+   */
+  function* processPages({ from, to, minMiB = 0, limit = Infinity } = {}) {
+    let emitted = 0;
+    let cursorTs = from - 1;
+    let cursorPid = -1;
+    for (;;) {
+      const remaining = limit === Infinity ? pageSize : Math.min(pageSize, limit - emitted);
+      if (remaining <= 0) return;
+      const args = minMiB > 0
+        ? [from, to, minMiB, cursorTs, cursorPid, remaining]
+        : [from, to, cursorTs, cursorPid, remaining];
+      const rows = db.prepare(`
+        SELECT ts, uuid, gpu_index, pid, name, used_mem_mib, service, user_name,
+               COALESCE(pid, -1) AS pid_c
+        FROM gpu_process
+        WHERE ts >= ? AND ts <= ?${procFilter(minMiB)}
+          AND (ts, COALESCE(pid, -1)) > (?, ?)
+        ORDER BY ts ASC, pid_c ASC
+        LIMIT ?
+      `).all(...args);
+      if (rows.length === 0) return;
+      for (const row of rows) {
+        emitted += 1;
+        yield row;
+      }
+      const last = rows[rows.length - 1];
+      cursorTs = last.ts;
+      cursorPid = last.pid_c;
+      if (rows.length < remaining) return;
+    }
   }
 
   /**
@@ -790,6 +819,7 @@ export async function createSqliteStore({
     maintain,
     querySamples,
     queryProcesses,
+    processPages,
     countProcesses,
     gpuPages,
     hostPages,

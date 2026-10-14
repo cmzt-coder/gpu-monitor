@@ -60,6 +60,7 @@ export function createMemoryStore(reason = null) {
     },
     gpuPages: emptyPages,
     hostPages: emptyPages,
+    processPages: emptyPages,
     resolveStep() {
       return 0;
     },

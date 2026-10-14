@@ -16,15 +16,17 @@ import { evaluateHealth } from './src/health.js';
 import {
   GPU_CSV_HEADER,
   GPU_CSV_HEADER_FULL,
+  PROCESS_CSV_HEADER,
   SYSTEM_CSV_HEADER,
   gpuRowToCsv,
+  processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
   systemRowToCsv,
 } from './src/export.js';
 import { createMockSource, createMockSystem } from './src/mock.js';
 import { detectPlatform } from './src/platform.js';
-import { gpuFromRow, systemFromRow } from './src/store/rows.js';
+import { gpuFromRow, processFromRow, systemFromRow } from './src/store/rows.js';
 import { createStore } from './src/store/store.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -340,6 +342,12 @@ function* systemCsvLines({ from, to }, step) {
   }
 }
 
+function* processCsvLines({ from, to }) {
+  for (const row of store.processPages({ from, to })) {
+    yield processRowToCsv(new Date(row.ts).toISOString(), processFromRow(row));
+  }
+}
+
 /* ---------- 静态文件 ---------- */
 
 function resolveStaticPath(urlPath) {
@@ -580,6 +588,31 @@ const server = http.createServer(async (req, res) => {
       `gpu-monitor-system-${nodeId}-${stamp()}.csv`,
       'text/csv; charset=utf-8',
       `\uFEFF${samplesToSystemCsv(collector.getSamples(limitFrom(url)))}`,
+    );
+    return;
+  }
+
+  if (pathname === '/api/export.processes.csv') {
+    // 进程事件导出：区间内的全部事件（不设 limit——导出的意义就是把这段拿全）
+    if (!range) {
+      sendJson(res, 400, {
+        error: 'range_required',
+        message: '进程占用历史导出需要指定时间范围：加 ?range=24h，或用 from/to',
+      });
+      return;
+    }
+    if (!store.supportsHistory) {
+      sendJson(res, 400, {
+        error: 'history_unavailable',
+        message: '进程历史只存在库里：请启用历史库（去掉 --no-db，并确保 Node ≥ 22.13）后重试',
+      });
+      return;
+    }
+    await streamCsv(
+      res,
+      `gpu-monitor-processes-${nodeId}-${stamp()}.csv`,
+      PROCESS_CSV_HEADER,
+      processCsvLines(range),
     );
     return;
   }

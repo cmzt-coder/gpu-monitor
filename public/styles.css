@@ -583,3 +583,68 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---------- 导出面板 ---------- */
+/* 页面上唯一的导出入口：内容 / 时间范围 / 选项都在这里选，避免同一份数据散在好几处按钮上 */
+.export {
+  width: min(560px, calc(100vw - 32px));
+  /* 小窗口（比如笔记本 720p）下内容会顶到屏幕边缘，让中间那块自己滚 */
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  border: 1px solid var(--jf-color-border);
+  border-radius: var(--jf-radius-lg);
+  background: var(--jf-color-surface);
+  color: var(--jf-color-ink);
+  box-shadow: var(--jf-shadow-card);
+}
+.export::backdrop { background: rgb(17 30 53 / 45%); }
+.export__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 20px 12px;
+}
+.export__title { font-size: 17px; font-weight: 600; }
+.export__close {
+  width: 30px; height: 30px; padding: 0;
+  border: none; border-radius: var(--jf-radius-sm);
+  background: transparent; color: var(--jf-color-ink-muted);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.export__close:hover { background: var(--jf-color-surface-muted); color: var(--jf-color-ink); }
+.export__body { display: grid; gap: 18px; padding: 0 20px; overflow-y: auto; }
+.export__group { margin: 0; padding: 0; border: none; }
+.export__legend {
+  padding: 0 0 8px;
+  color: var(--jf-color-ink-muted);
+  font-size: 12.5px; font-weight: 600;
+}
+.export__options { display: grid; gap: 6px; }
+.export__option {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--jf-color-border);
+  border-radius: var(--jf-radius-md);
+  cursor: pointer;
+}
+.export__option:hover { border-color: var(--jf-color-control-border); }
+.export__option:has(input:checked) {
+  border-color: var(--jf-color-primary);
+  background: #f4f9fd;
+}
+.export__option[data-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
+.export__option input { margin-top: 3px; accent-color: var(--jf-color-primary); }
+.export__option-text { display: grid; gap: 2px; font-size: 13px; }
+.export__option-text b { font-weight: 600; }
+.export__option-text span { color: var(--jf-color-ink-muted); font-size: 12.5px; }
+/* 置灰的整组要看得懂"为什么不能选"，而不是只有控件变灰 */
+.export__group[data-disabled="true"] .range-picker,
+.export__group[data-disabled="true"] .export__check { opacity: 0.5; }
+.export__hint { margin-top: 8px; color: var(--jf-color-ink-muted); font-size: 12.5px; }
+.export__check { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; cursor: pointer; }
+.export__check input { margin-top: 3px; accent-color: var(--jf-color-primary); }
+.export__foot {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;
+  margin-top: 20px; padding: 14px 20px 18px;
+  border-top: 1px solid var(--jf-color-border);
+}
+.export__summary { color: var(--jf-color-ink-muted); font-size: 12.5px; }
+.export__actions { display: flex; gap: 10px; margin-left: auto; }

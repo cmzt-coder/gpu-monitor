@@ -114,6 +114,23 @@ export function processRows(nodeId, ts, processes) {
   }));
 }
 
+/**
+ * 数据库行 → 接口里的进程对象。
+ * 查询与流式导出共用这一份映射，避免两边的字段名慢慢跑偏。
+ */
+export function processFromRow(row) {
+  return {
+    t: row.ts,
+    gpuUuid: row.uuid,
+    gpuIndex: row.gpu_index,
+    pid: row.pid,
+    name: row.name,
+    usedMemMiB: row.used_mem_mib,
+    service: row.service,
+    user: row.user_name,
+  };
+}
+
 /** 服务维度的汇总 → service_sample 表的行 */
 export function serviceRows(nodeId, ts, services) {
   return (services || []).map((entry) => ({

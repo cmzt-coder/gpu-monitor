@@ -21,10 +21,19 @@ const refs = {
   alertsRuleList: $('alerts-rule-list'),
   btnRetry: $('btn-retry'),
   btnRefresh: $('btn-refresh'),
-  btnCsv: $('btn-csv'),
-  btnJson: $('btn-json'),
-  btnSysCsv: $('btn-sys-csv'),
-  btnCsvFull: $('btn-csv-full'),
+  btnExport: $('btn-export'),
+  exportDialog: $('export-dialog'),
+  exportClose: $('export-close'),
+  exportCancel: $('export-cancel'),
+  exportConfirm: $('export-confirm'),
+  exportContent: $('export-content'),
+  exportRangeGroup: $('export-range-group'),
+  exportRange: $('export-range'),
+  exportRangeHint: $('export-range-hint'),
+  exportFullGroup: $('export-full-group'),
+  exportFull: $('export-full'),
+  exportFullHint: $('export-full-hint'),
+  exportSummary: $('export-summary'),
   kpiCount: $('kpi-count'),
   kpiCountFoot: $('kpi-count-foot'),
   kpiMem: $('kpi-mem'),
@@ -1857,12 +1866,6 @@ function render() {
   renderStatus();
   renderNotice(state.meta);
   renderAlerts(state.meta);
-  // 扩展字段导出依赖历史库，没有库就置灰并说明原因
-  const canFullExport = state.meta?.storage?.supportsHistory === true;
-  refs.btnCsvFull.disabled = !canFullExport;
-  refs.btnCsvFull.title = canFullExport
-    ? '导出当前范围内的 CSV，并带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流等扩展列'
-    : '扩展字段只存在历史库里，启用历史库后可用';
   renderKpis();
   renderCharts();
   renderServiceChart();
@@ -1969,13 +1972,9 @@ async function selectRange(value) {
   render();
 }
 
-function download(path, extra = {}) {
-  // 导出范围跟随曲线选择：实时 → 内存窗口，历史区间 → 库里的对应区间
-  const params = new URLSearchParams();
-  if (state.range === 'live') params.set('limit', String(state.windowSamples));
-  else params.set('range', state.range);
-  for (const [key, value] of Object.entries(extra)) params.set(key, String(value));
-  const url = `${path}?${params.toString()}`;
+function triggerDownload(path, params = new URLSearchParams()) {
+  const query = params.toString();
+  const url = query ? `${path}?${query}` : path;
   const link = document.createElement('a');
   link.href = url;
   link.rel = 'noopener';
@@ -1984,11 +1983,196 @@ function download(path, extra = {}) {
   link.remove();
 }
 
-refs.btnCsv.addEventListener('click', () => download('/api/export.csv'));
-// 扩展字段只存在历史库里，没有库时后端会返回 400，所以按钮直接置灰并给出原因
-refs.btnCsvFull.addEventListener('click', () => download('/api/export.csv', { fields: 'full' }));
-refs.btnSysCsv.addEventListener('click', () => download('/api/export.system.csv'));
-refs.btnJson.addEventListener('click', () => download('/api/export.json'));
+/* ---------- 导出面板 ---------- */
+// 页面上只有这一个导出入口：内容 / 时间范围 / 选项都在弹窗里选，
+// 免得同一份数据散在好几处按钮上、各自默认的时间范围还不一样。
+const EXPORT_ITEMS = [
+  {
+    id: 'gpu',
+    label: 'GPU 曲线',
+    desc: '每行 = 一个采样点 × 一张卡：显存占用、利用率、温度、功耗',
+    path: '/api/export.csv',
+    format: 'CSV',
+    range: true,
+    full: true,
+  },
+  {
+    id: 'host',
+    label: '宿主指标',
+    desc: '每行 = 一个采样点：CPU、内存、交换分区、负载、磁盘、网络',
+    path: '/api/export.system.csv',
+    format: 'CSV',
+    range: true,
+  },
+  {
+    id: 'processes',
+    label: '进程占用历史',
+    desc: '每行 = 一次进程事件：谁在什么时候占上了哪张卡、占了多少、属于哪个服务',
+    path: '/api/export.processes.csv',
+    format: 'CSV',
+    range: true,
+    needsHistory: true,
+  },
+  {
+    id: 'snapshot',
+    label: '当前完整快照',
+    desc: '此刻的全部状态：整机概览、每张卡、进程列表、宿主明细、告警状态',
+    path: '/api/export.json',
+    format: 'JSON',
+    // 快照的语义就是"此刻"，带时间范围会让人以为导的是那段时间的数据
+    range: false,
+  },
+];
+
+const EXPORT_RANGES = [
+  { value: 'follow', label: '跟随曲线' },
+  { value: '1h', label: '1 小时' },
+  { value: '24h', label: '24 小时' },
+  { value: '7d', label: '7 天' },
+  { value: '30d', label: '30 天' },
+  { value: '90d', label: '90 天' },
+  { value: 'all', label: '全部' },
+];
+
+const exportChoice = { content: 'gpu', range: 'follow', full: false };
+
+function exportItem() {
+  return EXPORT_ITEMS.find((item) => item.id === exportChoice.content) || EXPORT_ITEMS[0];
+}
+
+function historyAvailable() {
+  return state.meta?.storage?.supportsHistory === true;
+}
+
+/** 把"跟随曲线"翻译成具体的区间参数；其余选项直接用 range 值 */
+function exportRangeParams() {
+  const params = new URLSearchParams();
+  if (exportChoice.range === 'follow') {
+    if (state.range === 'live') params.set('limit', String(state.windowSamples));
+    else params.set('range', state.range);
+  } else {
+    params.set('range', exportChoice.range);
+  }
+  return params;
+}
+
+function rangeLabelOf(value) {
+  if (value === 'follow') {
+    if (state.range === 'live') return `跟随曲线（最近的 ${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒实时窗口）`;
+    const item = RANGES.find((entry) => entry.value === state.range);
+    return `跟随曲线（${item?.label || state.range}）`;
+  }
+  return EXPORT_RANGES.find((entry) => entry.value === value)?.label || value;
+}
+
+function renderExportContent() {
+  refs.exportContent.replaceChildren();
+  for (const item of EXPORT_ITEMS) {
+    const blocked = item.needsHistory && !historyAvailable();
+    const option = document.createElement('label');
+    option.className = 'export__option';
+    option.dataset.disabled = blocked ? 'true' : 'false';
+    const radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'export-content';
+    radio.value = item.id;
+    radio.checked = exportChoice.content === item.id;
+    radio.disabled = blocked;
+    radio.addEventListener('change', () => {
+      exportChoice.content = item.id;
+      syncExportPanel();
+    });
+    const text = document.createElement('span');
+    text.className = 'export__option-text';
+    const title = document.createElement('b');
+    title.textContent = item.label;
+    const desc = document.createElement('span');
+    desc.textContent = blocked
+      ? '需要历史库（当前不可用）'
+      : `${item.desc}　·　${item.format}${item.range ? '' : '　·　不含时间范围'}`;
+    text.append(title, desc);
+    option.append(radio, text);
+    refs.exportContent.appendChild(option);
+  }
+}
+
+function renderExportRange() {
+  refs.exportRange.replaceChildren();
+  for (const item of EXPORT_RANGES) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = item.label;
+    button.dataset.value = item.value;
+    button.setAttribute('aria-pressed', item.value === exportChoice.range ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      exportChoice.range = item.value;
+      renderExportRange();
+      syncExportPanel();
+    });
+    refs.exportRange.appendChild(button);
+  }
+}
+
+/** 面板里所有联动都在这里：谁可用、什么被置灰、底下那句话说什么 */
+function syncExportPanel() {
+  const item = exportItem();
+  const canRange = item.range === true;
+  const canFull = item.full === true && historyAvailable();
+
+  refs.exportRangeGroup.dataset.disabled = canRange ? 'false' : 'true';
+  for (const button of refs.exportRange.querySelectorAll('.chip')) button.disabled = !canRange;
+  refs.exportRangeHint.textContent = canRange
+    ? '默认跟随曲线上方选的范围；你也可以在这里单独选一个，不用先改曲线'
+    : `${item.label} 是"此刻"的快照，不含时间范围`;
+
+  refs.exportFullGroup.dataset.disabled = canFull ? 'false' : 'true';
+  refs.exportFull.disabled = !canFull;
+  if (!canFull) exportChoice.full = false;
+  refs.exportFullHint.textContent = item.full
+    ? (historyAvailable()
+      ? '扩展字段只存在历史库里，导出会比基础列多一点时间（流式写出）'
+      : '需要历史库：当前不可用，只导出基础列')
+    : '只有 GPU 曲线有扩展指标';
+
+  const parts = [`${item.label}（${item.format}）`];
+  if (canFull && exportChoice.full) parts.push('含扩展指标');
+  if (canRange) parts.push(rangeLabelOf(exportChoice.range));
+  refs.exportSummary.textContent = `将导出：${parts.join(' · ')}`;
+  refs.exportConfirm.disabled = Boolean(item.needsHistory && !historyAvailable());
+}
+
+function openExportPanel() {
+  exportChoice.content = 'gpu';
+  exportChoice.range = 'follow';
+  exportChoice.full = false;
+  renderExportContent();
+  renderExportRange();
+  syncExportPanel();
+  if (typeof refs.exportDialog.showModal === 'function') refs.exportDialog.showModal();
+  else refs.exportDialog.setAttribute('open', '');
+  refs.exportConfirm.focus();
+}
+
+function closeExportPanel() {
+  if (typeof refs.exportDialog.close === 'function') refs.exportDialog.close();
+  else refs.exportDialog.removeAttribute('open');
+}
+
+refs.btnExport.addEventListener('click', openExportPanel);
+refs.exportClose.addEventListener('click', closeExportPanel);
+refs.exportCancel.addEventListener('click', closeExportPanel);
+refs.exportFull.addEventListener('change', () => {
+  exportChoice.full = refs.exportFull.checked;
+  syncExportPanel();
+});
+refs.exportConfirm.addEventListener('click', () => {
+  const item = exportItem();
+  const params = item.range ? exportRangeParams() : new URLSearchParams();
+  if (item.id === 'gpu' && exportChoice.full) params.set('fields', 'full');
+  closeExportPanel();
+  triggerDownload(item.path, params);
+});
 refs.btnRefresh.addEventListener('click', async () => {
   refs.btnRefresh.disabled = true;
   // 手动刷新时连历史数据一起刷：进程历史是独立拉取的，不随实时帧更新
