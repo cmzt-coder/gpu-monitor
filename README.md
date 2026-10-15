@@ -18,7 +18,7 @@
 
 ![单页模式](docs/preview-single.png)
 
-<sub>以上都是 <code>--mock</code> 模拟数据的截图：卡型、服务名、主机名全是假的（主机名固定显示 <code>demo-host</code>）。</sub>
+<sub>以上都是 <code>--mock</code> 模拟数据的截图：卡型、服务名、主机名全是假的（主机名固定显示 <code>demo-host</code>）。界面右上角可切 <code>中 / EN</code>，英文界面见 <a href="README.en.md">English README</a>。</sub>
 
 ## 30 秒上手
 
