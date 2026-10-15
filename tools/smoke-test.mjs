@@ -949,11 +949,36 @@ assert.deepEqual(
   { tone: 'live', text: '实时采集中', stale: false, fellBack: false },
   '正常采集就是绿点"实时采集中"',
 );
-// 默认 1 秒间隔：超过 3×间隔 + 2 秒没有新样本就算陈旧
+// 阈值 = max(3×采集间隔+2 秒, 落库间隔+5 秒, 15 秒)。下面三条把三个分支各钉一次。
 assert.equal(
   statusView({ status: 'ok', lastSampleAt: PILL_NOW - 30000, now: PILL_NOW, relative: pillRel }).tone,
   'stale',
   '30 秒没有新样本（间隔 1 秒）应当判为数据陈旧',
+);
+// 这条对应实测发现的问题：A 台 1 秒采集 / 5 秒落库，刚开页时最新点最多就可能是 10 秒前的
+assert.equal(
+  statusView({
+    status: 'ok', lastSampleAt: PILL_NOW - 10000, now: PILL_NOW,
+    intervalMs: 1000, storeIntervalMs: 5000, relative: pillRel,
+  }).tone,
+  'live',
+  '开页瞬间最新点来自回填（5 秒落库）时，10 秒的空档不算陈旧',
+);
+assert.equal(
+  statusView({
+    status: 'ok', lastSampleAt: PILL_NOW - 20000, now: PILL_NOW,
+    intervalMs: 1000, storeIntervalMs: 5000, relative: pillRel,
+  }).tone,
+  'stale',
+  '但超过 15 秒下限之后，照旧要报陈旧',
+);
+assert.equal(
+  statusView({
+    status: 'ok', lastSampleAt: PILL_NOW - 30000, now: PILL_NOW,
+    intervalMs: 1000, storeIntervalMs: 30000, relative: pillRel,
+  }).tone,
+  'live',
+  '落库间隔调到 30 秒时，下限跟着涨到 35 秒，不能再用 15 秒判',
 );
 const pillIdle = statusView({
   status: 'ok', lastSampleAt: PILL_NOW - 30000, now: PILL_NOW, intervalMs: 10000,

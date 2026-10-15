@@ -518,6 +518,7 @@ function renderStatus() {
     status: state.status,
     lastSampleAt: state.lastSampleAt,
     intervalMs: state.intervalMs,
+    storeIntervalMs: state.meta?.storage?.storeIntervalMs || 0,
     idle: state.meta?.idle || null,
     pushActive: state.pushActive,
     pushEnabled: state.meta?.push?.enabled !== false,

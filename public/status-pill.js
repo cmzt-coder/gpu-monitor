@@ -21,6 +21,7 @@ const TEXT = {
  * @param {number|null} [input.lastSampleAt] 最近一次采到样本的时间戳
  * @param {number} [input.now]
  * @param {number} [input.intervalMs]        配置的采集间隔
+ * @param {number} [input.storeIntervalMs]   历史库的落库间隔（0 = 没有历史库）
  * @param {{active:boolean, currentIntervalMs:number}|null} [input.idle]
  * @param {boolean} [input.pushActive]       SSE 当前连着吗
  * @param {boolean} [input.pushEnabled]      服务端是否允许推送（--no-push 时为 false）
@@ -33,6 +34,7 @@ export function statusView({
   lastSampleAt = null,
   now = Date.now(),
   intervalMs = 1000,
+  storeIntervalMs = 0,
   idle = null,
   // 默认当"推送正常"：调用方忘了传时不该凭空报一个降级提示
   pushActive = true,
@@ -48,9 +50,20 @@ export function statusView({
 
   // 陈旧判定的阈值跟着**当前生效**的采集间隔走：空闲降频到 10 秒时，
   // 不能 3 秒没样本就说陈旧——那是故意放慢，不是卡住。
+  //
+  // 另外两条下限也别省：
+  //   · 落库间隔 + 5 秒：页面刚打开时，手上的"最新样本"来自历史库回填，而库里每
+  //     storeIntervalMs 才落一行，所以最新点天然就可能是几秒前的。没有这条，
+  //     A 台（1 秒采集 / 5 秒落库）刚开页那两秒会显示"数据停留在 10 秒前"，纯属误伤。
+  //   · 15 秒：给网络往返和时钟抖动留的余量，同时 15 秒没有新样本依然是个真信号。
   const effectiveInterval = idle?.active ? (idle.currentIntervalMs || intervalMs) : intervalMs;
+  const staleThreshold = Math.max(
+    3 * effectiveInterval + 2000,
+    storeIntervalMs > 0 ? storeIntervalMs + 5000 : 0,
+    15000,
+  );
   const ageMs = lastSampleAt == null ? null : now - lastSampleAt;
-  const stale = !broken && tone === 'live' && ageMs != null && ageMs > effectiveInterval * 3 + 2000;
+  const stale = !broken && tone === 'live' && ageMs != null && ageMs > staleThreshold;
 
   // 推送"该在却真的掉了"才算降级：
   //   · 服务端用 --no-push 关掉推送时，轮询本来就是正常模式；
