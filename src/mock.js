@@ -21,14 +21,14 @@ const MOCK_PROCESSES = [
     name: '/usr/bin/python3 train.py --config cfg/a.yaml',
     service: 'train.service',
     serviceKind: 'systemd',
-    user: 'ztlu',
+    user: 'alice',
     cmdline: '/usr/bin/python3 train.py --config cfg/a.yaml --epochs 30',
   },
   {
     name: '/usr/local/bin/ollama serve',
     service: '用户会话',
     serviceKind: 'session',
-    user: 'jklei',
+    user: 'bob',
     cmdline: '/usr/local/bin/ollama serve',
   },
   {
@@ -44,7 +44,7 @@ const MOCK_PROCESSES = [
     // 手动启动、又没有容器身份的进程：这里就该留空，而不是编一个服务名
     service: null,
     serviceKind: null,
-    user: 'ztlu',
+    user: 'alice',
     cmdline: '/opt/jupyter/bin/python3 -m ipykernel_launcher -f /tmp/kernel-8f2.json',
   },
 ];

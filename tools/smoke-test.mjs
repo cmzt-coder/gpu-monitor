@@ -1362,7 +1362,7 @@ noSystemCollector.stop();
 const svcSummary = summarizeServices([
   { pid: 1, service: '容器 vllm-embed', usedMemMiB: 8502, user: 'root' },
   { pid: 2, service: '容器 vllm-embed', usedMemMiB: 1000, user: 'root' },
-  { pid: 3, service: '用户会话', usedMemMiB: 568, user: 'jklei' },
+  { pid: 3, service: '用户会话', usedMemMiB: 568, user: 'bob' },
   { pid: 4, service: null, usedMemMiB: 1666, user: 'root' },
 ], [{ memTotalMiB: 40960 }]);
 assert.equal(svcSummary.length, 3);
@@ -1415,7 +1415,7 @@ assert.equal(parseCgroup('').containerId, null);
 
 assert.equal(parseUidStatus('Name:\tpython3\nUid:\t1004\t1004\t1004\t1004\nGid:\t1004\t1004\t1004\t1004\n'), 1004);
 assert.equal(parseUidStatus('Name:\tx\n'), null);
-assert.equal(parsePasswd('root:x:0:0:root:/root:/bin/bash\njklei:x:1004:1004::/home/jklei:/bin/bash\n').get(1004), 'jklei');
+assert.equal(parsePasswd('root:x:0:0:root:/root:/bin/bash\nbob:x:1004:1004::/home/bob:/bin/bash\n').get(1004), 'bob');
 const mineruCmdline = Buffer.from(`${['/usr/bin/python3', '/usr/local/bin/mineru-api', '--port', '8000'].join('\0')}\0`);
 assert.equal(parseCmdline(mineruCmdline), '/usr/bin/python3 /usr/local/bin/mineru-api --port 8000', 'NUL 分隔的命令行要拼回一行');
 assert.equal(parseCmdline(Buffer.from('VLLM::EngineCore\0')), 'VLLM::EngineCore', '改写过标题的进程命令行只有这一个词');
@@ -1429,7 +1429,7 @@ const fakeFiles = {
   [`/proc/${fakePid}/cgroup`]: `0::/system.slice/docker-${fakeContainerId}.scope`,
   [`/proc/${fakePid}/status`]: 'Name:\tpython3\nUid:\t0\t0\t0\t0\n',
   [`/proc/${fakePid}/cmdline`]: Buffer.from('VLLM::EngineCore\0'),
-  '/etc/passwd': 'root:x:0:0:root:/root:/bin/bash\njklei:x:1004:1004::/home/jklei:/bin/bash\n',
+  '/etc/passwd': 'root:x:0:0:root:/root:/bin/bash\nbob:x:1004:1004::/home/bob:/bin/bash\n',
   [`/var/lib/docker/containers/${fakeContainerId}/config.v2.json`]: JSON.stringify({ Name: '/vllm-server' }),
 };
 let fakeReads = 0;
