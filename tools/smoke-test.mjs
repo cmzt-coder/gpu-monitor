@@ -37,7 +37,7 @@ import {
   wideGpuCsvHeader,
 } from '../src/export.js';
 import { createMockSource, createMockSystem } from '../src/mock.js';
-import { detectPlatform, nvidiaSmiCandidates, resolveNvidiaSmi } from '../src/platform.js';
+import { detectPlatform, nvidiaSmiCandidates, resolveHostname, resolveNvidiaSmi } from '../src/platform.js';
 import { createSystemCollector, parseDiskSpec, parseMeminfo, parseNetDev, cpuUsagePct } from '../src/system.js';
 import { createCollector, resolveCadence } from '../src/collector.js';
 import { createSqliteStore } from '../src/store/sqlite-store.js';
@@ -389,6 +389,15 @@ assert.deepEqual(mockSystem.unsupported, []);
 const platform = detectPlatform();
 assert.equal(platform.id, process.platform);
 assert.equal(platform.arch, process.arch);
+
+// 主机名：--mock 下必须换成假名字，否则用模拟数据截个图放进文档，就把本机名带出去了
+assert.equal(resolveHostname({ mock: true }), 'demo-host', '--mock 下不该暴露本机主机名');
+assert.equal(resolveHostname({ mock: false }), os.hostname(), '真机照常显示本机名');
+process.env.GPU_MONITOR_HOSTNAME = 'demo-gpu-01';
+assert.equal(resolveHostname({ mock: true }), 'demo-gpu-01', '显式指定要优先');
+assert.equal(resolveHostname({ mock: false }), 'demo-gpu-01', '真机上也可以显式指定');
+delete process.env.GPU_MONITOR_HOSTNAME;
+
 assert.equal(platform.supported, process.platform === 'linux' || process.platform === 'win32');
 assert.ok(platform.label && platform.label.length > 0);
 if (process.platform === 'darwin') {

@@ -4,7 +4,7 @@
 import os from 'node:os';
 
 import { History } from './history.js';
-import { detectPlatform, resolveNvidiaSmi } from './platform.js';
+import { detectPlatform, resolveHostname, resolveNvidiaSmi } from './platform.js';
 import {
   BASE_FIELDS, defaultGpuFields, readGpuBusIds, readGpuSnapshot, readRowRemapper, resolveGpuFields,
 } from './nvidia.js';
@@ -76,7 +76,8 @@ export function createCollector({
 
   const runtime = {
     startedAt: now(),
-    hostname: os.hostname(),
+    // --mock 下是 demo-host（免得模拟数据的截图把本机名带出去），真机就是本机名
+    hostname: resolveHostname({ mock: options.mock }),
     status: 'starting',
     lastError: null,
     lastErrorHint: null,

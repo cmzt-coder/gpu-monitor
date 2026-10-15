@@ -17,6 +17,20 @@ const PLATFORM_LABELS = {
   aix: 'AIX',
 };
 
+/**
+ * 服务对外显示的主机名：页面上「主机 xxx」、采集信息里的主机名、历史库的 node_id、
+ * 导出的 CSV 文件名都用它。
+ *
+ * `--mock` 下默认给 `demo-host`。模拟数据本来就是假的，主机名也该是假的——否则拿
+ * `--mock` 的界面截个图放进文档，就把本机的真实机器名（比如谁谁谁的笔记本名字）
+ * 带进了公开仓库。真机完全不受影响；想指定别的名字用 `GPU_MONITOR_HOSTNAME` 覆盖。
+ */
+export function resolveHostname({ mock = false } = {}) {
+  const override = (process.env.GPU_MONITOR_HOSTNAME || '').trim();
+  if (override) return override;
+  return mock ? 'demo-host' : os.hostname();
+}
+
 export function detectPlatform() {
   const id = process.platform;
   const label = PLATFORM_LABELS[id] || id;
@@ -35,7 +49,7 @@ export function detectPlatform() {
     label,
     arch: process.arch,
     nodeVersion: process.version,
-    hostname: os.hostname(),
+    hostname: resolveHostname(),
     supported,
     note,
   };

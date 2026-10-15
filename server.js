@@ -30,7 +30,7 @@ import {
   wideGpuCsvRow,
 } from './src/export.js';
 import { createMockSource, createMockSystem } from './src/mock.js';
-import { detectPlatform } from './src/platform.js';
+import { detectPlatform, resolveHostname } from './src/platform.js';
 import { gpuFromRow, processFromRow, systemFromRow } from './src/store/rows.js';
 import { createStore } from './src/store/store.js';
 
@@ -246,7 +246,8 @@ try {
 const timeZoneFixed = Boolean(options.timeZone || process.env.TZ);
 
 const platform = detectPlatform();
-const nodeId = os.hostname();
+// 主机名：--mock 下是 demo-host（模拟数据的截图不该带出本机名），真机就是本机名
+const nodeId = resolveHostname({ mock: options.mock });
 const store = await createStore({ options, nodeId });
 
 // 近 1 小时的利用率均值：跨时间的那个"平均 GPU 利用率"。
