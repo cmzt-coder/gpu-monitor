@@ -491,7 +491,7 @@ docker compose exec gpu-monitor node tools/notify-test.mjs     # 验邮件通道
 | `network_mode: host` | 直接监听宿主 8090，行为和脚本方式一致（反代 / SSE 都不受影响） |
 | `cap_add: [SYSLOG]` + `/dev/kmsg` | 读内核日志拿 XID（`kernel.dmesg_restrict=1` 时非 CAP_SYSLOG 读不到） |
 | `/etc/passwd`、`/etc/group`、`/var/lib/docker` 只读挂载 | PID → 用户名、容器 ID → 容器名（挂目录而不是 `docker.sock`，不给容器 docker 控制权） |
-| `/:/hostfs:ro` + `--disk /hostfs` | 磁盘容量要真实挂载点的 `statfs`；容器自己的 `/` 是 overlay 层，报它没意义 |
+| `/:/hostfs:ro` + `--disk /hostfs=/` | 磁盘容量要真实挂载点的 `statfs`；容器自己的 `/` 是 overlay 层，报它没意义。`路径=显示名` 是为了让页面照实显示 `/`，而不是容器里的 `/hostfs` |
 | `deploy.reservations.devices` | nvidia-smi 来自宿主驱动，需要 NVIDIA Container Toolkit |
 
 也就是说：这个容器不是隔离沙箱，它和"在宿主上用 root 跑一个服务"的安全边界差不多——真正的边界是"谁能访问 8090"。**顺带一个好处**：XID 不用再单独配权限（容器以 root 跑且带 `CAP_SYSLOG`），systemd 方案里那句 `SupplementaryGroups=adm` 在这里就不需要了。
@@ -533,7 +533,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8090/api/health
 | `--interval` | `1000` | 采集间隔（毫秒） |
 | `--window` | `300` | 内存中保留的采样点数，即页面曲线窗口 |
 | `--nvidia-smi` | 自动探测 | 手动指定 nvidia-smi；不指定时按平台依次尝试 `PATH` → `/usr/bin` → `/usr/local/bin` → WSL2 → Windows 系统目录，也可用环境变量 `NVIDIA_SMI_BIN` |
-| `--disk` | 平台默认 | 额外监控的挂载点，可重复：`--disk / --disk /data`。POSIX 默认 `/`，Windows 默认系统盘 |
+| `--disk` | 平台默认 | 额外监控的挂载点，可重复：`--disk / --disk /data`。POSIX 默认 `/`，Windows 默认系统盘。想自定义页面上的显示名就写成 `路径=显示名`，例如容器里 `--disk /hostfs=/` 会显示成 `/` |
 | `--no-system` | 关闭 | 关掉宿主 CPU / 内存 / 磁盘 / 网络采集，只留 GPU 指标 |
 | `--no-extended` | 关闭 | 关掉扩展 GPU 指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流原因） |
 | `--db` | `data/gpu-monitor.db` | 历史库文件路径，也可用环境变量 `GPU_MONITOR_DB` |

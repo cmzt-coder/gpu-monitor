@@ -35,7 +35,7 @@ import {
 } from '../src/export.js';
 import { createMockSource, createMockSystem } from '../src/mock.js';
 import { detectPlatform, nvidiaSmiCandidates, resolveNvidiaSmi } from '../src/platform.js';
-import { createSystemCollector, parseMeminfo, parseNetDev, cpuUsagePct } from '../src/system.js';
+import { createSystemCollector, parseDiskSpec, parseMeminfo, parseNetDev, cpuUsagePct } from '../src/system.js';
 import { createCollector, resolveCadence } from '../src/collector.js';
 import { createSqliteStore } from '../src/store/sqlite-store.js';
 import { createMemoryStore, createStore, describeStorageError } from '../src/store/store.js';
@@ -466,6 +466,28 @@ assert.equal(win.load, null);
 assert.equal(win.net, null);
 assert.ok(win.unsupported.includes('swap') && win.unsupported.includes('load') && win.unsupported.includes('net'));
 assert.ok(Array.isArray(win.disk));
+
+/* ---------- 宿主磁盘：--disk 支持"路径=显示名" ---------- */
+// 容器里宿主的根分区只能挂到某个路径下（比如 /hostfs），直接拿它当标签，
+// 页面上就会出现「磁盘 /hostfs」——数字是对的，但看着像另一块盘。
+assert.deepEqual(parseDiskSpec('/'), { path: '/', label: '/' }, '不写显示名时标签就是路径本身');
+assert.deepEqual(parseDiskSpec('/hostfs=/'), { path: '/hostfs', label: '/' }, '容器场景：显示成宿主真实的 /');
+assert.deepEqual(parseDiskSpec('  /data = 数据盘  '), { path: '/data', label: '数据盘' }, '两边的空白要去掉');
+assert.equal(parseDiskSpec('/hostfs=').label, '/hostfs', '显示名留空就退回路径，不显示空标签');
+assert.equal(parseDiskSpec(''), null);
+assert.equal(parseDiskSpec('   '), null);
+
+// 真走一遍采集：显示名要跟着出来，path 仍然是拿去做 statfs 的那个
+const labeledSystem = createSystemCollector({
+  platform: 'linux',
+  diskTargets: ['/=宿主根分区'],
+  readFile: async (file) => (String(file).includes('meminfo') ? proc.meminfo : proc.netdev),
+});
+const labeled = await labeledSystem.sample();
+assert.equal(labeled.disk.length, 1);
+assert.equal(labeled.disk[0].path, '/', 'path 是真正 statfs 的路径');
+assert.equal(labeled.disk[0].label, '宿主根分区', '页面上显示的是显示名');
+assert.ok(labeled.disk[0].totalMiB > 0, '根分区应该有容量');
 
 /* ---------- 空闲降频调度 ---------- */
 const cadenceArgs = { intervalMs: 1000, idleAfterMs: 30000, idleIntervalMs: 10000 };

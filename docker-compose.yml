@@ -66,9 +66,10 @@ services:
       - --store-interval
       - "5000"
       # 容器里的 / 是 overlay 层，报它没有意义；/hostfs 才是宿主根分区。
-      # 宿主别的挂载点（比如 /data）照这个格式再加两行即可：- --disk  /hostfs/data
+      # "路径=显示名" 这个写法只是为了标签好看：页面照实显示成 `/`，而不是 `/hostfs`。
+      # 宿主别的挂载点（比如 /data）照这个格式再加两行：- --disk  /hostfs/data=/data
       - --disk
-      - "${DISK:-/hostfs}"
+      - "${DISK:-/hostfs=/}"
 
     volumes:
       # 代码只读挂载：容器不碰代码，升级就是 git pull + restart

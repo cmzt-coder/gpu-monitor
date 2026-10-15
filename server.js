@@ -53,7 +53,8 @@ const HELP = `GPU 显存负载监控服务
       --interval <毫秒>   采集间隔（默认 1000）
       --window <采样点数> 内存中保留的采样点数，也就是页面曲线的窗口（默认 300）
       --nvidia-smi <路径> 手动指定 nvidia-smi，默认按平台自动探测
-      --disk <路径>       额外监控的挂载点，可重复（默认 POSIX 为 /，Windows 为系统盘）
+      --disk <路径>[=显示名]  额外监控的挂载点，可重复（默认 POSIX 为 /，Windows 为系统盘）
+                          显示名只影响页面标签，例如容器里 --disk /hostfs=/ 会显示成 /
       --no-system         关掉宿主 CPU / 内存 / 磁盘 / 网络采集
       --no-extended       关掉扩展 GPU 指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流原因）
       --idle-after <秒>   多久没有页面访问就转入空闲降频（默认 30，0 表示不限）

@@ -1265,7 +1265,8 @@ function renderSystemCard() {
 
   for (const disk of system.disk || []) {
     refs.sysDetail.appendChild(sysDetailRow(
-      `磁盘 ${disk.path}`,
+      // 显示名优先：容器里宿主的根分区挂成了 /hostfs，可以按实情写成 /
+      `磁盘 ${disk.label || disk.path}`,
       `${fmtGiB(disk.usedMiB)} / ${fmtGiB(disk.totalMiB)}（${fmtPct(disk.usedPct, 1)}）`,
     ));
   }

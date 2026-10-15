@@ -75,14 +75,39 @@ function defaultDiskTargets(platform) {
   return ['/'];
 }
 
+/**
+ * 解析 `--disk` 的取值：`<路径>` 或 `<路径>=<显示名>`。
+ *
+ * 显示名是为容器场景准备的：宿主的根分区在容器里只能挂到某个路径下（比如 /hostfs），
+ * 直接拿它当标签，页面上就会出现「磁盘 /hostfs」——数字是对的，但看着像另一块盘。
+ * 写成 `--disk /hostfs=/` 就能照实显示成 `/`。
+ *
+ * @returns {{ path: string, label: string } | null} 空串/空白返回 null
+ */
+export function parseDiskSpec(spec) {
+  const raw = String(spec ?? '').trim();
+  if (!raw) return null;
+  const at = raw.indexOf('=');
+  if (at <= 0) return { path: raw, label: raw };
+  const path = raw.slice(0, at).trim();
+  if (!path) return null;
+  const label = raw.slice(at + 1).trim();
+  // 显示名留空就退回路径本身，不显示一个空标签
+  return { path, label: label || path };
+}
+
 async function readDisk(target) {
+  const spec = typeof target === 'string' ? parseDiskSpec(target) : target;
+  if (!spec) return null;
   try {
-    const stat = await fs.statfs(target);
+    const stat = await fs.statfs(spec.path);
     const totalBytes = stat.blocks * stat.bsize;
     const usedBytes = Math.max(0, (stat.blocks - stat.bfree) * stat.bsize);
     const freeBytes = stat.bavail * stat.bsize;
     return {
-      path: target,
+      path: spec.path,
+      // 页面上显示的名字：默认就是路径，容器场景可以另给
+      label: spec.label || spec.path,
       totalMiB: totalBytes / BYTES_PER_MIB,
       usedMiB: usedBytes / BYTES_PER_MIB,
       freeMiB: freeBytes / BYTES_PER_MIB,
