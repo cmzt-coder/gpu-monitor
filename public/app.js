@@ -3,7 +3,7 @@ import { utilKpiView } from './kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from './gpu-card-parts.js';
 import { hoverIndexFromX, hoverRows } from './chart-hover.js';
 import { statusView } from './status-pill.js';
-import { getLang, initI18n, onLangChange, setLang, t, tn } from './i18n/index.js';
+import { getLang, hasKey, initI18n, onLangChange, setLang, t, tn } from './i18n/index.js';
 import { applyStaticI18n, syncLangSwitch } from './i18n/dom.js';
 import { backendText } from './backend-text.js';
 
@@ -625,7 +625,8 @@ function fmtThreshold(rule) {
 function describeRule(rule) {
   const parts = [];
   // 规则自己起了名字时，条件里要写出指标名，否则"显存过高"没说清盯的是哪个指标
-  const subject = rule.label === rule.metricLabel ? '' : `${rule.metricLabel} `;
+  // 指标名走 metricDisplayName：自定义 label 的用户也可能在看英文界面
+  const subject = hasCustomLabel(rule) ? `${metricDisplayName(rule)} ` : '';
   parts.push(`${subject}${rule.op} ${fmtThreshold(rule)}`);
   if (rule.service) parts.push(t('alerts.rule.onlyService', { service: rule.service }));
   parts.push(rule.effectiveForMs > 0
@@ -633,6 +634,29 @@ function describeRule(rule) {
     : t('alerts.rule.instant'));
   if (rule.clamped) parts.push(t('alerts.rule.clamped', { duration: fmtForMs(rule.forMs) }));
   return parts.join(t('common.listSeparator'));
+}
+
+/** 用户有没有给这条规则写自己的 label（没写时后端会填内置指标名） */
+function hasCustomLabel(rule) {
+  return Boolean(rule.label) && rule.label !== rule.metricLabel;
+}
+
+/** 指标名：按 metric 标识符查翻译，查不到退回后端给的原文 */
+function metricDisplayName(rule) {
+  const key = `alerts.metric.${rule.metric}`;
+  return hasKey(key) ? t(key) : (rule.metricLabel || rule.metric || '--');
+}
+
+/**
+ * 规则显示名。
+ *
+ * 后端下发的 `label` 有两种来源（见 src/alerts/rules.js）：用户自己在 alerts.json 里写的，
+ * 或者内置指标的默认中文名。前者是**用户数据**，切语言时原样保留——把它翻掉等于改用户的东西；
+ * 后者是界面文案，按 metric 标识符查翻译（标识符是稳定的英文键）。
+ * 判据：label 与 metricLabel（后端给的内置名）一致 → 说明用户没写 label。
+ */
+function ruleDisplayName(rule) {
+  return hasCustomLabel(rule) ? rule.label : metricDisplayName(rule);
 }
 
 function renderAlerts(meta) {
@@ -748,11 +772,11 @@ function renderAlerts(meta) {
     const text = document.createElement('span');
     text.className = 'alerts__rule-text';
     const name = document.createElement('b');
-    name.textContent = rule.label;
+    name.textContent = ruleDisplayName(rule);
     const condition = document.createElement('span');
     condition.className = 'alerts__rule-cond';
     // 规则名就是指标名时不加冒号：读起来就是"显存占用率 >= 85%，持续 4 分钟"一句完整的话
-    condition.textContent = rule.label === rule.metricLabel
+    condition.textContent = !hasCustomLabel(rule)
       ? ` ${describeRule(rule)}`
       : t('alerts.rule.condWithName', { condition: describeRule(rule) });
     text.append(name, condition);
