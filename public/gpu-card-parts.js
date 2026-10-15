@@ -37,6 +37,70 @@ export function throttleParts(gpu) {
 }
 
 /**
+ * 每张卡的「运行指标」那一行要写什么。
+ *
+ * 导航模式（紧凑版）下换成短标签：8 张卡平铺时这一行会折成两行，而"每张卡多一行"
+ * 摊到 8 张卡就是多一屏。短标签把「GPU 利用率」缩成「利用率」这种写法，完整说法
+ * 放进 title——鼠标一停还是看得到原文。单页模式保持全称不变。
+ *
+ * @param {object} gpu
+ * @param {{ dense?: boolean, fmtPct?: (v: number|null, digits?: number) => string }} [options]
+ * @returns {Array<{ key: string, text: string|null, title?: string }>} text 为 null 表示这项没有数据，调用方应整项隐藏
+ */
+export function gpuFootItems(gpu, { dense = false, fmtPct = (v, digits = 0) => (v == null ? '--' : `${v.toFixed(digits)}%`) } = {}) {
+  const items = [];
+
+  items.push(dense
+    ? { key: 'util', text: `利用率 ${fmtPct(gpu.utilGpuPct, 0)}`, title: 'GPU 利用率' }
+    : { key: 'util', text: `GPU 利用率 ${fmtPct(gpu.utilGpuPct, 0)}` });
+
+  items.push(dense
+    ? { key: 'mem-util', text: `带宽 ${fmtPct(gpu.utilMemPct, 0)}`, title: '显存带宽占用' }
+    : { key: 'mem-util', text: `显存带宽占用 ${fmtPct(gpu.utilMemPct, 0)}` });
+
+  items.push(gpu.tempC == null
+    ? { key: 'temp', text: '温度 --' }
+    : { key: 'temp', text: `温度 ${Math.round(gpu.tempC)}°C`, title: dense ? 'GPU 温度' : undefined });
+
+  if (gpu.powerW == null) {
+    items.push({ key: 'power', text: '功耗 --' });
+  } else if (gpu.powerLimitW == null) {
+    items.push({ key: 'power', text: `功耗 ${Math.round(gpu.powerW)} W` });
+  } else {
+    // 紧凑版把两次单位合并成 `239/700 W`，省下的宽度正好够这一行不折行
+    items.push(dense
+      ? { key: 'power', text: `功耗 ${Math.round(gpu.powerW)}/${Math.round(gpu.powerLimitW)} W`, title: '功耗（当前 / 上限）' }
+      : { key: 'power', text: `功耗 ${Math.round(gpu.powerW)} W / ${Math.round(gpu.powerLimitW)} W` });
+  }
+
+  items.push(gpu.clockSmMHz == null
+    ? { key: 'clock', text: null }
+    : {
+      key: 'clock',
+      // 紧凑版省掉 "SM"（这张卡只有 SM 时钟这一个时钟指标），保留单位
+      text: `${dense ? '时钟' : 'SM 时钟'} ${Math.round(gpu.clockSmMHz)} MHz`,
+      title: dense ? 'SM 时钟（MHz）' : undefined,
+    });
+
+  items.push({ key: 'pstate', text: gpu.pstate ? (dense ? gpu.pstate : `P-State ${gpu.pstate}`) : null, title: dense && gpu.pstate ? 'P-State' : undefined });
+
+  items.push(gpu.fanPct == null
+    ? { key: 'fan', text: null }
+    : { key: 'fan', text: `风扇 ${Math.round(gpu.fanPct)}%` });
+
+  const hasEncdec = gpu.encUtilPct != null || gpu.decUtilPct != null;
+  const enc = fmtPct(gpu.encUtilPct, 0);
+  const dec = fmtPct(gpu.decUtilPct, 0);
+  items.push({
+    key: 'encdec',
+    text: hasEncdec ? (dense ? `编解码 ${enc}/${dec}` : `编解码 ${enc} / ${dec}`) : null,
+    title: hasEncdec && dense ? '编码 / 解码占用' : undefined,
+  });
+
+  return items;
+}
+
+/**
  * 硬件健康那一行要写什么（显存纠错 ECC + 行重映射 + XID）。
  *
  * 关键不是"有没有错"，而是"有没有在涨"：aggregate 是终身累计、volatile 是本次驱动

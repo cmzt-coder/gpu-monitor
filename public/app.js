@@ -1,6 +1,6 @@
 import { resampleToGrid } from './resample.js';
 import { utilKpiView } from './kpi-util.js';
-import { throttleParts, healthParts } from './gpu-card-parts.js';
+import { throttleParts, healthParts, gpuFootItems } from './gpu-card-parts.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -35,6 +35,9 @@ const refs = {
   exportCancel: $('export-cancel'),
   exportConfirm: $('export-confirm'),
   exportContent: $('export-content'),
+  exportLayoutGroup: $('export-layout-group'),
+  exportLayout: $('export-layout'),
+  exportLayoutHint: $('export-layout-hint'),
   exportRangeGroup: $('export-range-group'),
   exportRange: $('export-range'),
   exportRangeHint: $('export-range-hint'),
@@ -1381,33 +1384,19 @@ function renderGpuCards() {
     fill.style.width = pct == null ? '0%' : `${Math.min(100, pct).toFixed(1)}%`;
     fill.dataset.tone = toneFor(pct) || '';
 
-    card.querySelector('[data-role="util"]').textContent = `GPU 利用率 ${fmtPct(gpu.utilGpuPct, 0)}`;
-    card.querySelector('[data-role="mem-util"]').textContent = `显存带宽占用 ${fmtPct(gpu.utilMemPct, 0)}`;
-    const tempNode = card.querySelector('[data-role="temp"]');
-    tempNode.textContent = gpu.tempC == null ? '温度 --' : `温度 ${Math.round(gpu.tempC)}°C`;
-    tempNode.dataset.tone = tempTone(gpu.tempC) || '';
-    card.querySelector('[data-role="power"]').textContent = gpu.powerW == null
-      ? '功耗 --'
-      : `功耗 ${Math.round(gpu.powerW)} W${gpu.powerLimitW == null ? '' : ` / ${Math.round(gpu.powerLimitW)} W`}`;
-
-    // 扩展指标：驱动不支持时整行隐藏，而不是显示一排 "--"
-    const clockNode = card.querySelector('[data-role="clock"]');
-    const hasClock = gpu.clockSmMHz != null;
-    clockNode.hidden = !hasClock;
-    if (hasClock) clockNode.textContent = `SM 时钟 ${Math.round(gpu.clockSmMHz)} MHz`;
-
-    const pstateNode = card.querySelector('[data-role="pstate"]');
-    pstateNode.hidden = !gpu.pstate;
-    if (gpu.pstate) pstateNode.textContent = `P-State ${gpu.pstate}`;
-
-    const fanNode = card.querySelector('[data-role="fan"]');
-    fanNode.hidden = gpu.fanPct == null;
-    if (gpu.fanPct != null) fanNode.textContent = `风扇 ${Math.round(gpu.fanPct)}%`;
-
-    const encdecNode = card.querySelector('[data-role="encdec"]');
-    const hasEncdec = gpu.encUtilPct != null || gpu.decUtilPct != null;
-    encdecNode.hidden = !hasEncdec;
-    if (hasEncdec) encdecNode.textContent = `编解码 ${fmtPct(gpu.encUtilPct, 0)} / ${fmtPct(gpu.decUtilPct, 0)}`;
+    // 运行指标那一行：写什么交给 gpuFootItems()（纯函数，单独测）。
+    // 导航模式下它给的是短标签，好让这一行不折行——8 张卡各少一行就是少一屏。
+    for (const item of gpuFootItems(gpu, { dense: state.dense, fmtPct })) {
+      const node = card.querySelector(`[data-role="${item.key}"]`);
+      // 驱动不支持这项时整项隐藏，而不是显示一排 "--"
+      node.hidden = item.text == null;
+      if (item.text == null) continue;
+      node.textContent = item.text;
+      // 短标签把完整说法放 title，鼠标一停还是看得到原文
+      if (item.title) node.title = item.title;
+      else node.removeAttribute('title');
+    }
+    card.querySelector('[data-role="temp"]').dataset.tone = tempTone(gpu.tempC) || '';
 
     // 导航模式（紧凑版）下，一切正常时把「无节流」并进硬件健康行尾，不再单开一行——
     // 8 张卡铺开就是 8 行"无节流"，那是整整一行在说"没出事"。真在降频、或驱动
@@ -2116,6 +2105,8 @@ const EXPORT_ITEMS = [
     desc: '每行 = 一个采样点 × 一张卡：显存占用、利用率、温度、功耗',
     path: '/api/export.csv',
     format: 'CSV',
+    // 同一份数据可以按两种布局导出：长表（每行一卡）或宽表（每张卡各占一组列）
+    layout: true,
     range: true,
     full: true,
   },
@@ -2157,7 +2148,12 @@ const EXPORT_RANGES = [
   { value: 'all', label: '全部' },
 ];
 
-const exportChoice = { content: 'gpu', range: 'follow', full: false };
+const exportChoice = { content: 'gpu', layout: 'long', range: 'follow', full: false };
+
+const EXPORT_LAYOUTS = [
+  { value: 'long', label: '长表' },
+  { value: 'wide', label: '宽表' },
+];
 
 function exportItem() {
   return EXPORT_ITEMS.find((item) => item.id === exportChoice.content) || EXPORT_ITEMS[0];
@@ -2237,6 +2233,24 @@ function renderExportRange() {
   }
 }
 
+function renderExportLayout() {
+  refs.exportLayout.replaceChildren();
+  for (const item of EXPORT_LAYOUTS) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chip';
+    button.textContent = item.label;
+    button.dataset.value = item.value;
+    button.setAttribute('aria-pressed', item.value === exportChoice.layout ? 'true' : 'false');
+    button.addEventListener('click', () => {
+      exportChoice.layout = item.value;
+      renderExportLayout();
+      syncExportPanel();
+    });
+    refs.exportLayout.appendChild(button);
+  }
+}
+
 /** 浏览器（也就是看页面的人）所在的时区；取不到就返回空串 */
 function ownTimeZone() {
   try {
@@ -2273,7 +2287,14 @@ function exportTimeHint() {
 function syncExportPanel() {
   const item = exportItem();
   const canRange = item.range === true;
-  const canFull = item.full === true && historyAvailable();
+  const wide = item.layout === true && exportChoice.layout === 'wide';
+  // 宽表会变成"每张卡各占一组列"，列数随卡数增长，所以它只带基础指标
+  const canFull = item.full === true && historyAvailable() && !wide;
+
+  refs.exportLayoutGroup.hidden = item.layout !== true;
+  refs.exportLayoutHint.textContent = wide
+    ? '一行一个采样点，每张卡各占一组列（gpu0_mem_used_mib、gpu1_mem_used_mib…）：在 Excel 里横向对比多张卡最方便，列数随卡数增长，所以只带基础指标'
+    : '一行 = 一个采样点 × 一张卡，所有列都是同一套字段名：适合丢给脚本按 gpu_index 过滤';
 
   refs.exportRangeGroup.dataset.disabled = canRange ? 'false' : 'true';
   for (const button of refs.exportRange.querySelectorAll('.chip')) button.disabled = !canRange;
@@ -2284,16 +2305,19 @@ function syncExportPanel() {
   refs.exportFullGroup.dataset.disabled = canFull ? 'false' : 'true';
   refs.exportFull.disabled = !canFull;
   if (!canFull) exportChoice.full = false;
-  refs.exportFullHint.textContent = item.full
-    ? (historyAvailable()
-      ? '扩展字段只存在历史库里，导出会比基础列多一点时间（流式写出）'
-      : '需要历史库：当前不可用，只导出基础列')
-    : '只有 GPU 曲线有扩展指标';
+  refs.exportFullHint.textContent = !item.full
+    ? '只有 GPU 曲线有扩展指标'
+    : (wide
+      ? '宽表只导出基础指标（列数会随卡数增长）；要扩展字段请把上面的布局切回长表'
+      : (historyAvailable()
+        ? '扩展字段只存在历史库里，导出会比基础列多一点时间（流式写出）'
+        : '需要历史库：当前不可用，只导出基础列'));
 
   // 时间列有两列，说清楚各自是谁——否则用 Excel 打开看到的是 UTC，会以为数据错了
   refs.exportTimeHint.textContent = item.format === 'CSV' ? exportTimeHint() : '';
 
   const parts = [`${item.label}（${item.format}）`];
+  if (wide) parts.push('宽表');
   if (canFull && exportChoice.full) parts.push('含扩展指标');
   if (canRange) parts.push(rangeLabelOf(exportChoice.range));
   refs.exportSummary.textContent = `将导出：${parts.join(' · ')}`;
@@ -2302,9 +2326,11 @@ function syncExportPanel() {
 
 function openExportPanel() {
   exportChoice.content = 'gpu';
+  exportChoice.layout = 'long';
   exportChoice.range = 'follow';
   exportChoice.full = false;
   renderExportContent();
+  renderExportLayout();
   renderExportRange();
   syncExportPanel();
   if (typeof refs.exportDialog.showModal === 'function') refs.exportDialog.showModal();
@@ -2337,6 +2363,7 @@ refs.exportFull.addEventListener('change', () => {
 refs.exportConfirm.addEventListener('click', () => {
   const item = exportItem();
   const params = item.range ? exportRangeParams() : new URLSearchParams();
+  if (item.layout === true && exportChoice.layout === 'wide') params.set('layout', 'wide');
   if (item.id === 'gpu' && exportChoice.full) params.set('fields', 'full');
   closeExportPanel();
   triggerDownload(item.path, params);

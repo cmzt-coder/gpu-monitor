@@ -23,8 +23,11 @@ import {
   processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
+  samplesToWideCsv,
   shouldWarnUtcTimeZone,
   systemRowToCsv,
+  wideGpuCsvHeader,
+  wideGpuCsvRow,
 } from './src/export.js';
 import { createMockSource, createMockSystem } from './src/mock.js';
 import { detectPlatform } from './src/platform.js';
@@ -402,6 +405,26 @@ function* gpuCsvLines({ from, to }, step, { full = false } = {}) {
   }
 }
 
+/**
+ * 宽表的流式写法：把同一时刻的多张卡攒齐了再吐一行。
+ *
+ * `gpuPages` 是按 ts 升序给的，所以只需要攒"当前这一拍"——同一时刻的卡一定挨在一起，
+ * 不需要把整个区间读进内存（90 天 × 8 卡是几十万行）。攒的行数最多等于卡数。
+ */
+function* wideGpuLines({ from, to }, step, indexes) {
+  let currentTs = null;
+  let bucket = [];
+  for (const row of store.gpuPages({ from, to, step })) {
+    if (currentTs !== null && row.ts !== currentTs) {
+      yield wideGpuCsvRow(currentTs, bucket, indexes);
+      bucket = [];
+    }
+    currentTs = row.ts;
+    bucket.push(gpuFromRow(row));
+  }
+  if (currentTs !== null) yield wideGpuCsvRow(currentTs, bucket, indexes);
+}
+
 function* systemCsvLines({ from, to }, step) {
   for (const row of store.hostPages({ from, to, step })) {
     yield systemRowToCsv(row.ts, systemFromRow(row));
@@ -608,6 +631,16 @@ const server = http.createServer(async (req, res) => {
     // fields=full 会带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流这些扩展列，
     // 它们只存在历史库里（内存窗口只留了画曲线要用的字段），所以没有库就直接说清楚
     const full = url.searchParams.get('fields') === 'full';
+    // 宽表：一行一个采样点，每张卡各占一组列（Excel 里横向比卡更方便）。
+    // 列数随卡数线性增长，所以只带基础指标——想连扩展字段一起导就用长表。
+    const wide = url.searchParams.get('layout') === 'wide';
+    if (wide && full) {
+      sendJson(res, 400, {
+        error: 'wide_layout_basic_only',
+        message: '宽表只导出基础指标（列数随卡数增长）；要扩展字段请把布局切回长表',
+      });
+      return;
+    }
     if (full && !store.supportsHistory) {
       sendJson(res, 400, {
         error: 'full_fields_unavailable',
@@ -626,19 +659,22 @@ const server = http.createServer(async (req, res) => {
     const exportFromStore = Boolean(exportRange && store.supportsHistory);
     if (exportFromStore) {
       const step = store.resolveStep(exportRange.from, exportRange.to, exportRange.requestedStep);
+      // 宽表的表头要在流式输出前定下来，所以卡号取自"当前还在的卡"（监控场景下卡是稳定的）
+      const indexes = collector.getState().gpus.map((gpu) => gpu.index).sort((a, b) => a - b);
       await streamCsv(
         res,
-        `gpu-monitor${full ? '-full' : ''}-${nodeId}-${stamp()}.csv`,
-        full ? GPU_CSV_HEADER_FULL : GPU_CSV_HEADER,
-        gpuCsvLines(exportRange, step, { full }),
+        `gpu-monitor${wide ? '-wide' : full ? '-full' : ''}-${nodeId}-${stamp()}.csv`,
+        wide ? wideGpuCsvHeader(indexes) : (full ? GPU_CSV_HEADER_FULL : GPU_CSV_HEADER),
+        wide ? wideGpuLines(exportRange, step, indexes) : gpuCsvLines(exportRange, step, { full }),
       );
       return;
     }
+    const memorySamples = collector.getSamples(limitFrom(url));
     sendDownload(
       res,
-      `gpu-monitor-${nodeId}-${stamp()}.csv`,
+      `gpu-monitor${wide ? '-wide' : ''}-${nodeId}-${stamp()}.csv`,
       'text/csv; charset=utf-8',
-      `\uFEFF${samplesToCsv(collector.getSamples(limitFrom(url)))}`,
+      `\uFEFF${wide ? samplesToWideCsv(memorySamples) : samplesToCsv(memorySamples)}`,
     );
     return;
   }

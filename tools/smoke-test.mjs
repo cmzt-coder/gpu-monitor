@@ -15,7 +15,7 @@ import {
 import { createXidTracker, parseXidLines, readKernelLog } from '../src/xid.js';
 import { resampleToGrid } from '../public/resample.js';
 import { utilKpiView, UTIL_WINDOW_MS } from '../public/kpi-util.js';
-import { throttleParts, healthParts } from '../public/gpu-card-parts.js';
+import { throttleParts, healthParts, gpuFootItems } from '../public/gpu-card-parts.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -29,9 +29,12 @@ import {
   processRowToCsv,
   samplesToCsv,
   samplesToSystemCsv,
+  samplesToWideCsv,
   serverTimeZone,
   shouldWarnUtcTimeZone,
   systemRowToCsv,
+  gpuIndexesOf,
+  wideGpuCsvHeader,
 } from '../src/export.js';
 import { createMockSource, createMockSystem } from '../src/mock.js';
 import { detectPlatform, nvidiaSmiCandidates, resolveNvidiaSmi } from '../src/platform.js';
@@ -294,6 +297,47 @@ assert.ok(
   lines[1].startsWith(`${formatTimestamp(Date.UTC(2026, 8, 30, 1, 2, 3)).local},2026-09-30T01:02:03.000Z,`),
   `数据行前两列应是本地时间 + UTC：${lines[1]}`,
 );
+
+/* ---------- 导出：宽表布局（一行一个采样点，每张卡各占一组列） ---------- */
+const wideSamples = [
+  {
+    t: Date.UTC(2026, 8, 30, 1, 2, 3),
+    gpus: [
+      { index: 0, memUsedMiB: 100, memUsedPct: 10, utilGpuPct: 20, utilMemPct: 30, tempC: 40, powerW: 50 },
+      { index: 1, memUsedMiB: 200, memUsedPct: 20, utilGpuPct: 21, utilMemPct: 31, tempC: 41, powerW: 51 },
+    ],
+  },
+  {
+    t: Date.UTC(2026, 8, 30, 1, 2, 4),
+    // 这一拍只有 0 号卡在（卡被拔掉 / 那一刻读不到都是这种形状）
+    gpus: [{ index: 0, memUsedMiB: 101, memUsedPct: 11, utilGpuPct: 22, utilMemPct: 32, tempC: 42, powerW: 52 }],
+  },
+];
+const perGpuColumns = 6;
+assert.equal(
+  wideGpuCsvHeader([0, 1]).split(',').length,
+  2 + 2 * perGpuColumns,
+  '宽表是一行一个采样点：两张卡就该有两组列',
+);
+assert.ok(
+  wideGpuCsvHeader([0, 1]).startsWith('time_local,timestamp_iso,gpu0_mem_used_mib,gpu0_mem_used_pct,gpu0_util_gpu_pct'),
+  '列名沿用长表的字段名，只加 gpu<序号>_ 前缀',
+);
+assert.ok(wideGpuCsvHeader([0, 1]).includes('gpu1_power_w'), '第二张卡也要有自己的列');
+
+const wideCsv = samplesToWideCsv(wideSamples);
+const wideLines = wideCsv.trim().split('\n');
+assert.equal(wideLines.length, 3, '表头 + 两拍数据 = 三行（长表在这里会是四行）');
+assert.equal(wideLines[1].split(',').length, 2 + 2 * perGpuColumns, '每个数据行的列数要和表头一致');
+assert.equal(wideLines[1].split(',')[2], '100', '第一拍 0 号卡的显存占用');
+assert.equal(wideLines[1].split(',')[8], '200', '第一拍 1 号卡的显存占用（紧跟在 0 号卡那组后面）');
+assert.deepEqual(
+  wideLines[2].split(',').slice(8),
+  Array(perGpuColumns).fill(''),
+  '这一拍没有 1 号卡的数据，该组留空而不是补 0',
+);
+assert.deepEqual(gpuIndexesOf(wideSamples), [0, 1], '卡号从采样点里自动收集并升序排列');
+assert.equal(samplesToWideCsv([]).trim().split('\n').length, 1, '没有数据时只输出表头');
 
 const systemCsv = samplesToSystemCsv([
   { t: Date.UTC(2026, 8, 30, 1, 2, 3), system: null },
@@ -771,6 +815,41 @@ assert.equal(xidFatal.tone, 'danger');
 assert.ok(xidFatal.parts[0].includes('XID 79'), 'XID 编号要写出来，别只说"有错误"');
 assert.ok(xidFatal.parts[0].includes('10 分钟前'), '要说清最近一次是什么时候，方便对着时间线看');
 assert.equal(healthParts({ xid: { count: 1, lastCode: 12345 } }).tone, 'warning');
+
+/* ---------- 各卡当前占用：指标行的标签（导航模式用短标签） ---------- */
+// 8 张卡平铺时这一行会折成两行，每张卡多一行、整页就多一屏，所以导航模式换短标签。
+// 这里钉住两件事：单页模式一个字符都不变；短标签必须留得住信息（单位、比值、全称提示）。
+const footGpu = {
+  utilGpuPct: 89, utilMemPct: 18, tempC: 36, powerW: 239, powerLimitW: 700,
+  clockSmMHz: 1980, pstate: 'P0', fanPct: null, encUtilPct: 0, decUtilPct: 0,
+};
+assert.deepEqual(
+  gpuFootItems(footGpu).map((item) => item.text),
+  ['GPU 利用率 89%', '显存带宽占用 18%', '温度 36°C', '功耗 239 W / 700 W', 'SM 时钟 1980 MHz', 'P-State P0', null, '编解码 0% / 0%'],
+  '单页模式保持全称不变',
+);
+const denseFoot = gpuFootItems(footGpu, { dense: true });
+assert.deepEqual(
+  denseFoot.map((item) => item.text),
+  ['利用率 89%', '带宽 18%', '温度 36°C', '功耗 239/700 W', '时钟 1980 MHz', 'P0', null, '编解码 0%/0%'],
+);
+assert.equal(denseFoot[0].title, 'GPU 利用率', '短标签要把全称放在 title 里，鼠标一停能看原文');
+assert.equal(denseFoot[1].title, '显存带宽占用');
+assert.equal(denseFoot[4].title, 'SM 时钟（MHz）', '省掉 "SM" 要在提示里补回来');
+assert.equal(denseFoot[5].title, 'P-State');
+assert.ok(denseFoot[1].text.length < gpuFootItems(footGpu)[1].text.length, '紧凑版确实更短');
+
+// 没数据的项返回 text: null，调用方整项隐藏，而不是显示一排 "--"
+const bareFoot = gpuFootItems({}, { dense: true });
+assert.deepEqual(
+  bareFoot.filter((item) => item.text === null).map((item) => item.key),
+  ['clock', 'pstate', 'fan', 'encdec'],
+);
+assert.equal(bareFoot.find((item) => item.key === 'temp').text, '温度 --');
+// 功耗上限读不到时只写当前值；风扇有数据时照常写出来
+assert.equal(gpuFootItems({ powerW: 100 }).find((item) => item.key === 'power').text, '功耗 100 W');
+assert.equal(gpuFootItems({ powerW: 100 }, { dense: true }).find((item) => item.key === 'power').text, '功耗 100 W');
+assert.equal(gpuFootItems({ fanPct: 51 }, { dense: true }).find((item) => item.key === 'fan').text, '风扇 51%');
 
 /* ---------- 前端：导航模式的紧凑顶栏（静态结构） ---------- */
 // 顶栏瘦身靠"导航模式打 data-dense，CSS 认这个属性"来落地，这里守住几条一改就坏的约定：
@@ -2635,7 +2714,7 @@ process.stdout.write(
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
   + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
-  + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流与硬件健康的行内判定 / '
+  + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流·健康·指标标签的行内判定 / 导出宽表布局 / '
   + '导航模式紧凑顶栏（结构约定）/ '
   + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）/ '
   + '--tz 固定时区（系统时区是 UTC 时的回归）\n',

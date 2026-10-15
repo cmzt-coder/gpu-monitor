@@ -162,6 +162,69 @@ export function samplesToCsv(samples, { full = false } = {}) {
   return `${rows.join('\n')}\n`;
 }
 
+/**
+ * 宽表布局：一行一个采样点，每张卡各占一组列（`gpu0_mem_used_mib`、`gpu0_util_gpu_pct`…）。
+ *
+ * 长表（上面的 samplesToCsv）一行是"某个时刻的一张卡"，在 Excel 里想比八张卡得先透视一遍；
+ * 宽表打开就是一张横向对比表。列名沿用长表的字段名，只是加了 `gpu<序号>_` 前缀，
+ * 这样拿同一个字段名去两边找都对得上。
+ *
+ * 代价是列数随卡数线性增长（8 卡 × 6 项 + 2 列时间 = 50 列），所以宽表只带基础指标，
+ * 不带扩展字段——所以它也不接 `full`。
+ */
+export const WIDE_GPU_METRICS = [
+  { field: 'mem_used_mib', pick: (gpu) => gpu.memUsedMiB },
+  { field: 'mem_used_pct', pick: (gpu) => round(gpu.memUsedPct, 2) },
+  { field: 'util_gpu_pct', pick: (gpu) => round(gpu.utilGpuPct, 1) },
+  { field: 'util_mem_pct', pick: (gpu) => round(gpu.utilMemPct, 1) },
+  { field: 'temp_c', pick: (gpu) => gpu.tempC },
+  { field: 'power_w', pick: (gpu) => gpu.powerW },
+];
+
+/** 从采样点里收集出现过的卡号（升序），宽表的列就按这个顺序排 */
+export function gpuIndexesOf(samples) {
+  const seen = new Set();
+  for (const sample of samples) {
+    for (const gpu of sample.gpus || []) seen.add(gpu.index);
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
+export function wideGpuCsvHeader(indexes) {
+  const columns = ['time_local', 'timestamp_iso'];
+  for (const index of indexes) {
+    for (const metric of WIDE_GPU_METRICS) columns.push(`gpu${index}_${metric.field}`);
+  }
+  return columns.join(',');
+}
+
+/** 宽表的一行：把同一时刻的多张卡拼成一行；那一刻没有数据的卡留空 */
+export function wideGpuCsvRow(ts, gpus, indexes) {
+  const byIndex = new Map(gpus.map((gpu) => [gpu.index, gpu]));
+  const { local, iso } = formatTimestamp(ts);
+  const cells = [local, iso];
+  for (const index of indexes) {
+    const gpu = byIndex.get(index);
+    for (const metric of WIDE_GPU_METRICS) {
+      if (!gpu) {
+        cells.push('');
+        continue;
+      }
+      const value = metric.pick(gpu);
+      cells.push(value == null ? '' : value);
+    }
+  }
+  return cells.join(',');
+}
+
+/** 内存里的采样点 → 宽表 CSV（历史库那条路是流式的，见 server.js 的 wideGpuLines） */
+export function samplesToWideCsv(samples, { indexes } = {}) {
+  const list = indexes ?? gpuIndexesOf(samples);
+  const rows = [wideGpuCsvHeader(list)];
+  for (const sample of samples) rows.push(wideGpuCsvRow(sample.t, sample.gpus || [], list));
+  return `${rows.join('\n')}\n`;
+}
+
 /** 单独一行 GPU 记录，供"按时间区间流式导出"复用（不必先把整段数据读进内存） */
 export function gpuRowToCsv(ts, gpu, { full = false } = {}) {
   const { local, iso } = formatTimestamp(ts);

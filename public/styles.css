@@ -332,7 +332,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .app[data-dense="1"] .work-grid .gpu-cards { gap: 14px 26px; margin-top: 12px; }
 .app[data-dense="1"] .gpu-card__mem { margin-top: 6px; }
 .app[data-dense="1"] .gpu-card .meter { margin-top: 8px; }
-.app[data-dense="1"] .gpu-card__foot { margin-top: 6px; font-size: 12px; gap: 4px 12px; }
+/* 间距也一起收：短标签配合更小的词间距，7 项指标才能在一行里排下（568px 的列宽下实测约 480px） */
+.app[data-dense="1"] .gpu-card__foot { margin-top: 6px; font-size: 12px; gap: 3px 8px; }
 .app[data-dense="1"] .gpu-card__health { margin-top: 5px; font-size: 12px; }
 .app[data-dense="1"] .gpu-card__chips { margin-top: 6px; }
 

@@ -79,7 +79,10 @@ export function createMockSource({
       const tempC = highLoad && card.index === 0 ? 88 : Math.round(42 + usedRatio * 38);
       // 扩展指标也一起模拟，这样 --mock 下能看到时钟 / P-State / 风扇 / 节流这几行
       const smClock = Math.round(1200 + usedRatio * 1350);
-      const fanPct = Math.round(Math.min(100, 25 + usedRatio * 65));
+      // 数据中心卡（A100/H200 这类）nvidia-smi 不给风扇转速，这里也照实留空——
+      // 真机上"扩展指标有几项"会直接影响各卡那一行折不折行，模拟数据不该比真机更全
+      const hasFan = !/A100|H100|H200|V100/.test(card.name);
+      const fanPct = hasFan ? Math.round(Math.min(100, 25 + usedRatio * 65)) : null;
       const thermalThrottle = tempC >= 83;
       return {
         index: card.index,
