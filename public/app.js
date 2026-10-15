@@ -3036,6 +3036,11 @@ async function boot() {
   // 每秒重写，所以不能挂 data-i18n——只能在这里主动渲染一次，否则英文界面在首帧数据
   // 到达前（正常不到 1 秒，服务异常时更久）会闪一段中文。
   render();
+  // 进程历史那几张卡不在 render() 的调用链里（它的数据源是独立的 /api/processes，
+  // 只在"进程身份变化"或手动刷新时重画），所以得单独铺一次——先标成"读取中"，
+  // 等 loadProcessHistory() 真正发起请求时会自己重画
+  state.processHistory.loading = true;
+  renderProcHistory();
   renderRangePicker();
   renderProcHistRange();
   renderProcHistMin();
