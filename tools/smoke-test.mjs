@@ -16,6 +16,7 @@ import { createXidTracker, parseXidLines, readKernelLog } from '../src/xid.js';
 import { resampleToGrid } from '../public/resample.js';
 import { utilKpiView, UTIL_WINDOW_MS } from '../public/kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from '../public/gpu-card-parts.js';
+import { hoverIndexFromX, hoverRows } from '../public/chart-hover.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -859,6 +860,59 @@ assert.equal(bareFoot.find((item) => item.key === 'temp').text, '温度 --');
 assert.equal(gpuFootItems({ powerW: 100 }).find((item) => item.key === 'power').text, '功耗 100 W');
 assert.equal(gpuFootItems({ powerW: 100 }, { dense: true }).find((item) => item.key === 'power').text, '功耗 100 W');
 assert.equal(gpuFootItems({ fanPct: 51 }, { dense: true }).find((item) => item.key === 'fan').text, '风扇 51%');
+
+/* ---------- 曲线悬停：鼠标位置 → 采样点索引、浮窗内容 ---------- */
+const hoverBase = { width: 558, padLeft: 6, padRight: 44 };   // 与 drawLines 里的 pad 保持一致
+const plotRight = hoverBase.width - hoverBase.padRight;
+
+// 满窗：最右边缘是最后一个点、左边缘是第一个点
+assert.equal(hoverIndexFromX({ ...hoverBase, x: plotRight, count: 300, slots: 300 }), 299, '右边缘 = 最新那个点');
+assert.equal(hoverIndexFromX({ ...hoverBase, x: hoverBase.padLeft, count: 300, slots: 300 }), 0, '左边缘 = 最旧那个点');
+assert.equal(
+  hoverIndexFromX({ ...hoverBase, x: hoverBase.padLeft + (plotRight - hoverBase.padLeft) / 2, count: 300, slots: 300 }),
+  149,
+  '正中间落在中间那个点（半个槽位四舍五入，归哪边都行）',
+);
+
+// 绘图区之外：右侧那段是百分比刻度文字占的，不该响应
+assert.equal(hoverIndexFromX({ ...hoverBase, x: plotRight + 10, count: 300, slots: 300 }), null);
+assert.equal(hoverIndexFromX({ ...hoverBase, x: 2, count: 300, slots: 300 }), null);
+assert.equal(hoverIndexFromX({ ...hoverBase, x: NaN, count: 300, slots: 300 }), null);
+assert.equal(hoverIndexFromX({ ...hoverBase, x: 100, count: 0, slots: 300 }), null, '一个点都没有时不该给索引');
+
+// 窗口还没攒满：数据只占右边一段，左边那段是空白（悬停在那儿什么都别显示）
+assert.equal(hoverIndexFromX({ ...hoverBase, x: 10, count: 30, slots: 300 }), null, '没攒满时左边那段没有数据');
+assert.equal(
+  hoverIndexFromX({ ...hoverBase, x: hoverBase.padLeft + (plotRight - hoverBase.padLeft) * (1 - 29 / 299), count: 30, slots: 300 }),
+  0,
+  '没攒满时最旧的那个点（贴着数据段的左端）',
+);
+assert.equal(hoverIndexFromX({ ...hoverBase, x: plotRight, count: 30, slots: 300 }), 29, '没攒满时右边缘仍是最新那个点');
+
+// 浮窗内容：时间 + 每个系列一行；断档处写"无数据"而不是 0
+const hoverView = hoverRows({
+  seriesList: [
+    { label: '显存占用', color: '#005bac', values: [10, 20, null], format: (value) => `${value.toFixed(1)}%` },
+    { label: '利用率', color: '#00a0e3', values: [30, null, 50], format: (value) => `${value.toFixed(0)}%` },
+  ],
+  times: [1000, 2000, 3000],
+  index: 1,
+  timeLabel: (ts) => `T${ts}`,
+});
+assert.deepEqual(hoverView, {
+  time: 'T2000',
+  rows: [
+    { label: '显存占用', color: '#005bac', value: '20.0%' },
+    { label: '利用率', color: '#00a0e3', value: '无数据' },
+  ],
+});
+assert.equal(hoverRows({ seriesList: [], times: [], index: null }), null, '没有悬停点就没有浮窗');
+assert.equal(hoverRows({ seriesList: [{ values: [1] }], times: [1000], index: 5 }).time, '无数据', '索引越界时时间也如实说');
+assert.equal(
+  hoverRows({ seriesList: [{ name: '容器 vllm', values: [7] }], times: [1000], index: 0 }).rows[0].label,
+  '容器 vllm',
+  '系列没给 label 时退回 name（服务曲线就是这样）',
+);
 
 /* ---------- 前端：导航模式的紧凑顶栏（静态结构） ---------- */
 // 顶栏瘦身靠"导航模式打 data-dense，CSS 认这个属性"来落地，这里守住几条一改就坏的约定：
@@ -2724,6 +2778,7 @@ process.stdout.write(
   + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
   + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流·健康·指标标签的行内判定 / 导出宽表布局 / '
+  + '曲线悬停（位置→索引·浮窗内容·空数据区） / '
   + '导航模式紧凑顶栏（结构约定）/ '
   + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）/ '
   + '--tz 固定时区（系统时区是 UTC 时的回归）\n',

@@ -1,6 +1,7 @@
 import { resampleToGrid } from './resample.js';
 import { utilKpiView } from './kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from './gpu-card-parts.js';
+import { hoverIndexFromX, hoverRows } from './chart-hover.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -46,6 +47,7 @@ const refs = {
   exportFullHint: $('export-full-hint'),
   exportTimeHint: $('export-time-hint'),
   exportSummary: $('export-summary'),
+  chartTip: $('chart-tip'),
   kpiCount: $('kpi-count'),
   kpiCountFoot: $('kpi-count-foot'),
   kpiMem: $('kpi-mem'),
@@ -815,16 +817,123 @@ function themeColors() {
   };
 }
 
+/* ---------- 曲线悬停：竖直参考线 + 跟随鼠标的浮窗 ---------- */
+// 状态按 canvas 存：hoverState 记鼠标当前落在哪个采样点上，chartHoverData 记这张图上次画
+// 的系列与时间轴。这样鼠标一动只重画这一张（8 卡时不会因为动鼠标把 8 张图全重绘），
+// 而每秒的常规重绘也会照着同一个索引把高亮画回去——鼠标停着不动时高亮不会闪掉。
+const hoverState = new Map();
+const chartHoverData = new Map();
+
+function chartHoverRedraw(canvas, index) {
+  if (index == null) hoverState.delete(canvas);
+  else hoverState.set(canvas, index);
+  const data = chartHoverData.get(canvas);
+  // 用同样的参数重画一次；此时 hoverState 已更新，画出来的就是新位置
+  if (data) drawLines(canvas, data.seriesList, data.windowSamples, { limit: data.limit, times: data.times });
+}
+
+function attachChartHover(canvas) {
+  canvas.addEventListener('pointermove', (event) => {
+    const data = chartHoverData.get(canvas);
+    if (!data) return;
+    const rect = canvas.getBoundingClientRect();
+    const count = data.seriesList[0]?.values.length || 0;
+    const index = hoverIndexFromX({
+      x: event.clientX - rect.left,
+      width: rect.width,
+      count,
+      slots: data.windowSamples,
+      padLeft: data.pad.left,
+      padRight: data.pad.right,
+    });
+    if (index !== (hoverState.get(canvas) ?? null)) chartHoverRedraw(canvas, index);
+    showChartTip(event, data, index);
+  });
+  canvas.addEventListener('pointerleave', () => {
+    chartHoverRedraw(canvas, null);
+    hideChartTip();
+  });
+}
+
+function hideChartTip() {
+  if (refs.chartTip) refs.chartTip.hidden = true;
+}
+
+function positionChartTip(event) {
+  const tip = refs.chartTip;
+  const rect = tip.getBoundingClientRect();
+  const gap = 14;
+  // 贴右边/下边时翻到另一侧，免得浮窗跑出窗口
+  let left = event.clientX + gap;
+  if (left + rect.width > window.innerWidth - 8) left = event.clientX - rect.width - gap;
+  let top = event.clientY + gap;
+  if (top + rect.height > window.innerHeight - 8) top = event.clientY - rect.height - gap;
+  tip.style.left = `${Math.max(8, left)}px`;
+  tip.style.top = `${Math.max(8, top)}px`;
+}
+
+function showChartTip(event, data, index) {
+  const tip = refs.chartTip;
+  if (!tip || index == null) {
+    hideChartTip();
+    return;
+  }
+  const view = hoverRows({
+    seriesList: data.seriesList,
+    times: data.times,
+    index,
+    timeLabel: fmtClock,
+  });
+  if (!view) {
+    hideChartTip();
+    return;
+  }
+
+  const time = document.createElement('p');
+  time.className = 'chart-tip__time';
+  time.textContent = view.time;
+  const rows = view.rows.map((row) => {
+    const line = document.createElement('p');
+    line.className = 'chart-tip__row';
+    const swatch = document.createElement('span');
+    swatch.className = 'chart-tip__swatch';
+    swatch.style.background = row.color;
+    const label = document.createElement('span');
+    label.className = 'chart-tip__label';
+    label.textContent = row.label;
+    const value = document.createElement('span');
+    value.className = 'chart-tip__value';
+    value.textContent = row.value;
+    line.append(swatch, label, value);
+    return line;
+  });
+  tip.replaceChildren(time, ...rows);
+  tip.hidden = false;
+  positionChartTip(event);
+}
+
+/** 切页签/换区间时 canvas 会重建或改尺寸，旧的悬停状态就作废了 */
+function resetChartHover() {
+  hoverState.clear();
+  hideChartTip();
+}
+
 /**
  * 画一组 0-100% 的折线。
  * series 里每一项是 { values, color, width, fill }；values 里的 null 表示这一段没有数据，
  * 折线会断开、面积也不会跨越空洞——宿主指标在部分平台上取不到时就是这个样子。
+ *
+ * 悬停（鼠标停在图上）画的东西也在这里：一条竖直参考线 + 每个系列在这个点上的圆点。
+ * 索引按 canvas 存在 hoverState 里，所以每次常规重绘都会照着同一个索引画回去，
+ * 鼠标停着不动时高亮不会闪掉。浮窗本身是 DOM，见 showChartTip()。
  */
 function drawLines(canvas, seriesList, windowSamples, { limit = null, times = [] } = {}) {
   const rect = canvas.getBoundingClientRect();
   const width = Math.round(rect.width);
   const height = Math.round(rect.height);
   if (width < 40 || height < 40) return;
+  // 数据侧留一份：鼠标一动只重画这一张图，浮窗要的系列/时间轴也从这儿取
+  const hoverIndex = hoverState.get(canvas) ?? null;
 
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
@@ -860,6 +969,22 @@ function drawLines(canvas, seriesList, windowSamples, { limit = null, times = []
   const count = seriesList[0]?.values.length || 0;
   const xAt = (i) => pad.left + plotW * (1 - (count - 1 - i) / (slots - 1));
   const yAt = (value) => pad.top + plotH * (1 - Math.min(100, Math.max(0, value)) / 100);
+
+  chartHoverData.set(canvas, { seriesList, windowSamples, times, limit, pad });
+
+  // 参考线画在折线下面，免得把曲线割断
+  const hoverX = hoverIndex != null && hoverIndex >= 0 && hoverIndex < count ? xAt(hoverIndex) : null;
+  if (hoverX != null) {
+    ctx.save();
+    ctx.strokeStyle = colors.muted;
+    ctx.globalAlpha = 0.45;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(hoverX) + 0.5, pad.top);
+    ctx.lineTo(Math.round(hoverX) + 0.5, pad.top + plotH);
+    ctx.stroke();
+    ctx.restore();
+  }
 
   for (const line of seriesList) {
     const values = line.values;
@@ -940,6 +1065,21 @@ function drawLines(canvas, seriesList, windowSamples, { limit = null, times = []
   ctx.fillText(count > 0 && times[0] ? fmtClock(times[0]) : '--:--:--', pad.left, pad.top + plotH + 5);
   ctx.textAlign = 'right';
   ctx.fillText('现在', pad.left + plotW, pad.top + plotH + 5);
+
+  // 悬停点的圆点画在最后（压在折线之上），加白描边是为了在密集的曲线里也能看清
+  if (hoverX != null) {
+    for (const line of seriesList) {
+      const value = line.values[hoverIndex];
+      if (value == null || !Number.isFinite(value)) continue;
+      ctx.beginPath();
+      ctx.arc(hoverX, yAt(value), 3.2, 0, Math.PI * 2);
+      ctx.fillStyle = line.color;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = cssVar('--jf-color-surface', '#ffffff');
+      ctx.stroke();
+    }
+  }
 }
 
 function renderCharts() {
@@ -998,6 +1138,8 @@ function renderCharts() {
       canvas.className = 'chart__canvas';
       canvas.setAttribute('role', 'img');
       canvas.setAttribute('aria-label', `GPU ${gpu.index} 的显存占用与利用率曲线（${rangeLabel()}）`);
+      // 鼠标停在图上时给参考线与浮窗；canvas 是重建的，所以监听也在这里挂
+      attachChartHover(canvas);
       canvasWrap.appendChild(canvas);
 
       wrap.append(head, canvasWrap);
@@ -1023,8 +1165,14 @@ function renderCharts() {
       drawLines(
         node.canvas,
         [
-          { values: series.mem, color: colors.primary, width: 2, fill: true },
-          { values: series.util, color: colors.signal, width: 1.5 },
+          {
+            values: series.mem, color: colors.primary, width: 2, fill: true,
+            label: '显存占用', format: (value) => fmtPct(value, 1),
+          },
+          {
+            values: series.util, color: colors.signal, width: 1.5,
+            label: '利用率', format: (value) => fmtPct(value, 0),
+          },
         ],
         chartSlots(),
         { limit: HIGH_THRESHOLD, times: series.t },
@@ -1103,7 +1251,8 @@ function renderServiceChart() {
   refs.svcEmpty.hidden = true;
 
   const { lines, times } = buildServiceSeries(usable);
-  drawLines(refs.svcCanvas, lines, chartSlots(), { times });
+  // 浮窗里按 GB 显示：服务维度统计的就是"这个服务占了多少显存"
+  drawLines(refs.svcCanvas, lines.map((line) => ({ ...line, format: fmtGiB })), chartSlots(), { times });
 
   // 图例带当前值：只给颜色分不清谁是谁。
   // 服务可能在区间末尾已经退出了，这时退到"最后一次见到的值"并标注出来，
@@ -1295,8 +1444,14 @@ function renderSystemCard() {
     drawLines(
       refs.sysCanvas,
       [
-        { values: series.mem, color: themeColors().primary, width: 2, fill: true },
-        { values: series.cpu, color: themeColors().signal, width: 1.5 },
+        {
+          values: series.mem, color: themeColors().primary, width: 2, fill: true,
+          label: '内存使用率', format: (value) => fmtPct(value, 0),
+        },
+        {
+          values: series.cpu, color: themeColors().signal, width: 1.5,
+          label: 'CPU 使用率', format: (value) => fmtPct(value, 0),
+        },
       ],
       chartSlots(),
       { times: series.t },
@@ -2079,6 +2234,8 @@ function applyView() {
 
   // canvas 在隐藏时尺寸为 0、什么都画不出来，所以每次切换都要重画一遍
   render();
+  // 切页签会重建/改变 canvas，旧的悬停索引（和浮窗）作废
+  resetChartHover();
   // 顶栏厚薄变了，右列"能不能粘"的判定也要跟着重算
   syncEvidenceSticky();
 }
@@ -2369,6 +2526,10 @@ refs.exportConfirm.addEventListener('click', () => {
   triggerDownload(item.path, params);
 });
 refs.btnRetry.addEventListener('click', () => poll());
+
+// 服务曲线与系统曲线是常驻 canvas，挂一次就够（各卡曲线是动态建的，在 renderCharts 里挂）
+attachChartHover(refs.svcCanvas);
+attachChartHover(refs.sysCanvas);
 
 // 加载更多：把取回条数加一页再拉一次。服务端每次都按"最近 N 条"返回，
 // 所以这里不会出现重复行，也不需要前端拼接

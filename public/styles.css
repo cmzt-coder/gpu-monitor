@@ -392,6 +392,29 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 
 .chart__canvas-wrap { position: relative; margin-top: 8px; height: 158px; }
 .chart__canvas-wrap--tall { height: 200px; }
+
+/* 曲线悬停的读数浮窗：跟着鼠标走，所以用 fixed 定位（不受卡片 overflow 影响）。
+   pointer-events: none 是必须的——否则鼠标一碰到浮窗就会触发 canvas 的 pointerleave，
+   高亮会在浮窗边缘闪来闪去。 */
+.chart-tip {
+  position: fixed;
+  z-index: 30;
+  pointer-events: none;
+  min-width: 132px;
+  padding: 8px 10px;
+  border: 1px solid var(--jf-color-border);
+  border-radius: var(--jf-radius-sm);
+  background: var(--jf-color-surface);
+  box-shadow: var(--jf-shadow-card);
+  font-size: 12.5px;
+  color: var(--jf-color-ink);
+  font-variant-numeric: tabular-nums;
+}
+.chart-tip__time { color: var(--jf-color-ink-muted); font-size: 12px; }
+.chart-tip__row { display: flex; align-items: baseline; gap: 6px; margin-top: 5px; }
+.chart-tip__swatch { width: 10px; height: 3px; border-radius: 2px; flex: none; align-self: center; }
+.chart-tip__label { color: var(--jf-color-ink-muted); }
+.chart-tip__value { margin-left: auto; font-weight: 600; }
 .chart__canvas { display: block; width: 100%; height: 100%; }
 
 /* ---------- 状态块 ---------- */
