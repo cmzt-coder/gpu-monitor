@@ -30,7 +30,8 @@ import {
   setLang,
   t,
 } from '../public/i18n/index.js';
-import { applyStaticI18n, syncLangSwitch } from '../public/i18n/dom.js';
+import { applyStaticI18n } from '../public/i18n/dom.js';
+import { stepIndex } from '../public/dropdown.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -3029,9 +3030,7 @@ await assert.rejects(
 
   // DOM 那两个函数要能在没有 DOM 的 Node 里安全 import（惰性使用 document）
   assert.equal(typeof applyStaticI18n, 'function');
-  assert.equal(typeof syncLangSwitch, 'function');
   assert.equal(applyStaticI18n(null), 0, '传 null 要安全返回，方便无 DOM 环境调用');
-  assert.equal(syncLangSwitch(null), undefined);
 
   // 结构约定：data-i18n 不能挂在"JS 会重写文本"的节点上。
   // 症状很隐蔽——切语言时属性先把英文写进去，紧接着渲染函数又盖回中文，
@@ -3056,22 +3055,37 @@ await assert.rejects(
     `这些 data-i18n 挂在 JS 会重写的节点上，切语言会被盖掉：${misattached.join('、')}`,
   );
 
-  // 顶栏那两个开关必须是原生下拉（不是平铺的按钮组）：省地方，且键盘 / 读屏 / 移动端原生可用
-  const headerSelects = [...indexHtml.matchAll(/<select[^>]*id="(view-switch|lang-switch)"[^>]*>([\s\S]*?)<\/select>/g)];
-  assert.equal(headerSelects.length, 2, '顶栏要有"展示模式"和"语言"两个下拉');
-  const langSelect = headerSelects.find((m) => m[1] === 'lang-switch');
-  const viewSelect = headerSelects.find((m) => m[1] === 'view-switch');
-  for (const lang of ['zh-CN', 'en-US']) {
-    assert.ok(
-      langSelect[2].includes(`value="${lang}"`),
-      `语言下拉要有 ${lang} 这个选项`,
-    );
+  // 顶栏那两个开关是自绘下拉（public/dropdown.js），结构约定必须完整：
+  // 缺了 role / aria-expanded / data-value，组件要么找不到元素、要么读屏说不出当前值。
+  const dropdowns = [...indexHtml.matchAll(/<div class="dropdown" id="(view-switch|lang-switch)">([\s\S]*?)\n      <\/div>/g)];
+  assert.equal(dropdowns.length, 2, '顶栏要有"展示模式"和"语言"两个下拉');
+  for (const [, id, body] of dropdowns) {
+    assert.ok(body.includes('class="dropdown__button"'), `${id} 要有按钮`);
+    assert.ok(body.includes('aria-haspopup="listbox"'), `${id} 的按钮要声明 aria-haspopup`);
+    assert.ok(body.includes('aria-expanded="false"'), `${id} 的按钮要有初始 aria-expanded`);
+    assert.ok(body.includes('class="dropdown__value"'), `${id} 要有显示当前值的节点`);
+    assert.ok(body.includes('role="listbox"'), `${id} 的弹层要有 listbox 角色`);
+    assert.ok(body.includes('hidden'), `${id} 的弹层默认收起`);
+    const options = [...body.matchAll(/role="option" data-value="([^"]+)"/g)].map((m) => m[1]);
+    assert.ok(options.length >= 2, `${id} 至少要有两个选项`);
+    assert.ok(options.includes('single') || options.includes('zh-CN'), `${id} 的选项值要写在 data-value 上`);
   }
-  for (const view of ['single', 'nav']) {
-    assert.ok(viewSelect[2].includes(`value="${view}"`), `展示模式下拉要有 ${view} 这个选项`);
-  }
-  // 选项文字仍由 data-i18n 负责（选项不会被 JS 重写，只改 select.value）
-  assert.ok(viewSelect[2].includes('data-i18n="nav.view.single"'), '下拉里的选项文字也要能翻译');
+  // 选项文字照旧走 data-i18n；按钮上那行"当前值"由 JS 写，所以它不带 data-i18n
+  assert.ok(indexHtml.includes('data-i18n="nav.view.single"'), '下拉里的选项文字也要能翻译');
+  assert.ok(
+    /<span class="dropdown__value">[^<]*<\/span>/.test(indexHtml)
+    && !/<span class="dropdown__value" data-i18n=/.test(indexHtml),
+    '"当前值"节点由 JS 写，不能挂 data-i18n（否则切语言时两者会互相覆盖）',
+  );
+
+  // 下拉的键盘移动逻辑（纯函数）：两端环绕、没有高亮项时按方向取首尾、空列表返回 -1
+  assert.equal(stepIndex(0, 1, 2), 1, '向下走一格');
+  assert.equal(stepIndex(1, 1, 2), 0, '到底了要绕回开头');
+  assert.equal(stepIndex(0, -1, 2), 1, '向上走到底要从末尾绕回来');
+  assert.equal(stepIndex(-1, 1, 2), 0, '还没有高亮项时向下取第一项');
+  assert.equal(stepIndex(-1, -1, 2), 1, '还没有高亮项时向上取最后一项');
+  assert.equal(stepIndex(0, 5, 3), 2, '步长大于列表长度也要落在范围内');
+  assert.equal(stepIndex(0, 1, 0), -1, '没有选项时返回 -1');
 
   // 反向校验：代码里 t('...') / tn('...') 用到的 key，必须在中文表里真的存在。
   // 上面那条只保证中英两张表**一致**，管不住"两边都漏了同一个 key"——
@@ -3080,7 +3094,7 @@ await assert.rejects(
   const usedKeys = new Set();
   const scannedFiles = [
     'app.js', 'status-pill.js', 'kpi-util.js', 'gpu-card-parts.js',
-    'chart-hover.js', 'backend-text.js', 'i18n/dom.js',
+    'chart-hover.js', 'backend-text.js', 'dropdown.js', 'i18n/dom.js',
   ];
   for (const file of scannedFiles) {
     const source = fs.readFileSync(path.join(HERE, '..', 'public', file), 'utf8');

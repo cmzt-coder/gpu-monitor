@@ -59,18 +59,40 @@
         <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
         <span data-i18n="export.open">导出</span>
       </button>
-      <!-- 展示模式与界面语言都用原生下拉：收起态只占一行的宽度，而按钮平铺在英文下明显更宽
-           （Single page / Navigation）；原生 select 的键盘、读屏、移动端系统选择器都不用自己写。
-           选项文字照旧走 data-i18n——它们不被 JS 重写，只改 select.value。 -->
-      <select class="select" id="view-switch" aria-label="展示模式" data-i18n-attr="aria-label:nav.group.view">
-        <option value="single" data-i18n="nav.view.single">单页</option>
-        <option value="nav" data-i18n="nav.view.nav">导航</option>
-      </select>
-      <select class="select" id="lang-switch" aria-label="语言" data-i18n-attr="aria-label:nav.group.language">
+      <!-- 展示模式与界面语言都是自绘下拉（见 public/dropdown.js）。
+           不用原生 <select> 是因为它的展开面板由系统绘制，圆角和配色都改不了；
+           收起态只占一行这个好处要保留，所以自己实现一个 listbox。
+           选项文字走 data-i18n（选项不被 JS 重写）；按钮上那行"当前值"由 JS 写，所以不带 data-i18n。 -->
+      <div class="dropdown" id="view-switch">
+        <!-- 标签写成按钮内部的隐藏文字，而不是 aria-label：aria-label 会盖掉内部文字，
+             读屏就只会念"展示模式"、念不出当前选的是哪一个。这样拼出来的可访问名是
+             "展示模式 单页"，既有用途也有当前值 -->
+        <button type="button" class="dropdown__button" aria-haspopup="listbox" aria-expanded="false">
+          <span class="visually-hidden" data-i18n="nav.group.view">展示模式</span>
+          <span class="dropdown__value">单页</span>
+          <span class="dropdown__caret" aria-hidden="true"></span>
+        </button>
+        <ul class="dropdown__list" role="listbox" aria-label="展示模式" data-i18n-attr="aria-label:nav.group.view" hidden>
+          <li class="dropdown__option" role="option" data-value="single" aria-selected="true">
+            <span data-i18n="nav.view.single">单页</span>
+          </li>
+          <li class="dropdown__option" role="option" data-value="nav" aria-selected="false">
+            <span data-i18n="nav.view.nav">导航</span>
+          </li>
+        </ul>
+      </div>
+      <div class="dropdown" id="lang-switch">
+        <button type="button" class="dropdown__button" aria-haspopup="listbox" aria-expanded="false">
+          <span class="visually-hidden" data-i18n="nav.group.language">语言</span>
+          <span class="dropdown__value">中</span>
+          <span class="dropdown__caret" aria-hidden="true"></span>
+        </button>
         <!-- 语言名各写各的（中 / EN），不跟界面语言翻译：英文用户也要一眼认出中文入口 -->
-        <option value="zh-CN">中</option>
-        <option value="en-US">EN</option>
-      </select>
+        <ul class="dropdown__list" role="listbox" aria-label="语言" data-i18n-attr="aria-label:nav.group.language" hidden>
+          <li class="dropdown__option" role="option" data-value="zh-CN" aria-selected="true"><span>中</span></li>
+          <li class="dropdown__option" role="option" data-value="en-US" aria-selected="false"><span>EN</span></li>
+        </ul>
+      </div>
     </div>
   </header>
 

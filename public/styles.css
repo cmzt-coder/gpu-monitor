@@ -321,38 +321,75 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 /* 顶栏那三个控件（导出 / 展示模式 / 界面语言）共用一套规格：
    同为胶囊形、同高、同字号，看起来是一组控件。**颜色仍然分主次**——
    导出是主操作（实心蓝），两个下拉是设置项（白底描边）；把颜色也统一了反而看不出哪个能点。
-   两种展示模式各有一个高度：单页模式 40px（宽敞），导航模式 32px（紧凑顶栏）。
-   （旧版是按钮 44/32px + 圆角 6px，下拉 36px + 胶囊，一行里三种形状。） */
+   两种展示模式各有一个高度：单页模式 40px（宽敞），导航模式 32px（紧凑顶栏）。 */
 .orient__actions .btn,
-.select {
+.dropdown__button {
   min-height: 40px;
   border-radius: 999px;
   font-size: 13.5px;
 }
 .orient__actions .btn { padding: 0 16px; }
-/* 下拉：左侧内边距与按钮对齐，右侧留出箭头的位置。
-   箭头用 CSS 画：appearance:none 去掉系统外观后自己补一个，不引外链资源也不加 DOM。 */
-.select {
-  appearance: none;
-  padding: 0 30px 0 16px;
+
+/* ---------- 自绘下拉（public/dropdown.js） ---------- */
+/* 为什么不用原生 <select>：它的展开面板由系统绘制（macOS 那块半透明面板 + 系统勾选），
+   圆角、阴影、字体、高亮色一个都改不了。收起态"只占一行"的好处要保留，所以自己画。 */
+.dropdown { position: relative; display: inline-flex; }
+.dropdown__button {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 0 14px 0 16px;      /* 左侧与导出按钮对齐，右侧留出箭头 */
   border: 1px solid var(--jf-color-control-border);
   background-color: var(--jf-color-surface);
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--jf-color-ink-muted) 50%),
-    linear-gradient(135deg, var(--jf-color-ink-muted) 50%, transparent 50%);
-  background-position: right 16px center, right 11px center;
-  background-size: 5px 5px, 5px 5px;
-  background-repeat: no-repeat;
   color: var(--jf-color-ink);
-  /* 只继承字族与字重，字号由上面那条统一规则给（别用 font: inherit——它会把 font-size
-     一起重置成继承值，把上面的 13.5px 盖掉） */
-  font-family: inherit; font-weight: inherit;
+  font: inherit; font-family: inherit; font-weight: inherit;
   cursor: pointer;
-  /* 英文文案（Single page）比中文长：给个上限，超出用省略号，避免下拉把顶栏撑开 */
-  max-width: 12em; text-overflow: ellipsis;
+  max-width: 12em;
 }
-.select:hover { border-color: var(--jf-color-primary); }
-.select:focus-visible { outline: none; box-shadow: var(--jf-focus-ring); }
+.dropdown__button:hover { border-color: var(--jf-color-primary); }
+/* 焦点环只用键盘时才显形：鼠标点一下不必套一圈蓝环（原生 select 在 Chromium 里
+   鼠标点击也会命中 :focus-visible，于是展开时那圈环压在面板后面，很乱） */
+.dropdown__button:focus { outline: none; }
+.dropdown__button:focus-visible { outline: none; box-shadow: var(--jf-focus-ring); }
+/* 收起态只显示"当前值" + 箭头；值是 JS 写的，所以要能省略号截断 */
+.dropdown__value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dropdown__caret {
+  flex: none;
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--jf-color-ink-muted);
+  transition: transform var(--jf-duration-fast) ease;
+}
+.dropdown__button[aria-expanded="true"] .dropdown__caret { transform: rotate(180deg); }
+
+.dropdown__list {
+  position: absolute; z-index: 30; top: calc(100% + 6px); left: 0;
+  min-width: 100%; max-width: calc(100vw - 32px);
+  margin: 0; padding: 6px;
+  list-style: none;
+  background: var(--jf-color-surface);
+  border: 1px solid var(--jf-color-border);
+  border-radius: var(--jf-radius-md);
+  box-shadow: var(--jf-shadow-card);
+}
+/* 最右边那个下拉若还向左对齐，面板会伸出窗口右边——改成贴右 */
+.orient__actions .dropdown:last-child .dropdown__list { left: auto; right: 0; }
+.dropdown__option {
+  position: relative;
+  padding: 8px 12px 8px 30px;
+  border-radius: var(--jf-radius-sm);
+  font-size: 13px;
+  color: var(--jf-color-ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dropdown__option:hover,
+.dropdown__option:focus { background: var(--jf-color-hover-surface); outline: none; }
+.dropdown__option[aria-selected="true"] { color: var(--jf-color-primary); font-weight: 500; }
+/* 选中项前面的勾：与导出弹窗里的 ✕ 同样是字符，不额外引图标 */
+.dropdown__option[aria-selected="true"]::before {
+  content: "✓";
+  position: absolute; left: 11px;
+}
 
 /* ---------- 导航模式的紧凑顶栏 ---------- */
 /* 导航模式下页头 / 告警 / KPI 三块常驻区本来就够用，按宽松排版铺开却在 720px 高的窗口里
@@ -369,7 +406,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .app[data-dense="1"] .status-pill { min-height: 30px; padding: 0 12px; font-size: 12.5px; }
 /* 紧凑顶栏：三个控件一起降到 32px（旧版只压了按钮，下拉比按钮还高 4px，看着参差） */
 .app[data-dense="1"] .orient__actions .btn,
-.app[data-dense="1"] .orient__actions .select { min-height: 32px; font-size: 13px; }
+.app[data-dense="1"] .orient__actions .dropdown__button { min-height: 32px; font-size: 13px; }
 
 /* 没触发告警时压成一行（有告警时保持原样展开，该醒目就得醒目） */
 .app[data-dense="1"] .alerts[data-state="idle"] {
@@ -773,7 +810,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   .orient__actions { width: 100%; }
   .orient__actions .btn { flex: 1 1 auto; justify-content: center; }
   /* 窄屏下两个下拉平分剩下的宽度：它们本来就比按钮省地方，别再缩成一小撮 */
-  .orient__actions .select { flex: 1 1 auto; }
+  .orient__actions .dropdown { flex: 1 1 auto; }
+  .orient__actions .dropdown__button { width: 100%; justify-content: space-between; }
   .status-pill { width: 100%; justify-content: center; }
   .card { padding: 16px 16px 18px; border-radius: var(--jf-radius-md); }
   .chart__canvas-wrap { height: 132px; }

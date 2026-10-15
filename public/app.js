@@ -4,7 +4,8 @@ import { throttleParts, healthParts, gpuFootItems } from './gpu-card-parts.js';
 import { hoverIndexFromX, hoverRows } from './chart-hover.js';
 import { statusView } from './status-pill.js';
 import { getLang, hasKey, initI18n, onLangChange, setLang, t, tn } from './i18n/index.js';
-import { applyStaticI18n, syncLangSwitch } from './i18n/dom.js';
+import { applyStaticI18n } from './i18n/dom.js';
+import { enhanceDropdown } from './dropdown.js';
 import { backendText } from './backend-text.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
@@ -2637,7 +2638,8 @@ function applyView() {
     else tab.removeAttribute('aria-current');
   }
   // 展示模式是原生下拉：把选中项对上即可（旧版是一组带 aria-pressed 的按钮）
-  refs.viewSwitch.value = choice.view;
+  // 展示模式是自绘下拉：把选中项对齐（不触发它的 onChange，免得绕回来再调一次 setView）
+  viewDropdown.setValue(choice.view);
 
   // 本页某列一张卡都没有时让它占满整行，否则会留一条空白栏
   const visibleIn = (selector) => [...document.querySelectorAll(`${selector} .card[data-page]`)]
@@ -2926,7 +2928,11 @@ function closeExportPanel() {
 }
 
 refs.btnExport.addEventListener('click', openExportPanel);
-refs.viewSwitch.addEventListener('change', () => setView(refs.viewSwitch.value));
+
+/* 顶栏两个自绘下拉：展示模式与界面语言。
+   组件只管开合、键盘、ARIA；选中之后做什么由这里决定。 */
+const viewDropdown = enhanceDropdown(refs.viewSwitch, { onChange: (value) => setView(value) });
+const langDropdown = enhanceDropdown(refs.langSwitch, { onChange: (value) => setLang(value) });
 
 /* ---------- 界面语言 ---------- */
 
@@ -2959,7 +2965,9 @@ function resetTextSignatures() {
 /** 语言变化的统一入口：静态文案 → 开关状态 → 作废签名 → 用内存里的状态整帧重渲染 */
 function applyLanguage(lang) {
   applyStaticI18n(document);
-  syncLangSwitch(refs.langSwitch, lang);
+  langDropdown.setValue(lang);
+  // 展示模式那两个选项的文字也被翻译了，按钮上那行要跟着变（选项本身不重写）
+  viewDropdown.refresh();
   resetTextSignatures();
   renderRangePicker();
   // 进程历史卡片不在 render() 的调用链里（它只在"进程身份变化"时单独刷新），
@@ -2969,7 +2977,6 @@ function applyLanguage(lang) {
   render();
 }
 
-refs.langSwitch.addEventListener('change', () => setLang(refs.langSwitch.value));
 onLangChange(applyLanguage);
 
 refs.viewNav.addEventListener('click', (event) => {
@@ -3065,6 +3072,7 @@ initI18n({
   navigatorLang: navigator.language,
 });
 applyStaticI18n(document);
-syncLangSwitch(refs.langSwitch, getLang());
+// 语言下拉先对齐到刚定下来的语言（选项文字此时已经是当前语言）
+langDropdown.setValue(getLang());
 
 boot();
