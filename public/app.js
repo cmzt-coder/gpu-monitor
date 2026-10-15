@@ -3031,6 +3031,11 @@ document.addEventListener('visibilitychange', () => {
 });
 
 async function boot() {
+  // 先把"还没有数据"的画面按当前语言渲染一遍。
+  // HTML 里写死的默认文案是中文（"等待采集""占用率 --"……），这些节点又都由渲染函数
+  // 每秒重写，所以不能挂 data-i18n——只能在这里主动渲染一次，否则英文界面在首帧数据
+  // 到达前（正常不到 1 秒，服务异常时更久）会闪一段中文。
+  render();
   renderRangePicker();
   renderProcHistRange();
   renderProcHistMin();

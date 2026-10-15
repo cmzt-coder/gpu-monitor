@@ -3061,6 +3061,21 @@ await assert.rejects(
     [],
     `这些 key 在代码里用了却没定义（页面上会直接显示 key 名）：${undefinedKeys.join('、')}`,
   );
+
+  // 首帧语言：boot() 必须在**第一个 await 之前**先 render() 一次。
+  // 原因：KPI 数值、"等待采集"这类占位文案所在的节点每秒都会被渲染函数重写，
+  // 所以不能挂 data-i18n，只能靠这次同步渲染把它们换成当前语言；
+  // 少了它，英文界面会先露出 HTML 里写死的中文（正常不到 1 秒，服务不通时会一直挂着）。
+  const bootAt = appJs.indexOf('async function boot()');
+  assert.ok(bootAt > 0, '找不到 boot()');
+  const bootBody = appJs.slice(bootAt, appJs.indexOf('\nboot();', bootAt));
+  const firstAwaitAt = bootBody.indexOf('await ');
+  const firstRenderAt = bootBody.indexOf('render();');
+  assert.ok(firstRenderAt > 0, 'boot() 里要先调一次 render()');
+  assert.ok(
+    firstAwaitAt < 0 || firstRenderAt < firstAwaitAt,
+    'render() 必须排在 boot() 的第一个 await 之前，否则首帧前会闪出 HTML 里写死的中文',
+  );
 }
 
 process.stdout.write(
