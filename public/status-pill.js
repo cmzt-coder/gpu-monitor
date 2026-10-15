@@ -32,7 +32,11 @@ const TEXT_KEYS = {
  * @param {boolean} [input.pushEnabled]      服务端是否允许推送（--no-push 时为 false）
  * @param {number} [input.pushDownCount]     推送连续失败的次数（用于区分"刚打开还没连上"与"真的掉了"）
  * @param {(ts:number)=>string} [input.relative] 相对时间格式化（"3 分钟前"）
- * @returns {{ tone: string, text: string, stale: boolean, fellBack: boolean }}
+ * @returns {{ tone: string, text: string, stale: boolean, fellBack: boolean, quiet: boolean }}
+ *
+ *   quiet=true 表示"就是正常的实时采集"，界面上不必常驻显示这枚胶囊
+ *   （用户要求顶栏不要一直挂着"实时采集中"）。判定放在这里而不是界面层，
+ *   是为了让"哪些态该安静、哪些态必须露面"成为可单测的规则。
  */
 export function statusView({
   status,
@@ -75,6 +79,10 @@ export function statusView({
   //   · 页面刚打开、SSE 还没握上手的那一刻也不算（pushDownCount 还是 0）。
   const fellBack = !broken && !stale && tone === 'live'
     && !pushActive && pushEnabled !== false && pushDownCount > 0;
+  // 只有"正常的实时采集"才安静：采集失败 / 连接中断 / 数据陈旧 / 退回轮询 /
+  // 还没检测到 GPU / 启动中 / 空闲降频，都得让人看见
+  const idleActive = Boolean(idle?.active);
+  const quiet = tone === 'live' && !stale && !fellBack && !idleActive;
 
   if (broken) {
     return {
@@ -82,6 +90,7 @@ export function statusView({
       text: lastSampleAt ? t('status.staleSuffix', { base, rel: relative(lastSampleAt) }) : base,
       stale: false,
       fellBack: false,
+      quiet: false,
     };
   }
   if (stale) {
@@ -90,14 +99,21 @@ export function statusView({
       text: t('status.staleSuffix', { base, rel: relative(lastSampleAt) }),
       stale: true,
       fellBack: false,
+      quiet: false,
     };
   }
   if (fellBack) {
-    return { tone: 'poll', text: t('status.poll'), stale: false, fellBack: true };
+    return { tone: 'poll', text: t('status.poll'), stale: false, fellBack: true, quiet: false };
   }
   if (tone === 'live' && idle?.active) {
     const seconds = Math.round((idle.currentIntervalMs || 0) / 1000);
-    return { tone: 'live', text: t('status.idle', { seconds }), stale: false, fellBack: false };
+    return {
+      tone: 'live',
+      text: t('status.idle', { seconds }),
+      stale: false,
+      fellBack: false,
+      quiet: false,
+    };
   }
-  return { tone, text: base, stale: false, fellBack: false };
+  return { tone, text: base, stale: false, fellBack: false, quiet };
 }

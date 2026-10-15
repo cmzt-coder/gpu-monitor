@@ -959,8 +959,32 @@ const pillRel = (ts) => `${Math.round((PILL_NOW - ts) / 60000)} 分钟前`;
 
 assert.deepEqual(
   statusView({ status: 'ok', lastSampleAt: PILL_NOW - 1000, now: PILL_NOW, relative: pillRel }),
-  { tone: 'live', text: '实时采集中', stale: false, fellBack: false },
+  { tone: 'live', text: '实时采集中', stale: false, fellBack: false, quiet: true },
   '正常采集就是绿点"实时采集中"',
+);
+// quiet=true 表示"就是正常的实时采集，顶栏不必常驻这枚胶囊"。
+// 只有这一种态安静，别的都得露面——漏掉任何一条，出问题时页面上就看不出来了。
+assert.equal(
+  statusView({ status: 'ok', lastSampleAt: PILL_NOW - 30000, now: PILL_NOW }).quiet,
+  false,
+  '数据陈旧要露面',
+);
+assert.equal(
+  statusView({ status: 'ok', lastSampleAt: PILL_NOW, now: PILL_NOW, pushActive: false, pushDownCount: 1 }).quiet,
+  false,
+  '退回轮询要露面',
+);
+assert.equal(statusView({ status: 'error', now: PILL_NOW }).quiet, false, '采集失败要露面');
+assert.equal(statusView({ status: 'unreachable', now: PILL_NOW }).quiet, false, '连接中断要露面');
+assert.equal(statusView({ status: 'loading', now: PILL_NOW }).quiet, false, '连接中要露面');
+assert.equal(statusView({ status: 'empty', now: PILL_NOW }).quiet, false, '未检测到 GPU 要露面');
+assert.equal(
+  statusView({
+    status: 'ok', lastSampleAt: PILL_NOW, now: PILL_NOW,
+    idle: { active: true, currentIntervalMs: 10000 },
+  }).quiet,
+  false,
+  '空闲降频改变了采集节奏，也要露面',
 );
 // 阈值 = max(3×采集间隔+2 秒, 落库间隔+5 秒, 15 秒)。下面三条把三个分支各钉一次。
 assert.equal(
@@ -3032,11 +3056,22 @@ await assert.rejects(
     `这些 data-i18n 挂在 JS 会重写的节点上，切语言会被盖掉：${misattached.join('、')}`,
   );
 
-  // 语言开关本身要有：两枚 chip、带 data-lang，并且默认标出当前语言
-  assert.ok(indexHtml.includes('id="lang-switch"'), '顶栏要有语言开关');
+  // 顶栏那两个开关必须是原生下拉（不是平铺的按钮组）：省地方，且键盘 / 读屏 / 移动端原生可用
+  const headerSelects = [...indexHtml.matchAll(/<select[^>]*id="(view-switch|lang-switch)"[^>]*>([\s\S]*?)<\/select>/g)];
+  assert.equal(headerSelects.length, 2, '顶栏要有"展示模式"和"语言"两个下拉');
+  const langSelect = headerSelects.find((m) => m[1] === 'lang-switch');
+  const viewSelect = headerSelects.find((m) => m[1] === 'view-switch');
   for (const lang of ['zh-CN', 'en-US']) {
-    assert.ok(indexHtml.includes(`data-lang="${lang}"`), `语言开关要有 ${lang} 这一枚`);
+    assert.ok(
+      langSelect[2].includes(`value="${lang}"`),
+      `语言下拉要有 ${lang} 这个选项`,
+    );
   }
+  for (const view of ['single', 'nav']) {
+    assert.ok(viewSelect[2].includes(`value="${view}"`), `展示模式下拉要有 ${view} 这个选项`);
+  }
+  // 选项文字仍由 data-i18n 负责（选项不会被 JS 重写，只改 select.value）
+  assert.ok(viewSelect[2].includes('data-i18n="nav.view.single"'), '下拉里的选项文字也要能翻译');
 
   // 反向校验：代码里 t('...') / tn('...') 用到的 key，必须在中文表里真的存在。
   // 上面那条只保证中英两张表**一致**，管不住"两边都漏了同一个 key"——

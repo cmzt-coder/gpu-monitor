@@ -59,15 +59,18 @@
         <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
         <span data-i18n="export.open">导出</span>
       </button>
-      <div class="view-switch" id="view-switch" role="group" aria-label="展示模式" data-i18n-attr="aria-label:nav.group.view">
-        <button type="button" class="chip" data-view="single" data-i18n="nav.view.single">单页</button>
-        <button type="button" class="chip" data-view="nav" data-i18n="nav.view.nav">导航</button>
-      </div>
-      <div class="lang-switch" id="lang-switch" role="group" aria-label="语言" data-i18n-attr="aria-label:nav.group.language">
+      <!-- 展示模式与界面语言都用原生下拉：收起态只占一行的宽度，而按钮平铺在英文下明显更宽
+           （Single page / Navigation）；原生 select 的键盘、读屏、移动端系统选择器都不用自己写。
+           选项文字照旧走 data-i18n——它们不被 JS 重写，只改 select.value。 -->
+      <select class="select" id="view-switch" aria-label="展示模式" data-i18n-attr="aria-label:nav.group.view">
+        <option value="single" data-i18n="nav.view.single">单页</option>
+        <option value="nav" data-i18n="nav.view.nav">导航</option>
+      </select>
+      <select class="select select--lang" id="lang-switch" aria-label="语言" data-i18n-attr="aria-label:nav.group.language">
         <!-- 语言名各写各的（中 / EN），不跟界面语言翻译：英文用户也要一眼认出中文入口 -->
-        <button type="button" class="chip" data-lang="zh-CN" aria-pressed="true">中</button>
-        <button type="button" class="chip" data-lang="en-US" aria-pressed="false">EN</button>
-      </div>
+        <option value="zh-CN">中</option>
+        <option value="en-US">EN</option>
+      </select>
     </div>
   </header>
 

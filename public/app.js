@@ -538,6 +538,9 @@ function renderStatus() {
   });
   refs.statusPill.dataset.state = view.tone;
   refs.statusText.textContent = view.text;
+  // 正常实时采集时收起这枚胶囊（顶栏不必常驻"实时采集中"）；
+  // 其余状态——连接中断、采集失败、数据陈旧、退回轮询、未检测到 GPU、空闲降频——照旧显示
+  refs.statusPill.hidden = view.quiet;
 }
 
 function showNotice({ title, text, hint }) {
@@ -2633,9 +2636,8 @@ function applyView() {
     if (tab.dataset.page === choice.page) tab.setAttribute('aria-current', 'page');
     else tab.removeAttribute('aria-current');
   }
-  for (const button of refs.viewSwitch.querySelectorAll('.chip')) {
-    button.setAttribute('aria-pressed', button.dataset.view === choice.view ? 'true' : 'false');
-  }
+  // 展示模式是原生下拉：把选中项对上即可（旧版是一组带 aria-pressed 的按钮）
+  refs.viewSwitch.value = choice.view;
 
   // 本页某列一张卡都没有时让它占满整行，否则会留一条空白栏
   const visibleIn = (selector) => [...document.querySelectorAll(`${selector} .card[data-page]`)]
@@ -2924,10 +2926,7 @@ function closeExportPanel() {
 }
 
 refs.btnExport.addEventListener('click', openExportPanel);
-refs.viewSwitch.addEventListener('click', (event) => {
-  const button = event.target.closest('.chip[data-view]');
-  if (button) setView(button.dataset.view);
-});
+refs.viewSwitch.addEventListener('change', () => setView(refs.viewSwitch.value));
 
 /* ---------- 界面语言 ---------- */
 
@@ -2970,10 +2969,7 @@ function applyLanguage(lang) {
   render();
 }
 
-refs.langSwitch.addEventListener('click', (event) => {
-  const button = event.target.closest('.chip[data-lang]');
-  if (button) setLang(button.dataset.lang);
-});
+refs.langSwitch.addEventListener('change', () => setLang(refs.langSwitch.value));
 onLangChange(applyLanguage);
 
 refs.viewNav.addEventListener('click', (event) => {

@@ -318,12 +318,31 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 /* 导航模式下总有一列是空的：那列虽然高 0，却照样占掉一行，行间距白白多出 24px
    （实测「各卡当前占用」被推到了 293px）——一列的时候就不要行间距了 */
 .work-grid[data-cols="left"], .work-grid[data-cols="right"] { row-gap: 0; }
-.view-switch { display: flex; gap: 0; }
-.view-switch .chip:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-.view-switch .chip:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
-/* 语言开关：和展示模式同一排，但两枚是独立的单选按钮，不做连体——免得被误读成同一个开关的两个档位 */
-.lang-switch { display: inline-flex; gap: 6px; }
-.lang-switch .chip { padding: 0 12px; }
+/* 顶栏的两个开关（展示模式 / 界面语言）都是原生下拉。
+   箭头用 CSS 画：appearance:none 去掉系统外观后，自己补一个，不引外链资源也不加 DOM。 */
+.select {
+  appearance: none;
+  min-height: 36px;
+  padding: 0 30px 0 14px;
+  border: 1px solid var(--jf-color-control-border);
+  border-radius: 999px;
+  background-color: var(--jf-color-surface);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--jf-color-ink-muted) 50%),
+    linear-gradient(135deg, var(--jf-color-ink-muted) 50%, transparent 50%);
+  background-position: right 16px center, right 11px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  color: var(--jf-color-ink);
+  font: inherit; font-size: 13px;
+  cursor: pointer;
+  /* 英文文案（Single page）比中文长：给个上限，超出用省略号，避免下拉把顶栏撑开 */
+  max-width: 12em; text-overflow: ellipsis;
+}
+.select:hover { border-color: var(--jf-color-primary); }
+.select:focus-visible { outline: none; box-shadow: var(--jf-focus-ring); }
+/* 语言下拉的内容短且固定（中 / EN），不需要那么宽的内边距 */
+.select--lang { padding: 0 26px 0 12px; background-position: right 12px center, right 7px center; }
 
 /* ---------- 导航模式的紧凑顶栏 ---------- */
 /* 导航模式下页头 / 告警 / KPI 三块常驻区本来就够用，按宽松排版铺开却在 720px 高的窗口里
@@ -742,6 +761,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   .app[data-dense="1"] .orient { align-items: flex-start; }
   .orient__actions { width: 100%; }
   .orient__actions .btn { flex: 1 1 auto; justify-content: center; }
+  /* 窄屏下两个下拉平分剩下的宽度：它们本来就比按钮省地方，别再缩成一小撮 */
+  .orient__actions .select { flex: 1 1 auto; }
   .status-pill { width: 100%; justify-content: center; }
   .card { padding: 16px 16px 18px; border-radius: var(--jf-radius-md); }
   .chart__canvas-wrap { height: 132px; }

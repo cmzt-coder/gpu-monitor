@@ -47,10 +47,14 @@ export function applyStaticI18n(root = document, { lang = getLang() } = {}) {
   return count;
 }
 
-/** 语言开关那组 chip：把当前语言标成 aria-pressed="true" */
-export function syncLangSwitch(container, lang = getLang()) {
-  if (!container || typeof container.querySelectorAll !== 'function') return;
-  for (const button of container.querySelectorAll('.chip[data-lang]')) {
-    button.setAttribute('aria-pressed', button.dataset.lang === lang ? 'true' : 'false');
-  }
+/**
+ * 语言开关：把下拉设成当前语言。
+ * 旧版是一组带 aria-pressed 的按钮，现在是原生 `<select>`——只认 value，
+ * 选项文字由 data-i18n 负责（语言名本身不翻译）。
+ * 目标语言不在选项里时保持原样，免得把值清成空串、看不出当前是哪种语言。
+ */
+export function syncLangSwitch(select, lang = getLang()) {
+  if (!select || typeof select.querySelectorAll !== 'function') return;
+  const values = [...select.querySelectorAll('option')].map((option) => option.value);
+  if (values.includes(lang)) select.value = lang;
 }
