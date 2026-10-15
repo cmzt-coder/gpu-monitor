@@ -18,6 +18,18 @@ import { utilKpiView, UTIL_WINDOW_MS } from '../public/kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from '../public/gpu-card-parts.js';
 import { hoverIndexFromX, hoverRows } from '../public/chart-hover.js';
 import { statusView } from '../public/status-pill.js';
+import {
+  MESSAGES,
+  detectLang,
+  getLang,
+  keysOf,
+  normalizeLang,
+  onLangChange,
+  placeholdersOf,
+  setLang,
+  t,
+} from '../public/i18n/index.js';
+import { applyStaticI18n, syncLangSwitch } from '../public/i18n/dom.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -2912,6 +2924,120 @@ await assert.rejects(
   /MAIL FROM 失败/,
 );
 
+/* ---------- 界面语言（i18n） ---------- */
+// 这一组断言守的是"加文案时最容易出的三类事"：英文漏翻、占位符漏写、切语言后旧文案不刷新。
+// 语言资源是普通 ES Module，所以这里能直接 import 进来查，不需要浏览器。
+{
+  const zhKeys = keysOf('zh-CN');
+  const enKeys = keysOf('en-US');
+  assert.ok(zhKeys.length > 0, '中文文案表不能是空的');
+
+  const missingInEn = zhKeys.filter((key) => !enKeys.includes(key));
+  const strayInZh = enKeys.filter((key) => !zhKeys.includes(key));
+  assert.deepEqual(missingInEn, [], `英文缺这些 key：${missingInEn.join(', ')}`);
+  assert.deepEqual(strayInZh, [], `英文有、中文没有的 key：${strayInZh.join(', ')}`);
+
+  // 占位符必须逐条对齐：漏掉一个 {pct}，英文界面就会少显示一个数字。
+  // （P1 阶段的静态文案里还没有占位符，这条断言从 P2 起才真正咬合；
+  //   下面顺手验一下提取函数本身，免得它悄悄失灵让这条断言变成空转。）
+  assert.deepEqual(placeholdersOf('占用了 {pct}%，共 {n} 张卡'), ['n', 'pct'], '占位符提取要能去重并排序');
+  assert.deepEqual(placeholdersOf('没有占位符'), []);
+  for (const key of zhKeys) {
+    assert.deepEqual(
+      placeholdersOf(MESSAGES['en-US'][key]),
+      placeholdersOf(MESSAGES['zh-CN'][key]),
+      `中英占位符不一致：${key}`,
+    );
+  }
+
+  // 语言识别：'zh-Hans-CN' / 'en-GB' 这种带地区的写法要能归一到支持的两种
+  assert.equal(normalizeLang('zh-Hans-CN'), 'zh-CN');
+  assert.equal(normalizeLang('zh_CN'), 'zh-CN');
+  assert.equal(normalizeLang('en-GB'), 'en-US');
+  assert.equal(normalizeLang('fr-FR'), null, '不支持的语言要返回 null，交给上层回退');
+
+  // 优先级：URL 显式指定 > 上次选择 > 浏览器偏好 > 中文
+  assert.equal(detectLang({ search: '?lang=en-US', stored: 'zh-CN', navigatorLang: 'zh-CN' }), 'en-US');
+  assert.equal(detectLang({ hash: '#view=nav&page=curve&lang=en', stored: 'zh-CN' }), 'en-US');
+  assert.equal(detectLang({ stored: 'zh-CN', navigatorLang: 'en-US' }), 'zh-CN');
+  assert.equal(detectLang({ navigatorLang: 'en-US' }), 'en-US');
+  assert.equal(detectLang({ navigatorLang: 'de-DE' }), 'zh-CN', '认不出来时回落到中文');
+  assert.equal(detectLang({}), 'zh-CN');
+
+  // 默认语言就是基线语言，且中文文案与 HTML 里写死的那几处一致
+  assert.equal(getLang(), 'zh-CN');
+  assert.equal(t('app.title'), 'GPU 显存负载监控');
+  assert.equal(t('export.open'), '导出');
+
+  // 切换与订阅
+  let notified = null;
+  const off = onLangChange((lang) => { notified = lang; });
+  setLang('en-US', { persist: false });
+  assert.equal(getLang(), 'en-US');
+  assert.equal(notified, 'en-US', '切语言要通知订阅者');
+  assert.equal(t('kpi.count.label'), 'GPUs');
+  assert.equal(t('kpi.count.unit'), '', '英文没有量词，单位应为空串');
+  notified = null;
+  setLang('en-US', { persist: false });
+  assert.equal(notified, null, '切到同一种语言是空操作，不该白重绘一次');
+  setLang('zh', { persist: false });
+  assert.equal(getLang(), 'zh-CN', '带别名的写法（zh）也要认');
+  assert.equal(notified, 'zh-CN');
+  off();
+  notified = null;
+  setLang('en-US', { persist: false });
+  assert.equal(notified, null, '退订之后不该再收到通知');
+  setLang('zh-CN', { persist: false });
+
+  // 漏 key：原样返回 key（页面上立刻看得见），而不是返回空串留一片空白；
+  // 同一条只 warn 一次，免得每秒渲染几十次把控制台刷满
+  let warned = 0;
+  const realWarn = console.warn;
+  console.warn = () => { warned += 1; };
+  assert.equal(t('nope.not.exists'), 'nope.not.exists');
+  assert.equal(t('nope.not.exists'), 'nope.not.exists');
+  console.warn = realWarn;
+  assert.equal(warned, 1, '同一条漏 key 只提醒一次');
+  // 传了不存在的语言时按基线语言处理，不抛异常
+  assert.equal(setLang('fr-FR', { persist: false }), 'zh-CN');
+  assert.equal(getLang(), 'zh-CN');
+
+  // DOM 那两个函数要能在没有 DOM 的 Node 里安全 import（惰性使用 document）
+  assert.equal(typeof applyStaticI18n, 'function');
+  assert.equal(typeof syncLangSwitch, 'function');
+  assert.equal(applyStaticI18n(null), 0, '传 null 要安全返回，方便无 DOM 环境调用');
+  assert.equal(syncLangSwitch(null), undefined);
+
+  // 结构约定：data-i18n 不能挂在"JS 会重写文本"的节点上。
+  // 症状很隐蔽——切语言时属性先把英文写进去，紧接着渲染函数又盖回中文，
+  // 看起来像"英文没生效"。#notice-title / #alerts-title 就是踩过的两个坑。
+  const refsOfId = new Map();
+  for (const m of appJs.matchAll(/^\s{2}(\w+): \$\(([^)]+)\),/gm)) {
+    refsOfId.set(m[2].replace(/['"`]/g, ''), m[1]);
+  }
+  const writtenRefs = new Set();
+  for (const m of appJs.matchAll(/refs\.(\w+)\.(?:textContent|innerHTML|replaceChildren)/g)) {
+    writtenRefs.add(m[1]);
+  }
+  const misattached = [];
+  for (const m of indexHtml.matchAll(/<(\w+)([^>]*?)data-i18n="([^"]+)"[^>]*>/g)) {
+    const id = (m[2].match(/id="([^"]+)"/) || [])[1];
+    const refKey = id ? refsOfId.get(id) : null;
+    if (refKey && writtenRefs.has(refKey)) misattached.push(`${m[3]} → #${id}`);
+  }
+  assert.deepEqual(
+    misattached,
+    [],
+    `这些 data-i18n 挂在 JS 会重写的节点上，切语言会被盖掉：${misattached.join('、')}`,
+  );
+
+  // 语言开关本身要有：两枚 chip、带 data-lang，并且默认标出当前语言
+  assert.ok(indexHtml.includes('id="lang-switch"'), '顶栏要有语言开关');
+  for (const lang of ['zh-CN', 'en-US']) {
+    assert.ok(indexHtml.includes(`data-lang="${lang}"`), `语言开关要有 ${lang} 这一枚`);
+  }
+}
+
 process.stdout.write(
   '冒烟测试通过：GPU 解析（基础/扩展/逗号名/CRLF）/ 字段探测与降级 / 宿主指标（Linux + Windows）/ '
   + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
@@ -2925,5 +3051,7 @@ process.stdout.write(
   + '状态胶囊（陈旧·降级·空闲降频·优先级） / '
   + '导航模式紧凑顶栏（结构约定）/ '
   + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）/ '
-  + '--tz 固定时区（系统时区是 UTC 时的回归）\n',
+  + '--tz 固定时区（系统时区是 UTC 时的回归）/ '
+  + '界面语言（中英 key 对齐·占位符对齐·语言识别优先级·切换与订阅·漏 key 回退·'
+  + 'data-i18n 只挂静态节点）\n',
 );

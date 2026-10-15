@@ -246,6 +246,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   font-variant-numeric: tabular-nums;
 }
 .kpi__unit { margin-left: 4px; font-size: 14px; font-weight: 500; color: var(--jf-color-ink-muted); }
+/* 英文没有量词（"8 张" vs "8"），单位 span 会是空串——藏掉它，免得留出一个 margin 的空隙 */
+.kpi__unit:empty { display: none; }
 .kpi__foot { margin-top: 8px; font-size: 12.5px; color: var(--jf-color-ink-muted); }
 .kpi__foot[data-tone="warning"] { color: var(--jf-color-warning); font-weight: 500; }
 .kpi__foot[data-tone="danger"] { color: var(--jf-color-danger); font-weight: 500; }
@@ -300,6 +302,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   background: var(--jf-color-surface);
   color: var(--jf-color-ink);
   font: inherit; font-size: 13.5px;
+  /* 英文页签名更长（"Processes"），整条页签栏已 flex-wrap，这里只保证单个页签不被折断 */
+  white-space: nowrap;
   cursor: pointer;
 }
 .view-nav__tab:hover { border-color: var(--jf-color-control-border); }
@@ -317,6 +321,9 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .view-switch { display: flex; gap: 0; }
 .view-switch .chip:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
 .view-switch .chip:last-child { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: -1px; }
+/* 语言开关：和展示模式同一排，但两枚是独立的单选按钮，不做连体——免得被误读成同一个开关的两个档位 */
+.lang-switch { display: inline-flex; gap: 6px; }
+.lang-switch .chip { padding: 0 12px; }
 
 /* ---------- 导航模式的紧凑顶栏 ---------- */
 /* 导航模式下页头 / 告警 / KPI 三块常驻区本来就够用，按宽松排版铺开却在 720px 高的窗口里
@@ -472,6 +479,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   background: var(--jf-color-surface);
   color: var(--jf-color-ink);
   font: inherit; font-size: 13px; cursor: pointer;
+  /* 英文（"Single page"）比中文长：宁可整组换行，也不要在 chip 内部折成两行 */
+  white-space: nowrap;
   transition: background var(--jf-duration-fast) ease, color var(--jf-duration-fast) ease, border-color var(--jf-duration-fast) ease;
 }
 .chip:hover { border-color: var(--jf-color-primary); color: var(--jf-color-primary); }
@@ -722,6 +731,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 @media (max-width: 1180px) {
   .work-col { grid-column: span 12; }
   .evidence-col { grid-column: span 12; position: static; }
+  /* 英文表头比中文长一截（"Share of card"），窄屏下让表头折行，别把表格顶成横向滚动 */
+  .table thead th { white-space: normal; }
 }
 
 @media (max-width: 720px) {

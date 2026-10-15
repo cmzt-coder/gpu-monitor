@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
-<title>GPU 显存负载监控</title>
+<title data-i18n="app.title">GPU 显存负载监控</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23005BAC'/%3E%3Cpath d='M6 21l6-7 5 4 4-6 5 5' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="./styles.css">
 </head>
@@ -39,14 +39,14 @@
   </symbol>
 </svg>
 
-<a class="skip-link" href="#work">跳到工作区</a>
+<a class="skip-link" href="#work" data-i18n="app.skipToWork">跳到工作区</a>
 
 <div class="app">
   <header class="orient">
     <div class="orient__main">
       <span class="title-rule" aria-hidden="true"></span>
       <div class="orient__text">
-        <h1 class="page-title">GPU 显存负载监控</h1>
+        <h1 class="page-title" data-i18n="app.title">GPU 显存负载监控</h1>
         <p class="orient__sub" id="orient-sub">正在连接采集服务…</p>
       </div>
     </div>
@@ -57,11 +57,16 @@
       </p>
       <button type="button" class="btn btn--primary" id="btn-export">
         <svg class="icon" aria-hidden="true"><use href="#icon-download"></use></svg>
-        导出
+        <span data-i18n="export.open">导出</span>
       </button>
-      <div class="view-switch" id="view-switch" role="group" aria-label="展示模式">
-        <button type="button" class="chip" data-view="single">单页</button>
-        <button type="button" class="chip" data-view="nav">导航</button>
+      <div class="view-switch" id="view-switch" role="group" aria-label="展示模式" data-i18n-attr="aria-label:nav.group.view">
+        <button type="button" class="chip" data-view="single" data-i18n="nav.view.single">单页</button>
+        <button type="button" class="chip" data-view="nav" data-i18n="nav.view.nav">导航</button>
+      </div>
+      <div class="lang-switch" id="lang-switch" role="group" aria-label="语言" data-i18n-attr="aria-label:nav.group.language">
+        <!-- 语言名各写各的（中 / EN），不跟界面语言翻译：英文用户也要一眼认出中文入口 -->
+        <button type="button" class="chip" data-lang="zh-CN" aria-pressed="true">中</button>
+        <button type="button" class="chip" data-lang="en-US" aria-pressed="false">EN</button>
       </div>
     </div>
   </header>
@@ -69,6 +74,8 @@
   <div class="notice" id="notice" role="alert" hidden>
     <svg class="icon notice__icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
     <div class="notice__body">
+      <!-- 这里不加 data-i18n：标题由 showNotice() 按错误类型重写，属性会在下次渲染时被盖掉。
+           提示条里的文案一律走渲染处的 t()，见 app.js 的 showNotice -->
       <p class="notice__title" id="notice-title">采集异常</p>
       <p class="notice__text" id="notice-text"></p>
       <p class="notice__hint" id="notice-hint" hidden>
@@ -76,7 +83,7 @@
         <code id="notice-code"></code>
       </p>
     </div>
-    <button type="button" class="btn btn--ghost btn--sm" id="btn-retry">重试</button>
+    <button type="button" class="btn btn--ghost btn--sm" id="btn-retry" data-i18n="common.retry">重试</button>
   </div>
 
   <div class="alerts" id="alerts" hidden>
@@ -85,6 +92,7 @@
     <p class="visually-hidden" id="alerts-live" role="status" aria-live="polite"></p>
     <div class="alerts__head">
       <svg class="icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
+      <!-- 同上：标题由 renderAlerts() 写入（会带上触发条数），不是纯静态文案 -->
       <p class="alerts__title" id="alerts-title">告警</p>
       <span class="alerts__badge" id="alerts-badge" hidden></span>
     </div>
@@ -97,14 +105,14 @@
     </details>
   </div>
 
-  <section class="kpis" aria-label="整机概览">
+  <section class="kpis" aria-label="整机概览" data-i18n-attr="aria-label:kpi.group.machine">
     <article class="kpi">
-      <p class="kpi__label">GPU 数量</p>
+      <p class="kpi__label" data-i18n="kpi.count.label">GPU 数量</p>
       <p class="kpi__value" id="kpi-count">--<span class="kpi__unit">张</span></p>
       <p class="kpi__foot" id="kpi-count-foot">等待采集</p>
     </article>
     <article class="kpi">
-      <p class="kpi__label">显存已用 / 总量</p>
+      <p class="kpi__label" data-i18n="kpi.mem.label">显存已用 / 总量</p>
       <p class="kpi__value" id="kpi-mem">--<span class="kpi__unit">/ --</span></p>
       <div class="meter" role="img" aria-labelledby="kpi-mem-meter-label">
         <span class="meter__fill" id="kpi-mem-fill" style="width:0%"></span>
@@ -112,17 +120,17 @@
       <p class="kpi__foot" id="kpi-mem-foot">占用率 --</p>
     </article>
     <article class="kpi">
-      <p class="kpi__label">平均 GPU 利用率</p>
+      <p class="kpi__label" data-i18n="kpi.util.label">平均 GPU 利用率</p>
       <p class="kpi__value" id="kpi-util">--<span class="kpi__unit">%</span></p>
       <p class="kpi__foot" id="kpi-util-foot">近 1 小时平均</p>
     </article>
     <article class="kpi">
-      <p class="kpi__label">最高温度</p>
+      <p class="kpi__label" data-i18n="kpi.temp.label">最高温度</p>
       <p class="kpi__value" id="kpi-temp">--<span class="kpi__unit">°C</span></p>
       <p class="kpi__foot" id="kpi-temp-foot">等待采集</p>
     </article>
     <article class="kpi">
-      <p class="kpi__label">占用进程</p>
+      <p class="kpi__label" data-i18n="kpi.proc.label">占用进程</p>
       <p class="kpi__value" id="kpi-proc">--<span class="kpi__unit">个</span></p>
       <p class="kpi__foot" id="kpi-proc-foot">等待采集</p>
     </article>
@@ -131,11 +139,11 @@
   <!-- 页签栏独立成条、不在卡片网格里：导航模式下它要粘在窗口顶上（滚到哪儿都能切页），
        而网格项的可粘范围只有自己那一行，待在 .work-grid 里根本粘不住 -->
   <div class="topbar" id="topbar" hidden>
-    <nav class="view-nav" id="view-nav" aria-label="页面导航">
-      <button type="button" class="view-nav__tab" data-page="overview">总览</button>
-      <button type="button" class="view-nav__tab" data-page="curve">曲线</button>
-      <button type="button" class="view-nav__tab" data-page="processes">进程</button>
-      <button type="button" class="view-nav__tab" data-page="system">系统</button>
+    <nav class="view-nav" id="view-nav" aria-label="页面导航" data-i18n-attr="aria-label:nav.group.pages">
+      <button type="button" class="view-nav__tab" data-page="overview" data-i18n="nav.tab.overview">总览</button>
+      <button type="button" class="view-nav__tab" data-page="curve" data-i18n="nav.tab.curve">曲线</button>
+      <button type="button" class="view-nav__tab" data-page="processes" data-i18n="nav.tab.processes">进程</button>
+      <button type="button" class="view-nav__tab" data-page="system" data-i18n="nav.tab.system">系统</button>
     </nav>
   </div>
 
@@ -144,15 +152,15 @@
       <section class="card" data-page="curve" aria-labelledby="charts-h">
         <div class="card__head">
           <div>
-            <h2 class="card__title" id="charts-h">曲线</h2>
+            <h2 class="card__title" id="charts-h" data-i18n="chart.title">曲线</h2>
             <p class="card__sub" id="charts-sub">最近 5 分钟的实时窗口</p>
           </div>
           <div class="chart-head-actions">
-            <div class="range-picker" id="range-picker" role="group" aria-label="选择曲线时间范围"></div>
+            <div class="range-picker" id="range-picker" role="group" aria-label="选择曲线时间范围" data-i18n-attr="aria-label:chart.group.range"></div>
             <div class="legend" aria-hidden="true">
-              <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>显存占用</span>
-              <span class="legend__item"><span class="legend__swatch legend__swatch--util"></span>GPU 利用率</span>
-              <span class="legend__item"><span class="legend__swatch legend__swatch--limit"></span>90% 警戒线</span>
+              <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span><span data-i18n="chart.legend.mem">显存占用</span></span>
+              <span class="legend__item"><span class="legend__swatch legend__swatch--util"></span><span data-i18n="chart.legend.util">GPU 利用率</span></span>
+              <span class="legend__item"><span class="legend__swatch legend__swatch--limit"></span><span data-i18n="chart.legend.limit">90% 警戒线</span></span>
             </div>
           </div>
         </div>
@@ -167,13 +175,13 @@
       <section class="card" data-page="curve" aria-labelledby="svc-h">
         <div class="card__head card__head--stack">
           <div>
-            <h2 class="card__title" id="svc-h">服务显存曲线</h2>
+            <h2 class="card__title" id="svc-h" data-i18n="svc.title">服务显存曲线</h2>
             <p class="card__sub" id="svc-sub">按服务汇总，最多画占用最高的 5 个</p>
           </div>
           <div class="legend" id="svc-legend"></div>
         </div>
         <div class="chart__canvas-wrap chart__canvas-wrap--tall" id="svc-chart-wrap">
-          <canvas class="chart__canvas" id="svc-canvas" role="img" aria-label="按服务汇总的显存占用曲线"></canvas>
+          <canvas class="chart__canvas" id="svc-canvas" role="img" aria-label="按服务汇总的显存占用曲线" data-i18n-attr="aria-label:svc.canvas.label"></canvas>
         </div>
         <div class="state-block" id="svc-empty" hidden>
           <svg class="icon state-block__icon" aria-hidden="true"><use href="#icon-stack"></use></svg>
@@ -185,18 +193,18 @@
       <section class="card" data-page="system" aria-labelledby="sys-h">
         <div class="card__head">
           <div>
-            <h2 class="card__title" id="sys-h">系统资源</h2>
+            <h2 class="card__title" id="sys-h" data-i18n="sys.title">系统资源</h2>
             <p class="card__sub" id="sys-sub">宿主 CPU / 内存 / 磁盘 / 网络</p>
           </div>
           <div class="sys-actions">
-            <span class="legend__item"><span class="legend__swatch legend__swatch--cpu"></span>CPU 使用率</span>
-            <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span>内存使用率</span>
+            <span class="legend__item"><span class="legend__swatch legend__swatch--cpu"></span><span data-i18n="sys.legend.cpu">CPU 使用率</span></span>
+            <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span><span data-i18n="sys.legend.mem">内存使用率</span></span>
           </div>
         </div>
         <div class="sys-meters" id="sys-meters"></div>
         <div class="sys-chart" id="sys-chart-wrap" hidden>
           <canvas id="sys-canvas" class="chart__canvas" role="img"
-                  aria-label="宿主 CPU 与内存使用率的实时曲线"></canvas>
+                  aria-label="宿主 CPU 与内存使用率的实时曲线" data-i18n-attr="aria-label:sys.canvas.label"></canvas>
         </div>
         <dl class="sys-detail" id="sys-detail"></dl>
         <div class="state-block" id="sys-empty" hidden>
@@ -209,29 +217,29 @@
       <section class="card" data-page="processes" aria-labelledby="proc-h">
         <div class="card__head card__head--stack">
           <div>
-            <h2 class="card__title" id="proc-h">当前占用进程</h2>
+            <h2 class="card__title" id="proc-h" data-i18n="proc.title">当前占用进程</h2>
             <p class="card__sub" id="proc-sub">按显存占用从高到低排列</p>
           </div>
-          <div class="chips" id="proc-filter" role="group" aria-label="按 GPU 过滤进程"></div>
+          <div class="chips" id="proc-filter" role="group" aria-label="按 GPU 过滤进程" data-i18n-attr="aria-label:proc.group.filter"></div>
         </div>
         <div class="table-wrap" id="proc-table-wrap">
           <table class="table" id="proc-table">
-            <caption class="visually-hidden">当前占用显存的进程，可按 GPU 过滤</caption>
+            <caption class="visually-hidden" data-i18n="proc.table.caption">当前占用显存的进程，可按 GPU 过滤</caption>
             <thead>
               <tr>
                 <th scope="col">GPU</th>
                 <th scope="col">PID</th>
-                <th scope="col">进程</th>
-                <th scope="col">服务</th>
-                <th scope="col" class="num">显存占用</th>
-                <th scope="col" class="num">占该卡比例</th>
+                <th scope="col" data-i18n="proc.table.th.process">进程</th>
+                <th scope="col" data-i18n="proc.table.th.service">服务</th>
+                <th scope="col" class="num" data-i18n="proc.table.th.mem">显存占用</th>
+                <th scope="col" class="num" data-i18n="proc.table.th.share">占该卡比例</th>
               </tr>
             </thead>
             <tbody id="proc-body"></tbody>
           </table>
         </div>
         <div class="state-block" id="proc-empty" hidden>
-          <p class="state-block__title">没有检测到占用显存的进程</p>
+          <p class="state-block__title" data-i18n="proc.empty.title">没有检测到占用显存的进程</p>
           <p class="state-block__text" id="proc-empty-text">显卡当前空闲，或采集服务权限不足（需要与业务进程相同的用户）。</p>
         </div>
       </section>
@@ -239,32 +247,32 @@
       <section class="card" data-page="processes" aria-labelledby="proc-hist-h">
         <div class="card__head">
           <div>
-            <h2 class="card__title" id="proc-hist-h">进程占用历史</h2>
+            <h2 class="card__title" id="proc-hist-h" data-i18n="procHist.title">进程占用历史</h2>
             <p class="card__sub" id="proc-hist-sub">按进程身份变化留档</p>
           </div>
           <div class="chart-head-actions">
-            <div class="range-picker" id="proc-hist-range" role="group" aria-label="选择进程历史的时间范围"></div>
-            <div class="range-picker" id="proc-hist-min" role="group" aria-label="只看占用超过该值的进程"></div>
+            <div class="range-picker" id="proc-hist-range" role="group" aria-label="选择进程历史的时间范围" data-i18n-attr="aria-label:procHist.group.range"></div>
+            <div class="range-picker" id="proc-hist-min" role="group" aria-label="只看占用超过该值的进程" data-i18n-attr="aria-label:procHist.group.min"></div>
           </div>
         </div>
         <div class="table-wrap table-wrap--scroll" id="proc-hist-wrap" hidden>
           <table class="table" id="proc-hist-table">
-            <caption class="visually-hidden">历史进程占用记录，按时间从新到旧</caption>
+            <caption class="visually-hidden" data-i18n="procHist.table.caption">历史进程占用记录，按时间从新到旧</caption>
             <thead>
               <tr>
-                <th scope="col">时间</th>
+                <th scope="col" data-i18n="procHist.table.th.time">时间</th>
                 <th scope="col">GPU</th>
                 <th scope="col">PID</th>
-                <th scope="col">进程</th>
-                <th scope="col">服务</th>
-                <th scope="col" class="num">显存</th>
+                <th scope="col" data-i18n="proc.table.th.process">进程</th>
+                <th scope="col" data-i18n="proc.table.th.service">服务</th>
+                <th scope="col" class="num" data-i18n="procHist.table.th.mem">显存</th>
               </tr>
             </thead>
             <tbody id="proc-hist-body"></tbody>
           </table>
         </div>
         <div class="proc-hist-more" id="proc-hist-more" hidden>
-          <button type="button" class="btn btn--ghost btn--sm" id="proc-hist-more-btn">加载更多</button>
+          <button type="button" class="btn btn--ghost btn--sm" id="proc-hist-more-btn" data-i18n="procHist.more">加载更多</button>
           <p class="proc-hist-more__hint" id="proc-hist-more-hint"></p>
         </div>
         <div class="state-block" id="proc-hist-empty" hidden>
@@ -274,17 +282,17 @@
       </section>
     </main>
 
-    <aside class="evidence-col" aria-label="当前占用与采集信息">
+    <aside class="evidence-col" aria-label="当前占用与采集信息" data-i18n-attr="aria-label:aside.group">
       <section class="card" data-page="overview" aria-labelledby="cards-h">
         <div class="card__head">
-          <h2 class="card__title" id="cards-h">各卡当前占用</h2>
+          <h2 class="card__title" id="cards-h" data-i18n="cards.title">各卡当前占用</h2>
         </div>
         <div class="gpu-cards" id="gpu-cards"></div>
       </section>
 
       <section class="card" data-page="system" aria-labelledby="meta-h">
         <div class="card__head">
-          <h2 class="card__title" id="meta-h">采集信息</h2>
+          <h2 class="card__title" id="meta-h" data-i18n="meta.title">采集信息</h2>
         </div>
         <dl class="meta" id="meta-list"></dl>
       </section>
@@ -298,33 +306,33 @@
 
 <dialog class="export" id="export-dialog" aria-labelledby="export-title">
   <div class="export__head">
-    <h2 class="export__title" id="export-title">导出数据</h2>
-    <button type="button" class="export__close" id="export-close" aria-label="关闭">✕</button>
+    <h2 class="export__title" id="export-title" data-i18n="export.title">导出数据</h2>
+    <button type="button" class="export__close" id="export-close" aria-label="关闭" data-i18n-attr="aria-label:export.close">✕</button>
   </div>
 
   <div class="export__body">
     <fieldset class="export__group">
-      <legend class="export__legend">导出内容</legend>
+      <legend class="export__legend" data-i18n="export.group.content">导出内容</legend>
       <div class="export__options" id="export-content"></div>
       <p class="export__hint" id="export-time-hint"></p>
     </fieldset>
 
     <fieldset class="export__group" id="export-layout-group" hidden>
-      <legend class="export__legend">布局</legend>
-      <div class="range-picker" id="export-layout" role="group" aria-label="选择导出的表格布局"></div>
+      <legend class="export__legend" data-i18n="export.group.layout">布局</legend>
+      <div class="range-picker" id="export-layout" role="group" aria-label="选择导出的表格布局" data-i18n-attr="aria-label:export.layout.group"></div>
       <p class="export__hint" id="export-layout-hint"></p>
     </fieldset>
 
     <fieldset class="export__group" id="export-range-group">
-      <legend class="export__legend">时间范围</legend>
-      <div class="range-picker" id="export-range" role="group" aria-label="选择导出的时间范围"></div>
+      <legend class="export__legend" data-i18n="export.group.range">时间范围</legend>
+      <div class="range-picker" id="export-range" role="group" aria-label="选择导出的时间范围" data-i18n-attr="aria-label:export.range.group"></div>
       <p class="export__hint" id="export-range-hint"></p>
     </fieldset>
 
     <div class="export__group" id="export-full-group">
       <label class="export__check">
         <input type="checkbox" id="export-full">
-        <span>包含扩展指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流 / ECC）</span>
+        <span data-i18n="export.full.label">包含扩展指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流 / ECC）</span>
       </label>
       <p class="export__hint" id="export-full-hint"></p>
     </div>
@@ -333,8 +341,8 @@
   <div class="export__foot">
     <p class="export__summary" id="export-summary"></p>
     <div class="export__actions">
-      <button type="button" class="btn btn--ghost" id="export-cancel">取消</button>
-      <button type="button" class="btn btn--primary" id="export-confirm">下载</button>
+      <button type="button" class="btn btn--ghost" id="export-cancel" data-i18n="export.cancel">取消</button>
+      <button type="button" class="btn btn--primary" id="export-confirm" data-i18n="export.confirm">下载</button>
     </div>
   </div>
 </dialog>

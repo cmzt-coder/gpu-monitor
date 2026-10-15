@@ -3,6 +3,8 @@ import { utilKpiView } from './kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from './gpu-card-parts.js';
 import { hoverIndexFromX, hoverRows } from './chart-hover.js';
 import { statusView } from './status-pill.js';
+import { getLang, initI18n, onLangChange, setLang } from './i18n/index.js';
+import { applyStaticI18n, syncLangSwitch } from './i18n/dom.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -29,6 +31,7 @@ const refs = {
   btnRetry: $('btn-retry'),
   btnExport: $('btn-export'),
   viewSwitch: $('view-switch'),
+  langSwitch: $('lang-switch'),
   viewNav: $('view-nav'),
   viewTopbar: $('topbar'),
   appEl: document.querySelector('.app'),
@@ -2725,6 +2728,50 @@ refs.viewSwitch.addEventListener('click', (event) => {
   const button = event.target.closest('.chip[data-view]');
   if (button) setView(button.dataset.view);
 });
+
+/* ---------- 界面语言 ---------- */
+
+/**
+ * 切语言时，把所有"内容签名"清掉。
+ *
+ * 这些签名是"内容没变就别重建 DOM"的守卫（见 renderProcTable / renderCharts 等），
+ * 而签名里记的是**上一种语言**生成的文本。只刷新静态文案、不清签名，就会出现
+ * "卡片标题已经换成英文、表格和脚注还留着中文"的半截效果。
+ *
+ * 集中在这里清，而不是给 9 处签名各加一个语言前缀：改动只在一处，漏了谁一眼能看出来。
+ */
+function resetTextSignatures() {
+  state.chartSignature = '';
+  state.cardSignature = '';
+  state.procSignature = null;
+  state.ruleSignature = null;
+  state.firingSignature = null;
+  state.processSignature = null;
+  for (const node of [
+    refs.rangePicker,
+    refs.procFilter,
+    refs.procHistRange,
+    refs.procHistMin,
+  ]) {
+    if (node?.dataset) node.dataset.signature = '';
+  }
+}
+
+/** 语言变化的统一入口：静态文案 → 开关状态 → 作废签名 → 用内存里的状态整帧重渲染 */
+function applyLanguage(lang) {
+  applyStaticI18n(document);
+  syncLangSwitch(refs.langSwitch, lang);
+  resetTextSignatures();
+  renderRangePicker();
+  render();
+}
+
+refs.langSwitch.addEventListener('click', (event) => {
+  const button = event.target.closest('.chip[data-lang]');
+  if (button) setLang(button.dataset.lang);
+});
+onLangChange(applyLanguage);
+
 refs.viewNav.addEventListener('click', (event) => {
   const tab = event.target.closest('.view-nav__tab');
   if (tab) setView('nav', tab.dataset.page);
@@ -2799,5 +2846,15 @@ async function boot() {
   schedulePolling();
   startPush();
 }
+
+// 语言必须在第一次渲染之前定下来：URL 显式指定 → 上次选择 → 浏览器偏好 → 中文。
+// 静态文案先刷一遍，免得首帧之前页面停在 HTML 里写死的那种语言上。
+initI18n({
+  search: location.search,
+  hash: location.hash,
+  navigatorLang: navigator.language,
+});
+applyStaticI18n(document);
+syncLangSwitch(refs.langSwitch, getLang());
 
 boot();
