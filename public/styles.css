@@ -326,7 +326,9 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .app[data-dense="1"] .orient { gap: 12px; align-items: center; padding-bottom: 10px; }
 .app[data-dense="1"] .orient__main { align-items: center; }
 .app[data-dense="1"] .orient__text { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; }
-.app[data-dense="1"] .page-title { font-size: 20px; }
+/* 20px 时和卡片标题（18px）只差 2px，主次几乎看不出；22px + 字重把层次拉回来。
+   顶栏还有余量（页头 57px，多这 2px 不影响"内容起点 269px"那个结论） */
+.app[data-dense="1"] .page-title { font-size: 22px; }
 .app[data-dense="1"] .orient__sub { margin-top: 0; font-size: 12.5px; }
 .app[data-dense="1"] .status-pill { min-height: 30px; padding: 0 12px; font-size: 12.5px; }
 .app[data-dense="1"] .orient__actions .btn { min-height: 32px; font-size: 13px; }
@@ -585,20 +587,6 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .meta dd { font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; overflow-wrap: anywhere; }
 
 .footer { margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--jf-color-border); color: var(--jf-color-ink-muted); font-size: 12.5px; }
-
-/* ---------- 骨架屏 ---------- */
-.skeleton {
-  border-radius: var(--jf-radius-sm);
-  background: linear-gradient(90deg, var(--jf-color-surface-muted) 25%, #f6f9fb 50%, var(--jf-color-surface-muted) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.4s linear infinite;
-}
-@keyframes shimmer {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
-}
-.skeleton-chart { height: 130px; margin-bottom: 14px; }
-.skeleton-line { height: 22px; margin-bottom: 10px; width: 40%; }
 
 /* ---------- 系统资源 ---------- */
 .sys-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }

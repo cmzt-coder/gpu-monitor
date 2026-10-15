@@ -22,6 +22,7 @@ const refs = {
   alertsStatus: $('alerts-status'),
   alertsList: $('alerts-list'),
   alertsEmpty: $('alerts-empty'),
+  alertsLive: $('alerts-live'),
   alertsRules: $('alerts-rules'),
   alertsRulesSummary: $('alerts-rules-summary'),
   alertsRuleList: $('alerts-rule-list'),
@@ -381,7 +382,14 @@ function applyState(data) {
   state.meta = data;
   noteProcessIdentity();
   if (state.gpus.length > 0 || data.system) {
-    appendSample({ t: data.ts || Date.now(), gpus: state.gpus, system: data.system });
+    // services 一定要带上：服务显存曲线与图例都从它来。漏了这个字段，
+    // 那条号称"实时窗口"的曲线只会显示开页那一刻回填的数据，之后一直定格。
+    appendSample({
+      t: data.ts || Date.now(),
+      gpus: state.gpus,
+      system: data.system,
+      services: data.services,
+    });
   }
   render();
 }
@@ -636,6 +644,12 @@ function renderAlerts(meta) {
   refs.alertsEmpty.hidden = firing.length > 0;
   refs.alertsEmpty.textContent = `当前无告警，${rules.length || alerts.ruleCount} 条规则未触发`;
 
+  // 读屏播报：只在触发集合变化时改这一行（它挂了 aria-live，每秒刷就会被反复念）
+  const liveSummary = firing.length === 0
+    ? '当前无告警'
+    : `当前 ${firing.length} 条告警${firing.some((alert) => alert.level === 'critical') ? '，含严重级别' : ''}`;
+  if (refs.alertsLive.textContent !== liveSummary) refs.alertsLive.textContent = liveSummary;
+
   // 触发中的条目：身份（哪条规则、什么级别、什么文案）没变就只刷新"自 N 秒前"。
   // 真出事时正是有人盯着这块看的时刻，每秒重建会让悬停闪、正文也选不中。
   const firingSignature = firing.map((alert) => [
@@ -845,6 +859,26 @@ function themeColors() {
   };
 }
 
+/**
+ * canvas 的 CSS 尺寸缓存。
+ *
+ * `drawLines` 每个采集周期都会跑一遍，而 `getBoundingClientRect()` 会强制同步重排——
+ * 8 卡页面每秒就是 8 次。这个尺寸只在两种情况下会变：**窗口缩放**、以及**切页签 / 切模式**
+ * （列宽从 12 格变 8 格），所以只在这两处让缓存失效（见 resize 处理器与 applyView）。
+ * canvas 元素本身是重建的（卡片结构变化时），WeakMap 会随之自然淘汰旧条目。
+ */
+let canvasSizeCache = new WeakMap();
+
+function canvasBox(canvas) {
+  let box = canvasSizeCache.get(canvas);
+  if (!box) {
+    const rect = canvas.getBoundingClientRect();
+    box = { width: Math.round(rect.width), height: Math.round(rect.height) };
+    canvasSizeCache.set(canvas, box);
+  }
+  return box;
+}
+
 /* ---------- 曲线悬停：竖直参考线 + 跟随鼠标的浮窗 ---------- */
 // 状态按 canvas 存：hoverState 记鼠标当前落在哪个采样点上，chartHoverData 记这张图上次画
 // 的系列与时间轴。这样鼠标一动只重画这一张（8 卡时不会因为动鼠标把 8 张图全重绘），
@@ -861,7 +895,7 @@ function chartHoverRedraw(canvas, index) {
 }
 
 function attachChartHover(canvas) {
-  canvas.addEventListener('pointermove', (event) => {
+  const track = (event) => {
     const data = chartHoverData.get(canvas);
     if (!data) return;
     const rect = canvas.getBoundingClientRect();
@@ -876,11 +910,21 @@ function attachChartHover(canvas) {
     });
     if (index !== (hoverState.get(canvas) ?? null)) chartHoverRedraw(canvas, index);
     showChartTip(event, data, index);
-  });
-  canvas.addEventListener('pointerleave', () => {
+  };
+  const clear = () => {
     chartHoverRedraw(canvas, null);
     hideChartTip();
+  };
+
+  canvas.addEventListener('pointermove', track);
+  // 触屏没有 hover：改成"按住看"（按下即显示，拖动还能扫着看）。
+  // 松手才收起，且只对非鼠标生效——鼠标左键点一下不该把读数弄没。
+  canvas.addEventListener('pointerdown', track);
+  canvas.addEventListener('pointerup', (event) => {
+    if (event.pointerType !== 'mouse') clear();
   });
+  canvas.addEventListener('pointercancel', clear);
+  canvas.addEventListener('pointerleave', clear);
 }
 
 function hideChartTip() {
@@ -956,9 +1000,7 @@ function resetChartHover() {
  * 鼠标停着不动时高亮不会闪掉。浮窗本身是 DOM，见 showChartTip()。
  */
 function drawLines(canvas, seriesList, windowSamples, { limit = null, times = [] } = {}) {
-  const rect = canvas.getBoundingClientRect();
-  const width = Math.round(rect.width);
-  const height = Math.round(rect.height);
+  const { width, height } = canvasBox(canvas);
   if (width < 40 || height < 40) return;
   // 数据侧留一份：鼠标一动只重画这一张图，浮窗要的系列/时间轴也从这儿取
   const hoverIndex = hoverState.get(canvas) ?? null;
@@ -978,7 +1020,8 @@ function drawLines(canvas, seriesList, windowSamples, { limit = null, times = []
   const plotH = Math.max(10, height - pad.top - pad.bottom);
   const slots = Math.max(2, windowSamples);
 
-  ctx.font = '11px ' + cssVar('--jf-font-body', 'sans-serif');
+  // 12px：1× 屏（外接显示器没有 dpr 加成）上 11px 明显偏细，而这张图是要"看台机器"的
+  ctx.font = '12px ' + cssVar('--jf-font-body', 'sans-serif');
   ctx.lineWidth = 1;
 
   for (const value of [0, 25, 50, 75, 100]) {
@@ -1091,7 +1134,9 @@ function drawLines(canvas, seriesList, windowSamples, { limit = null, times = []
   ctx.fillStyle = colors.muted;
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  ctx.fillText(count > 0 && times[0] ? fmtClock(times[0]) : '--:--:--', pad.left, pad.top + plotH + 5);
+  // 起点时间画在**第一个数据点**正下方，而不是固定贴左边：窗口没攒满时数据只占右边一段，
+  // 贴左边的那行字看起来像在给一段空白标注时间（悬停那块区域也是按"无数据"处理的）
+  ctx.fillText(count > 0 && times[0] ? fmtClock(times[0]) : '--:--:--', count > 0 ? xAt(0) : pad.left, pad.top + plotH + 5);
   ctx.textAlign = 'right';
   ctx.fillText('现在', pad.left + plotW, pad.top + plotH + 5);
 
@@ -2408,6 +2453,8 @@ function applyView() {
   render();
   // 切页签会重建/改变 canvas，旧的悬停索引（和浮窗）作废
   resetChartHover();
+  // 列宽变了（比如某一列从 8 格变成 12 格），canvas 尺寸缓存也要作废
+  canvasSizeCache = new WeakMap();
   // 顶栏厚薄变了，右列"能不能粘"的判定也要跟着重算
   syncEvidenceSticky();
 }
@@ -2718,6 +2765,8 @@ let resizeTimer = null;
 window.addEventListener('resize', () => {
   window.clearTimeout(resizeTimer);
   resizeTimer = window.setTimeout(() => {
+    // canvas 的尺寸缓存跟着窗口失效（drawLines 靠它省掉每次的强制重排）
+    canvasSizeCache = new WeakMap();
     renderCharts();
     renderServiceChart();
     renderSystemCard();

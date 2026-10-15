@@ -80,6 +80,9 @@
   </div>
 
   <div class="alerts" id="alerts" hidden>
+    <!-- 读屏播报专用：只在"触发集合变了"时才更新这一行。
+         不给整个面板加 aria-live —— 面板里的"检查于 HH:MM:SS"每秒都在变，会被反复念出来 -->
+    <p class="visually-hidden" id="alerts-live" role="status" aria-live="polite"></p>
     <div class="alerts__head">
       <svg class="icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
       <p class="alerts__title" id="alerts-title">告警</p>
@@ -336,8 +339,10 @@
   </div>
 </dialog>
 
-<!-- 曲线悬停时跟随鼠标的读数浮窗（位置由 JS 算，见 showChartTip） -->
-<div class="chart-tip" id="chart-tip" role="status" hidden></div>
+<!-- 曲线悬停时跟随鼠标的读数浮窗（位置由 JS 算，见 showChartTip）。
+     aria-hidden：它是鼠标专用的辅助视图，跟着鼠标每动一下就变；挂 role="status"
+     反而会让读屏用户被持续刷屏。键盘/读屏用户看卡片头里的当前值即可。 -->
+<div class="chart-tip" id="chart-tip" aria-hidden="true" hidden></div>
 
 <script type="module" src="./app.js"></script>
 </body>
