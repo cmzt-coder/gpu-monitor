@@ -6,7 +6,12 @@
 # 为什么装这两个包：
 #   util-linux  提供 dmesg，用来读内核日志里的 XID。镜像里没有它，页面只会说"读不到内核日志"
 #   tzdata      让 TZ=Asia/Shanghai 在容器里解析得到（导出 CSV 的 time_local 依赖它）
-FROM node:24-slim
+#
+# 基础镜像默认取 Docker Hub 官方。国内机器常常拉不动 Docker Hub（403 / 超时），
+# 这时不用改这个文件：在 .env 里写一行 BASE_IMAGE=<能用的镜像源>/library/node:24-slim
+# 即可（compose 会把它当 build arg 传进来），或者干脆用离线包，见 README「用 Docker 跑」。
+ARG BASE_IMAGE=node:24-slim
+FROM ${BASE_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \

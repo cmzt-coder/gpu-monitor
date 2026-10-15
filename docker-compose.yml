@@ -12,7 +12,11 @@
 # 这个看板的工作是"看透宿主"，所以下面 pid / 挂载 / SYSLOG 这几处不能省，注释里写了各自为了什么。
 services:
   gpu-monitor:
-    build: .
+    build:
+      context: .
+      # 基础镜像默认 Docker Hub 官方；国内拉不动时在 .env 里覆盖成能用的镜像源
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-node:24-slim}
     image: gpu-monitor-runtime:latest
     container_name: gpu-monitor
     restart: unless-stopped

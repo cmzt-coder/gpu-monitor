@@ -463,6 +463,21 @@ docker compose exec gpu-monitor node tools/notify-test.mjs     # 验邮件通道
 
 宿主上的差异（端口 / 采集间隔 / 时区 / 邮件密码 / 监控哪个磁盘）全放 `.env`，不进版本库。历史库仍在宿主 `./data` 下，只是属主会变成 root——**回滚回脚本方式前记得 `sudo chown -R <用户>:<用户组> data`**。
 
+**拉不动基础镜像怎么办（国内很常见）**：`docker compose build` 报 403、超时或 `failed to resolve source metadata`，是镜像源的问题，不是代码的问题。两条路：
+
+1. **换源**：在 `.env` 里写一行，Dockerfile 不用改——
+   `BASE_IMAGE=docker.m.daocloud.io/library/node:24-slim`（或 `docker.1panel.live/library/node:24-slim` 等任何能用的源前缀）。
+2. **离线包**（一个源都不通时）：在能联网的机器上构建好再拷过去。注意架构要和服务器的 CPU 一致，服务器是 x86_64 就加 `--platform linux/amd64`：
+
+   ```bash
+   # 联网的机器上
+   docker buildx build --platform linux/amd64 -t gpu-monitor-runtime:latest --load .
+   docker save gpu-monitor-runtime:latest | gzip > gpu-monitor-runtime.tar.gz
+   # 目标服务器上
+   gunzip -c gpu-monitor-runtime.tar.gz | docker load
+   docker compose up -d          # 本地已有镜像，不会再联网
+   ```
+
 ### 健康检查
 
 `GET /api/health` 返回 `200`（健康，或只有提醒）或 `503`（有致命项），body 里逐项列出采集、历史库、磁盘、告警的状态：
