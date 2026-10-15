@@ -436,6 +436,41 @@ journalctl -u gpu-monitor -f
 
 > 手动启动过的话，先用 `./stop.sh` 停掉再交给 systemd，避免两边抢同一个端口。
 
+### 开机自启（没有 root 时：cron 看门狗）
+
+机器上你没有 root（装不了 systemd 服务），或者不想为了自启引入 Docker，用三行 cron 也能拿到**开机自启 + 崩溃后自己起来 + 日志不涨**。它靠的是 `start-bg.sh` 自带的一个性质：**已经在跑就拒绝启动**（先看 PID 文件，再试绑端口），所以重复执行是安全的，不会起出两个实例。
+
+> ⚠️ **装了这个之后，「停掉服务」的含义变了。** `./stop.sh` 之后最多 5 分钟，看门狗会把它重新拉起来。要真正停住（改配置、切换部署方式、排查问题），必须先暂停看门狗：`touch .run/pause` 停掉，干完活 `rm .run/pause` 再按需启动。不知道这条的人会看到「明明停了它又自己回来了」，很容易误判成服务有问题——**这一点请在交接时明确交代。**
+
+```cron
+# 开机自启
+@reboot cd /opt/gpu-monitor && mkdir -p .run && ./start-bg.sh >> .run/cron.log 2>&1
+# 看门狗：每 5 分钟看一次，没在跑就拉起来（存在 .run/pause 时跳过）
+*/5 * * * * cd /opt/gpu-monitor && [ -f .run/pause ] || ./start-bg.sh >/dev/null 2>&1
+# 日志只追加、不切割，每月 1 号清空一次（进程按追加方式写，清空后从新位置继续）
+0 4 1 * * : > /opt/gpu-monitor/gpu-monitor.log
+```
+
+把 `/opt/gpu-monitor` 换成项目实际路径即可。安装与验证：
+
+```bash
+crontab -l > /tmp/crontab.bak.$(date +%Y%m%d)   # 先备份现有的 crontab
+crontab -e                                      # 粘贴上面三行
+crontab -l                                      # 复核，确认原有任务没被覆盖
+
+# 验证看门狗（不用重启机器）：杀掉它，等 5 分钟看有没有自己回来
+kill "$(cat /opt/gpu-monitor/.run/gpu-monitor.pid)"
+cat /opt/gpu-monitor/.run/gpu-monitor.pid       # 5 分钟后应该是一个新 PID
+curl -s -o /dev/null -w 'health %{http_code}\n' http://127.0.0.1:8090/api/health
+```
+
+两个容易踩的点：
+
+- **cron 的 PATH 很干净**（通常只有 `/usr/bin:/bin`）。所以 `gpu-monitor.conf` 里的 `NODE_BIN=` 务必写成绝对路径，否则定时任务可能找不到 node。
+- **三种常驻方式三选一**：systemd、Docker、这里的 cron 看门狗。别叠加——虽然 `start-bg.sh` 的端口检查会拦住第二个实例，但两边的重启策略会互相打架、日志也会吵。切换部署方式时记得 `crontab -e` 把那三行删掉。
+
+> 这种方式**不额外授予任何权限**，所以它改变不了 XID 能不能读：那取决于运行用户有没有权限（见「硬件健康：ECC / 行重映射 / XID」）。如果当前用户读不到内核日志，用 cron 也照样读不到——那种情况走上一条 systemd（用 `SupplementaryGroups=` 精确授权），或者让管理员把运行用户加进 `adm` / `systemd-journal` 组。
+
 ### 用 Docker 跑（可选）
 
 不想在宿主上装 Node、或者希望"升级 = 改挂载 + 重启容器"，可以用仓库自带的编排。镜像里只有运行时底座（Node 24 + `dmesg` + 时区数据），**代码不打进镜像**、从宿主只读挂载，所以 `git pull` 后 `docker compose restart` 就生效，不需要重建。
