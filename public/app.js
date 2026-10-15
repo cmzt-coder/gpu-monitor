@@ -2,6 +2,7 @@ import { resampleToGrid } from './resample.js';
 import { utilKpiView } from './kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from './gpu-card-parts.js';
 import { hoverIndexFromX, hoverRows } from './chart-hover.js';
+import { statusView } from './status-pill.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -122,6 +123,12 @@ const state = {
   fetchedAt: null,
   consecutiveErrors: 0,
   pushActive: false,
+  // 进程表 / 告警规则清单的"内容签名"与可复用节点：
+  // 签名没变就只更新变化的格子，不整表重建（见 renderProcTable / renderAlerts）
+  procSignature: null,
+  procNodes: [],
+  ruleSignature: null,
+  firingSignature: null,
   // 上一次看到的进程身份签名：变了就说明库里有新事件，进程历史该刷新了
   processSignature: null,
   // 展示模式：single = 所有卡片一页铺开；nav = 分页签看，每页一到两张卡
@@ -448,6 +455,8 @@ function closePush() {
 function startPush() {
   if (state.stopped) return;
   if (typeof EventSource === 'undefined') {
+    // 这个浏览器压根没有 EventSource：推送这条路是断的，计数上要体现出来
+    pushFailures += 1;
     schedulePolling();
     return;
   }
@@ -455,6 +464,7 @@ function startPush() {
     eventSource = new EventSource('/api/stream');
   } catch {
     eventSource = null;
+    pushFailures += 1;
     schedulePolling();
     return;
   }
@@ -495,25 +505,19 @@ function startPush() {
 
 /* ---------- 渲染：状态与提示 ---------- */
 function renderStatus() {
-  const map = {
-    live: ['live', '实时采集中'],
-    ok: ['live', '实时采集中'],
-    loading: ['loading', '连接中'],
-    starting: ['loading', '服务启动中'],
-    empty: ['empty', '未检测到 GPU'],
-    error: ['error', '采集失败'],
-    unreachable: ['error', '连接中断'],
-  };
-  let [tone, text] = map[state.status] || ['loading', '连接中'];
-  const stale = state.status === 'error' || state.status === 'unreachable';
-  // 空闲降频时明确告诉用户"数据还是在采，只是慢了"，避免误以为服务卡住
-  if (!stale && tone === 'live' && state.meta?.idle?.active) {
-    text = `空闲降频中（每 ${Math.round((state.meta.idle.currentIntervalMs || 0) / 1000)} 秒）`;
-  }
-  refs.statusPill.dataset.state = tone;
-  refs.statusText.textContent = stale && state.lastSampleAt
-    ? `${text} · 数据停留在 ${fmtRelative(state.lastSampleAt)}`
-    : text;
+  // 判定逻辑在 status-pill.js（纯函数，冒烟测试覆盖了陈旧 / 降级 / 空闲降频的边界与优先级）
+  const view = statusView({
+    status: state.status,
+    lastSampleAt: state.lastSampleAt,
+    intervalMs: state.intervalMs,
+    idle: state.meta?.idle || null,
+    pushActive: state.pushActive,
+    pushEnabled: state.meta?.push?.enabled !== false,
+    pushDownCount: pushFailures,
+    relative: fmtRelative,
+  });
+  refs.statusPill.dataset.state = view.tone;
+  refs.statusText.textContent = view.text;
 }
 
 function showNotice({ title, text, hint }) {
@@ -632,33 +636,57 @@ function renderAlerts(meta) {
   refs.alertsEmpty.hidden = firing.length > 0;
   refs.alertsEmpty.textContent = `当前无告警，${rules.length || alerts.ruleCount} 条规则未触发`;
 
-  refs.alertsList.replaceChildren();
-  for (const alert of firing) {
-    const item = document.createElement('li');
-    item.className = 'alerts__item';
-    const level = document.createElement('span');
-    level.className = 'alerts__level';
-    level.dataset.level = alert.level;
-    level.textContent = ALERT_LEVEL_LABELS[alert.level] || alert.level;
-    const detail = document.createElement('span');
-    detail.className = 'alerts__detail';
-    detail.textContent = alert.detail;
-    const since = document.createElement('span');
-    since.className = 'alerts__since';
-    since.textContent = alert.since ? `自 ${fmtRelative(alert.since)}` : '';
-    item.append(level, detail, since);
-    refs.alertsList.appendChild(item);
+  // 触发中的条目：身份（哪条规则、什么级别、什么文案）没变就只刷新"自 N 秒前"。
+  // 真出事时正是有人盯着这块看的时刻，每秒重建会让悬停闪、正文也选不中。
+  const firingSignature = firing.map((alert) => [
+    alert.level, ALERT_LEVEL_LABELS[alert.level] || alert.level, alert.detail, alert.service || '',
+  ].join('¦')).join('\u0001');
+  if (firingSignature !== state.firingSignature) {
+    refs.alertsList.replaceChildren();
+    for (const alert of firing) {
+      const item = document.createElement('li');
+      item.className = 'alerts__item';
+      const level = document.createElement('span');
+      level.className = 'alerts__level';
+      level.dataset.level = alert.level;
+      level.textContent = ALERT_LEVEL_LABELS[alert.level] || alert.level;
+      const detail = document.createElement('span');
+      detail.className = 'alerts__detail';
+      detail.textContent = alert.detail;
+      const since = document.createElement('span');
+      since.className = 'alerts__since';
+      since.textContent = alert.since ? `自 ${fmtRelative(alert.since)}` : '';
+      item.append(level, detail, since);
+      refs.alertsList.appendChild(item);
+    }
+    state.firingSignature = firingSignature;
+  } else {
+    [...refs.alertsList.children].forEach((item, index) => {
+      const since = item.querySelector('.alerts__since');
+      if (!since) return;
+      const sinceText = firing[index]?.since ? `自 ${fmtRelative(firing[index].since)}` : '';
+      if (since.textContent !== sinceText) since.textContent = sinceText;
+    });
   }
 
   // 规则清单：确认"到底在盯什么"。零触发时这是页面上唯一能看出告警正常工作的东西。
   refs.alertsRules.hidden = rules.length === 0;
   refs.alertsRulesSummary.textContent = `规则清单（${rules.length}）`;
-  refs.alertsRuleList.replaceChildren();
   const ruleNotes = new Map();
   for (const item of alerts.warnings || []) {
     if (!ruleNotes.has(item.ruleId)) ruleNotes.set(item.ruleId, []);
     ruleNotes.get(item.ruleId).push(item.message);
   }
+  // 规则清单的内容几乎不变（规则集和触发状态都是慢变量），却每秒重算一遍。
+  // 按内容签名决定要不要重建：重建会让展开着的清单滚动位置跳、也让鼠标悬停闪。
+  const ruleSignature = rules.map((rule) => [
+    rule.id, rule.level, rule.label, rule.op, rule.threshold, rule.value, rule.service,
+    rule.firingCount, (rule.targets || []).join('、'), (ruleNotes.get(rule.id) || []).join('~'),
+  ].join('¦')).join('\u0001');
+  if (ruleSignature === state.ruleSignature) return;
+  state.ruleSignature = ruleSignature;
+
+  refs.alertsRuleList.replaceChildren();
   for (const rule of rules) {
     const item = document.createElement('li');
     item.className = 'alerts__rule';
@@ -1286,23 +1314,22 @@ function renderServiceChart() {
   const shownMemInLast = drawnNames.reduce((sum, name) => sum + (inLast.get(name)?.memMiB || 0), 0);
   const totalMemInLast = lastRow.services.reduce((sum, entry) => sum + (entry.memMiB || 0), 0);
 
-  refs.svcLegend.replaceChildren();
+  // 图例文案（各服务当前 GB）每秒都在变，但条目本身是慢变量：
+  // 按服务名复用条目、只改文字，省掉每次重绘都重建这几个节点
+  const legendSpecs = [];
   for (const line of lines) {
-    const item = document.createElement('span');
-    item.className = 'legend__item';
-    const swatch = document.createElement('span');
-    swatch.className = 'legend__swatch';
-    swatch.style.background = line.color;
     const isOther = line.name === '其他';
     const gone = !isOther && !inLast.has(line.name);
     const entry = isOther ? null : (inLast.get(line.name) || lastSeen.get(line.name));
     const mem = isOther ? Math.max(0, totalMemInLast - shownMemInLast) : (entry?.memMiB ?? null);
-    const text = document.createElement('span');
-    text.textContent = `${SERVICE_LABELS[line.name] || line.name} ${mem == null ? '--' : fmtGiB(mem)}`
-      + (gone ? '（区间末尾已退出）' : '');
-    item.append(swatch, text);
-    refs.svcLegend.appendChild(item);
+    legendSpecs.push({
+      key: line.name,
+      color: line.color,
+      text: `${SERVICE_LABELS[line.name] || line.name} ${mem == null ? '--' : fmtGiB(mem)}`
+        + (gone ? '（区间末尾已退出）' : ''),
+    });
   }
+  syncLegendItems(refs.svcLegend, legendSpecs);
 }
 
 /* ---------- 渲染：系统资源 ---------- */
@@ -1336,17 +1363,99 @@ function sysMeter({ label, value, foot, pct = null, tone = null, available = tru
   return wrap;
 }
 
-function sysDetailRow(label, value) {
-  const row = document.createElement('div');
-  row.className = 'sys-detail__row';
-  const dt = document.createElement('dt');
-  dt.className = 'sys-detail__label';
-  dt.textContent = label;
-  const dd = document.createElement('dd');
-  dd.className = 'sys-detail__value';
-  dd.textContent = value;
-  row.append(dt, dd);
-  return row;
+/**
+ * 按「标签 + 值」复用行节点，只把变了的值写进去（采集信息、系统资源明细都用它）。
+ *
+ * 这几张卡片每秒都会重绘一次，而其中大多数行的内容是不变的（主机名、平台、驱动、磁盘总量…）。
+ * 整棵 replaceChildren() 的代价不只是创建节点——它会让鼠标悬停闪一下、正文选不中、焦点丢失。
+ * 所以改成：标签对得上就复用节点，值没变就一个字节都不碰（字符串比较很便宜）。
+ *
+ * @param {HTMLElement} container 行容器（子节点形如 div[class] > dt + dd）
+ * @param {Array<[string, string]>} rows [标签, 值] 列表
+ * @param {{ rowClass: string, labelClass?: string, valueClass?: string }} options
+ */
+function syncLabelValueRows(container, rows, { rowClass, labelClass, valueClass }) {
+  const nodes = [...container.children];
+  rows.forEach(([label, value], index) => {
+    let row = nodes[index];
+    // 标签对不上（行数增减、顺序变了、标签本身变了）就重建这一行
+    if (!row || row.firstElementChild?.textContent !== label) {
+      row = document.createElement('div');
+      row.className = rowClass;
+      const dt = document.createElement('dt');
+      if (labelClass) dt.className = labelClass;
+      dt.textContent = label;
+      const dd = document.createElement('dd');
+      if (valueClass) dd.className = valueClass;
+      row.append(dt, dd);
+      if (nodes[index] && nodes[index].parentNode === container) container.replaceChild(row, nodes[index]);
+      else container.appendChild(row);
+      nodes[index] = row;
+    }
+    const dd = row.lastElementChild;
+    if (dd.textContent !== value) dd.textContent = value;
+  });
+  // 行数变少时删掉多出来的旧行
+  for (let i = rows.length; i < nodes.length; i += 1) {
+    if (nodes[i] && nodes[i].parentNode === container) nodes[i].remove();
+  }
+}
+
+/**
+ * 系统资源那三条进度条的同款处理：标签没变就复用节点，
+ * 只更新数值 / 脚注 / 进度条宽度 / 配色（每一项都先比较再写）。
+ */
+function syncLegendItems(container, specs) {
+  const nodes = [...container.children];
+  specs.forEach((spec, index) => {
+    let item = nodes[index];
+    if (!item || item.dataset.key !== spec.key) {
+      // 颜色只在建节点时写一次：它跟着服务身份走，条目的 key 没变颜色就不会变
+      item = document.createElement('span');
+      item.className = 'legend__item';
+      item.dataset.key = spec.key;
+      const swatch = document.createElement('span');
+      swatch.className = 'legend__swatch';
+      swatch.style.background = spec.color;
+      item.append(swatch, document.createElement('span'));
+      if (nodes[index] && nodes[index].parentNode === container) container.replaceChild(item, nodes[index]);
+      else container.appendChild(item);
+      nodes[index] = item;
+    }
+    const text = item.lastElementChild;
+    if (text.textContent !== spec.text) text.textContent = spec.text;
+  });
+  for (let i = specs.length; i < nodes.length; i += 1) {
+    if (nodes[i] && nodes[i].parentNode === container) nodes[i].remove();
+  }
+}
+
+function syncSysMeters(container, specs) {
+  const nodes = [...container.children];
+  specs.forEach((spec, index) => {
+    let node = nodes[index];
+    if (!node || node.dataset.label !== spec.label) {
+      node = sysMeter(spec);
+      node.dataset.label = spec.label;
+      if (nodes[index] && nodes[index].parentNode === container) container.replaceChild(node, nodes[index]);
+      else container.appendChild(node);
+      nodes[index] = node;
+      return;
+    }
+    const value = node.querySelector('.sys-meter__value');
+    if (value.textContent !== spec.value) value.textContent = spec.value;
+    value.dataset.tone = spec.tone || '';
+    const foot = node.querySelector('.sys-meter__foot');
+    if (foot.textContent !== spec.foot) foot.textContent = spec.foot;
+    node.dataset.available = spec.available === false ? 'false' : 'true';
+    const fill = node.querySelector('.meter__fill');
+    const width = spec.pct == null ? '0%' : `${Math.min(100, spec.pct).toFixed(1)}%`;
+    if (fill.style.width !== width) fill.style.width = width;
+    fill.dataset.tone = spec.tone || '';
+  });
+  for (let i = specs.length; i < nodes.length; i += 1) {
+    if (nodes[i] && nodes[i].parentNode === container) nodes[i].remove();
+  }
 }
 
 function renderSystemCard() {
@@ -1391,72 +1500,74 @@ function renderSystemCard() {
     state.range === 'live' ? null : '上方曲线为所选历史区间，下面读数是当前值',
   ].filter(Boolean).join(' · ') || '宿主资源概览';
 
-  refs.sysMeters.appendChild(sysMeter({
-    label: `CPU 使用率${liveMark}`,
-    value: cpu?.usagePct == null ? '--' : `${cpu.usagePct.toFixed(0)}%`,
-    foot: cpu?.usagePct == null ? '首次采样后出现' : `整机平均，共 ${cpu.cores} 个逻辑核`,
-    pct: cpu?.usagePct ?? null,
-    tone: toneFor(cpu?.usagePct ?? null),
-  }));
-
-  refs.sysMeters.appendChild(sysMeter({
-    label: `内存使用率${liveMark}`,
-    value: mem?.usedPct == null ? '--' : `${mem.usedPct.toFixed(0)}%`,
-    foot: mem ? `${fmtGiB(mem.usedMiB)} / ${fmtGiB(mem.totalMiB)}` : '取不到内存数据',
-    pct: mem?.usedPct ?? null,
-    tone: toneFor(mem?.usedPct ?? null),
-  }));
-
+  // 先攒成"想要的样子"，再交给 sync* 去和现有节点对账：标签没变就只改值，
+  // 这样每秒的重绘不会重建节点（悬停不闪、正文能选中、焦点不丢）
+  const meters = [
+    {
+      label: `CPU 使用率${liveMark}`,
+      value: cpu?.usagePct == null ? '--' : `${cpu.usagePct.toFixed(0)}%`,
+      foot: cpu?.usagePct == null ? '首次采样后出现' : `整机平均，共 ${cpu.cores} 个逻辑核`,
+      pct: cpu?.usagePct ?? null,
+      tone: toneFor(cpu?.usagePct ?? null),
+    },
+    {
+      label: `内存使用率${liveMark}`,
+      value: mem?.usedPct == null ? '--' : `${mem.usedPct.toFixed(0)}%`,
+      foot: mem ? `${fmtGiB(mem.usedMiB)} / ${fmtGiB(mem.totalMiB)}` : '取不到内存数据',
+      pct: mem?.usedPct ?? null,
+      tone: toneFor(mem?.usedPct ?? null),
+    },
+  ];
   if (unsupported.has('swap')) {
-    refs.sysMeters.appendChild(sysMeter({
+    meters.push({
       label: `交换分区${liveMark}`,
       value: '平台不支持',
       foot: '这个系统没有可读的交换分区数据源',
       available: false,
-    }));
+    });
   } else if (system.swap) {
-    refs.sysMeters.appendChild(sysMeter({
+    meters.push({
       label: `交换分区${liveMark}`,
       value: system.swap.usedPct == null ? '--' : `${system.swap.usedPct.toFixed(0)}%`,
       foot: system.swap.totalMiB > 0
         ? `${fmtGiB(system.swap.usedMiB)} / ${fmtGiB(system.swap.totalMiB)}`
         : '未启用交换分区',
       pct: system.swap.usedPct ?? 0,
-    }));
+    });
   }
+  syncSysMeters(refs.sysMeters, meters);
 
+  const details = [];
   if (system.load) {
-    refs.sysDetail.appendChild(sysDetailRow(
+    details.push([
       '系统负载',
       `${system.load.l1.toFixed(2)} / ${system.load.l5.toFixed(2)} / ${system.load.l15.toFixed(2)}（1 / 5 / 15 分钟）`,
-    ));
+    ]);
   } else if (unsupported.has('load')) {
-    refs.sysDetail.appendChild(sysDetailRow('系统负载', '当前平台不支持'));
+    details.push(['系统负载', '当前平台不支持']);
   }
-
   for (const disk of system.disk || []) {
-    refs.sysDetail.appendChild(sysDetailRow(
+    details.push([
       // 显示名优先：容器里宿主的根分区挂成了 /hostfs，可以按实情写成 /
       `磁盘 ${disk.label || disk.path}`,
       `${fmtGiB(disk.usedMiB)} / ${fmtGiB(disk.totalMiB)}（${fmtPct(disk.usedPct, 1)}）`,
-    ));
+    ]);
   }
-
   if (system.net) {
-    refs.sysDetail.appendChild(sysDetailRow(
+    details.push([
       '网络吞吐',
       `↓ ${fmtRate(system.net.rxBytesPerSec)}　↑ ${fmtRate(system.net.txBytesPerSec)}（${system.net.interfaces} 个网卡）`,
-    ));
+    ]);
   } else if (unsupported.has('net')) {
-    refs.sysDetail.appendChild(sysDetailRow('网络吞吐', '当前平台不支持'));
+    details.push(['网络吞吐', '当前平台不支持']);
   }
-
-  if (system.uptimeSec != null) {
-    refs.sysDetail.appendChild(sysDetailRow('系统运行时长', fmtDuration(system.uptimeSec)));
-  }
-  if (meta.systemWarning) {
-    refs.sysDetail.appendChild(sysDetailRow('采集提示', meta.systemWarning));
-  }
+  if (system.uptimeSec != null) details.push(['系统运行时长', fmtDuration(system.uptimeSec)]);
+  if (meta.systemWarning) details.push(['采集提示', meta.systemWarning]);
+  syncLabelValueRows(refs.sysDetail, details, {
+    rowClass: 'sys-detail__row',
+    labelClass: 'sys-detail__label',
+    valueClass: 'sys-detail__value',
+  });
 
   const series = state.systemSeries;
   if (series.t.length > 0) {
@@ -1479,6 +1590,20 @@ function renderSystemCard() {
 }
 
 /* ---------- 渲染：各卡当前占用 ---------- */
+/**
+ * 节流标签那一行：内容没变就不重建。
+ * 8 卡页面每秒会把这一行重算 8 次，而它只在"有没有降频"变化时才真的需要动。
+ */
+function syncThrottleChips(node, gpu) {
+  const parts = throttleParts(gpu);
+  const signature = parts.known
+    ? parts.reasons.map((reason) => `${reason.text}¦${reason.tone || ''}`).join('\u0001') || '无节流'
+    : '未知';
+  if (node.dataset.signature === signature) return;
+  node.dataset.signature = signature;
+  node.replaceChildren(renderThrottleChips(gpu));
+}
+
 function renderThrottleChips(gpu) {
   const wrap = document.createElement('div');
   wrap.className = 'gpu-card__chips';
@@ -1583,8 +1708,12 @@ function renderGpuCards() {
       mergeThrottle ? ['无节流'] : [],
     );
     const throttleNode = card.querySelector('[data-role="throttle"]');
-    if (mergeThrottle && healthShown) throttleNode.replaceChildren();
-    else throttleNode.replaceChildren(renderThrottleChips(gpu));
+    if (mergeThrottle && healthShown) {
+      throttleNode.replaceChildren();
+      throttleNode.dataset.signature = '';
+    } else {
+      syncThrottleChips(throttleNode, gpu);
+    }
   }
 }
 
@@ -1641,42 +1770,74 @@ function renderProcFilter() {
   refs.procFilter.dataset.value = state.filter;
 }
 
+/** 进程行的身份：这几个字段任一变化才算"换了个进程"，值得重建那一行 */
+function procRowKey(proc) {
+  return [proc.gpuIndex, proc.pid, proc.user, proc.name, proc.service, proc.containerName, proc.cmdline]
+    .join('|');
+}
+
+/**
+ * 建一行进程表。返回两个"每秒会变"的格子，供复用那一支直接改 textContent。
+ */
+function buildProcRow(proc, gpu) {
+  const ratio = gpu && gpu.memTotalMiB ? (proc.usedMemMiB / gpu.memTotalMiB) * 100 : null;
+  const row = document.createElement('tr');
+
+  const tdGpu = document.createElement('td');
+  const tag = document.createElement('span');
+  tag.className = 'gpu-tag';
+  tag.textContent = proc.gpuIndex == null ? '未知' : `GPU ${proc.gpuIndex}`;
+  tdGpu.appendChild(tag);
+
+  const tdPid = document.createElement('td');
+  tdPid.textContent = proc.pid == null ? '--' : String(proc.pid);
+
+  const tdName = document.createElement('td');
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'proc-name';
+  nameSpan.textContent = proc.name;
+  tdName.appendChild(nameSpan);
+  tdName.title = proc.name;
+
+  const tdMem = document.createElement('td');
+  tdMem.className = 'num mem-strong';
+  tdMem.textContent = fmtMiB(proc.usedMemMiB);
+
+  const tdRatio = document.createElement('td');
+  tdRatio.className = 'num mem-sub';
+  tdRatio.textContent = ratio == null ? '--' : fmtPct(ratio, 1);
+
+  row.append(tdGpu, tdPid, tdName, serviceCell(proc), tdMem, tdRatio);
+  return { row, cells: { mem: tdMem, ratio: tdRatio } };
+}
+
 function renderProcTable() {
   const gpusByIndex = new Map(state.gpus.map((gpu) => [gpu.index, gpu]));
   const rows = state.processes.filter((proc) => state.filter === 'all' || String(proc.gpuIndex) === state.filter);
-  refs.procBody.replaceChildren();
 
-  for (const proc of rows) {
-    const gpu = gpusByIndex.get(proc.gpuIndex);
-    const ratio = gpu && gpu.memTotalMiB ? (proc.usedMemMiB / gpu.memTotalMiB) * 100 : null;
-    const tr = document.createElement('tr');
-
-    const tdGpu = document.createElement('td');
-    const tag = document.createElement('span');
-    tag.className = 'gpu-tag';
-    tag.textContent = proc.gpuIndex == null ? '未知' : `GPU ${proc.gpuIndex}`;
-    tdGpu.appendChild(tag);
-
-    const tdPid = document.createElement('td');
-    tdPid.textContent = proc.pid == null ? '--' : String(proc.pid);
-
-    const tdName = document.createElement('td');
-    const nameSpan = document.createElement('span');
-    nameSpan.className = 'proc-name';
-    nameSpan.textContent = proc.name;
-    tdName.appendChild(nameSpan);
-    tdName.title = proc.name;
-
-    const tdMem = document.createElement('td');
-    tdMem.className = 'num mem-strong';
-    tdMem.textContent = fmtMiB(proc.usedMemMiB);
-
-    const tdRatio = document.createElement('td');
-    tdRatio.className = 'num mem-sub';
-    tdRatio.textContent = ratio == null ? '--' : fmtPct(ratio, 1);
-
-    tr.append(tdGpu, tdPid, tdName, serviceCell(proc), tdMem, tdRatio);
-    refs.procBody.appendChild(tr);
+  // 行身份（哪张卡、哪个进程、属于谁）没变就只更新"显存占用 / 占该卡比例"两格。
+  // 每秒整表重建的代价不只是创建节点：鼠标悬停会闪、正文选不中、焦点会掉——
+  // 而进程来来去去其实很慢，大多数周期里只有数值在动。
+  const signature = rows.map(procRowKey).join('\u0001');
+  if (signature !== state.procSignature) {
+    refs.procBody.replaceChildren();
+    state.procNodes = [];
+    for (const proc of rows) {
+      const { row, cells } = buildProcRow(proc, gpusByIndex.get(proc.gpuIndex));
+      refs.procBody.appendChild(row);
+      state.procNodes.push(cells);
+    }
+    state.procSignature = signature;
+  } else {
+    rows.forEach((proc, index) => {
+      const cells = state.procNodes[index];
+      if (!cells) return;
+      const gpu = gpusByIndex.get(proc.gpuIndex);
+      const mem = fmtMiB(proc.usedMemMiB);
+      if (cells.mem.textContent !== mem) cells.mem.textContent = mem;
+      const ratio = gpu && gpu.memTotalMiB ? fmtPct((proc.usedMemMiB / gpu.memTotalMiB) * 100, 1) : '--';
+      if (cells.ratio.textContent !== ratio) cells.ratio.textContent = ratio;
+    });
   }
 
   const empty = rows.length === 0;
@@ -2014,17 +2175,9 @@ function renderMeta() {
       meta.collector.tried.map((item) => `${item.bin}（${item.result}）`).join('；'),
     ]);
   }
-  refs.metaList.replaceChildren();
-  for (const [label, value] of rows) {
-    const div = document.createElement('div');
-    div.className = 'meta__row';
-    const dt = document.createElement('dt');
-    dt.textContent = label;
-    const dd = document.createElement('dd');
-    dd.textContent = value;
-    div.append(dt, dd);
-    refs.metaList.appendChild(div);
-  }
+  // 这 17 行里只有「最近更新」「服务运行时长」「已缓存采样点」这类每秒在变，
+  // 其余（主机名、平台、驱动、采集间隔…）几乎不动——按标签复用节点，值没变就不碰 DOM
+  syncLabelValueRows(refs.metaList, rows, { rowClass: 'meta__row' });
 }
 
 /* ---------- 主渲染 ---------- */

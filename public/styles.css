@@ -170,6 +170,12 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .status-pill[data-state="error"] .status-pill__dot { background: var(--jf-color-danger); }
 .status-pill[data-state="empty"] { color: var(--jf-color-warning); }
 .status-pill[data-state="empty"] .status-pill__dot { background: var(--jf-color-warning); }
+/* "没坏，但不对劲"的两种：数据陈旧、已退回轮询。
+   都是数据还在走的情况，所以用琥珀色提醒，而不是红色错误色——红色留给真的采集失败。 */
+.status-pill[data-state="stale"],
+.status-pill[data-state="poll"] { color: var(--jf-color-warning); border-color: var(--jf-color-warning-border); }
+.status-pill[data-state="stale"] .status-pill__dot,
+.status-pill[data-state="poll"] .status-pill__dot { background: var(--jf-color-warning); }
 .status-pill[data-state="live"] .status-pill__dot,
 .status-pill[data-state="loading"] .status-pill__dot { animation: pulse 2s ease-in-out infinite; }
 

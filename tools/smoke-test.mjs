@@ -17,6 +17,7 @@ import { resampleToGrid } from '../public/resample.js';
 import { utilKpiView, UTIL_WINDOW_MS } from '../public/kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from '../public/gpu-card-parts.js';
 import { hoverIndexFromX, hoverRows } from '../public/chart-hover.js';
+import { statusView } from '../public/status-pill.js';
 import { History } from '../src/history.js';
 import {
   GPU_CSV_HEADER,
@@ -936,6 +937,78 @@ assert.equal(
   '无数据',
   '那一刻这个服务没数据时如实说',
 );
+
+/* ---------- 顶部状态胶囊：陈旧 / 降级 / 空闲降频 ---------- */
+// 这里的判定最容易错在三处：把"故意放慢"当成"卡住"、把"服务端本来就没开推送"当成"掉线"、
+// 以及几件事同时成立时的优先级。冒烟测试把它们钉住。
+const PILL_NOW = 1_700_000_000_000;
+const pillRel = (ts) => `${Math.round((PILL_NOW - ts) / 60000)} 分钟前`;
+
+assert.deepEqual(
+  statusView({ status: 'ok', lastSampleAt: PILL_NOW - 1000, now: PILL_NOW, relative: pillRel }),
+  { tone: 'live', text: '实时采集中', stale: false, fellBack: false },
+  '正常采集就是绿点"实时采集中"',
+);
+// 默认 1 秒间隔：超过 3×间隔 + 2 秒没有新样本就算陈旧
+assert.equal(
+  statusView({ status: 'ok', lastSampleAt: PILL_NOW - 30000, now: PILL_NOW, relative: pillRel }).tone,
+  'stale',
+  '30 秒没有新样本（间隔 1 秒）应当判为数据陈旧',
+);
+const pillIdle = statusView({
+  status: 'ok', lastSampleAt: PILL_NOW - 30000, now: PILL_NOW, intervalMs: 10000,
+  idle: { active: true, currentIntervalMs: 10000 }, relative: pillRel,
+});
+assert.equal(pillIdle.tone, 'live', '空闲降频到 10 秒时，30 秒没样本是故意放慢，不能判成陈旧');
+assert.equal(
+  statusView({
+    status: 'ok', lastSampleAt: PILL_NOW, now: PILL_NOW,
+    idle: { active: true, currentIntervalMs: 10000 },
+  }).text,
+  '空闲降频中（每 10 秒）',
+);
+
+// 退回轮询：服务端允许推送、但 SSE 真的掉过——数据还在走，只是慢了
+const pillPoll = statusView({
+  status: 'ok', lastSampleAt: PILL_NOW, now: PILL_NOW,
+  pushActive: false, pushEnabled: true, pushDownCount: 1,
+});
+assert.equal(pillPoll.tone, 'poll');
+assert.equal(pillPoll.fellBack, true);
+assert.ok(pillPoll.text.includes('轮询'));
+// 页面刚打开、SSE 还没握上手的那一刻（失败次数还是 0）不该提示降级
+assert.equal(
+  statusView({
+    status: 'ok', lastSampleAt: PILL_NOW, now: PILL_NOW,
+    pushActive: false, pushEnabled: true, pushDownCount: 0,
+  }).tone,
+  'live',
+  '刚打开页面时 SSE 还在连接中，不能立刻报"已退回轮询"',
+);
+// 服务端用 --no-push 关了推送时，轮询本来就是正常模式，不该提示降级
+assert.equal(
+  statusView({ status: 'ok', lastSampleAt: PILL_NOW, now: PILL_NOW, pushActive: false, pushEnabled: false }).tone,
+  'live',
+  '--no-push 是配置选择，不是降级',
+);
+
+// 优先级：采集失败 > 数据陈旧 > 退回轮询
+assert.equal(
+  statusView({ status: 'error', lastSampleAt: PILL_NOW - 60000, now: PILL_NOW, pushActive: false, relative: pillRel }).tone,
+  'error',
+);
+assert.equal(
+  statusView({ status: 'error', lastSampleAt: PILL_NOW - 60000, now: PILL_NOW, relative: pillRel }).text,
+  '采集失败 · 数据停留在 1 分钟前',
+);
+const pillBoth = statusView({
+  status: 'ok', lastSampleAt: PILL_NOW - 60000, now: PILL_NOW,
+  pushActive: false, pushEnabled: true, pushDownCount: 1, relative: pillRel,
+});
+assert.equal(pillBoth.tone, 'stale', '陈旧比降级更该先说');
+assert.equal(pillBoth.fellBack, false);
+// 刚启动还没有样本时不能判成陈旧
+assert.equal(statusView({ status: 'loading', now: PILL_NOW }).tone, 'loading');
 
 /* ---------- 前端：导航模式的紧凑顶栏（静态结构） ---------- */
 // 顶栏瘦身靠"导航模式打 data-dense，CSS 认这个属性"来落地，这里守住几条一改就坏的约定：
@@ -2802,6 +2875,7 @@ process.stdout.write(
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
   + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流·健康·指标标签的行内判定 / 导出宽表布局 / '
   + '曲线悬停（位置→索引·浮窗内容·空数据区） / '
+  + '状态胶囊（陈旧·降级·空闲降频·优先级） / '
   + '导航模式紧凑顶栏（结构约定）/ '
   + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）/ '
   + '--tz 固定时区（系统时区是 UTC 时的回归）\n',
