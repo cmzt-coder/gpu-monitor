@@ -42,7 +42,7 @@ Open <http://localhost:8090/>. To deploy it on a server and make it survive rebo
 - **Alerting**: thresholds for VRAM / temperature / throttling / utilisation / host memory / disk / collection outages, including **per-service** rules and hardware-health metrics, with "must hold for N minutes" and cooldown suppression. Channels: **email**, webhook and console
 - **Export**: a single entry point — pick content, layout (the GPU table can be wide: one row per sample, one column group per GPU), time range and options. CSV carries both local time and UTC
 - **History**: SQLite storage (`data/gpu-monitor.db`) survives restarts; the page switches between live / 3d / 7d / 30d / 60d / 90d / all
-- **Bilingual UI (Chinese / English)**: the `中 / EN` switch in the top bar takes effect immediately — no reload, no service restart — and the choice is remembered in local storage. The default follows `navigator.language`; a single link can pin a language with `?lang=en-US` or `#lang=en-US`
+- **Bilingual UI (Chinese / English)**: the `中 / EN` dropdown in the top bar takes effect immediately — no reload, no service restart — and the choice is remembered in local storage. The default follows `navigator.language`; a single link can pin a language with `?lang=en-US` or `#lang=en-US`
 - Also: host metrics (CPU / memory / swap / load / disk / network), SSE push with automatic fallback to polling, idle down-throttling, 90% warning line, and copy-pasteable troubleshooting commands when something breaks
 
 ## Platform support
@@ -70,7 +70,7 @@ The detailed documentation is currently **in Chinese**:
 
 ## Interface language
 
-The `中 / EN` switch in the top bar is the only entry point. Switching re-renders the page in place — including the axis labels drawn on canvas and the hover tooltips.
+The `中 / EN` dropdown in the top bar is the only entry point (like the display-mode dropdown next to it, it is a hand-rolled listbox rather than a native `<select>`, so the open panel matches the rest of the UI). Switching re-renders the page in place — including the axis labels drawn on canvas and the hover tooltips.
 
 - **Precedence**: explicit URL parameter (`?lang=` / `#lang=`) → last choice (`localStorage`) → `navigator.language` → Chinese
 - **Adding strings**: add a key to `public/i18n/zh-CN.js` and the same key to `en-US.js`. Both catalogs must stay key-for-key identical, placeholders (`{name}`) included; `node tools/smoke-test.mjs` verifies that, and also catches keys used in code but missing from the catalogs
