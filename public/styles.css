@@ -318,14 +318,24 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 /* 导航模式下总有一列是空的：那列虽然高 0，却照样占掉一行，行间距白白多出 24px
    （实测「各卡当前占用」被推到了 293px）——一列的时候就不要行间距了 */
 .work-grid[data-cols="left"], .work-grid[data-cols="right"] { row-gap: 0; }
-/* 顶栏的两个开关（展示模式 / 界面语言）都是原生下拉。
-   箭头用 CSS 画：appearance:none 去掉系统外观后，自己补一个，不引外链资源也不加 DOM。 */
+/* 顶栏那三个控件（导出 / 展示模式 / 界面语言）共用一套规格：
+   同为胶囊形、同高、同字号，看起来是一组控件。**颜色仍然分主次**——
+   导出是主操作（实心蓝），两个下拉是设置项（白底描边）；把颜色也统一了反而看不出哪个能点。
+   两种展示模式各有一个高度：单页模式 40px（宽敞），导航模式 32px（紧凑顶栏）。
+   （旧版是按钮 44/32px + 圆角 6px，下拉 36px + 胶囊，一行里三种形状。） */
+.orient__actions .btn,
+.select {
+  min-height: 40px;
+  border-radius: 999px;
+  font-size: 13.5px;
+}
+.orient__actions .btn { padding: 0 16px; }
+/* 下拉：左侧内边距与按钮对齐，右侧留出箭头的位置。
+   箭头用 CSS 画：appearance:none 去掉系统外观后自己补一个，不引外链资源也不加 DOM。 */
 .select {
   appearance: none;
-  min-height: 36px;
-  padding: 0 30px 0 14px;
+  padding: 0 30px 0 16px;
   border: 1px solid var(--jf-color-control-border);
-  border-radius: 999px;
   background-color: var(--jf-color-surface);
   background-image:
     linear-gradient(45deg, transparent 50%, var(--jf-color-ink-muted) 50%),
@@ -334,15 +344,15 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   background-size: 5px 5px, 5px 5px;
   background-repeat: no-repeat;
   color: var(--jf-color-ink);
-  font: inherit; font-size: 13px;
+  /* 只继承字族与字重，字号由上面那条统一规则给（别用 font: inherit——它会把 font-size
+     一起重置成继承值，把上面的 13.5px 盖掉） */
+  font-family: inherit; font-weight: inherit;
   cursor: pointer;
   /* 英文文案（Single page）比中文长：给个上限，超出用省略号，避免下拉把顶栏撑开 */
   max-width: 12em; text-overflow: ellipsis;
 }
 .select:hover { border-color: var(--jf-color-primary); }
 .select:focus-visible { outline: none; box-shadow: var(--jf-focus-ring); }
-/* 语言下拉的内容短且固定（中 / EN），不需要那么宽的内边距 */
-.select--lang { padding: 0 26px 0 12px; background-position: right 12px center, right 7px center; }
 
 /* ---------- 导航模式的紧凑顶栏 ---------- */
 /* 导航模式下页头 / 告警 / KPI 三块常驻区本来就够用，按宽松排版铺开却在 720px 高的窗口里
@@ -357,8 +367,9 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .app[data-dense="1"] .page-title { font-size: 22px; }
 .app[data-dense="1"] .orient__sub { margin-top: 0; font-size: 12.5px; }
 .app[data-dense="1"] .status-pill { min-height: 30px; padding: 0 12px; font-size: 12.5px; }
-.app[data-dense="1"] .orient__actions .btn { min-height: 32px; font-size: 13px; }
-.app[data-dense="1"] .orient__actions .chip { padding: 6px 12px; font-size: 12.5px; }
+/* 紧凑顶栏：三个控件一起降到 32px（旧版只压了按钮，下拉比按钮还高 4px，看着参差） */
+.app[data-dense="1"] .orient__actions .btn,
+.app[data-dense="1"] .orient__actions .select { min-height: 32px; font-size: 13px; }
 
 /* 没触发告警时压成一行（有告警时保持原样展开，该醒目就得醒目） */
 .app[data-dense="1"] .alerts[data-state="idle"] {
