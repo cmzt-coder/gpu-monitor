@@ -913,6 +913,29 @@ assert.equal(
   '容器 vllm',
   '系列没给 label 时退回 name（服务曲线就是这样）',
 );
+// 服务曲线：曲线画的是占整机显存的比例，浮窗要给 GB（同刻对齐的另一份值）
+const serviceHover = hoverRows({
+  seriesList: [{
+    name: '容器 glm-vllm',
+    values: [81.6, null],
+    hoverValues: [915000, null],
+    format: (value) => `${Math.round(value / 1024)} GB`,
+  }],
+  times: [1000, 2000],
+  index: 0,
+});
+assert.equal(serviceHover.rows[0].value, '894 GB', '有 hoverValues 时用它，而不是曲线上的百分比');
+assert.equal(
+  hoverRows({
+    seriesList: [{
+      name: '容器 glm-vllm', values: [81.6, null], hoverValues: [915000, null], format: (v) => `${Math.round(v / 1024)} GB`,
+    }],
+    times: [1000, 2000],
+    index: 1,
+  }).rows[0].value,
+  '无数据',
+  '那一刻这个服务没数据时如实说',
+);
 
 /* ---------- 前端：导航模式的紧凑顶栏（静态结构） ---------- */
 // 顶栏瘦身靠"导航模式打 data-dense，CSS 认这个属性"来落地，这里守住几条一改就坏的约定：

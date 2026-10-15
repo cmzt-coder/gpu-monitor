@@ -1208,25 +1208,40 @@ function buildServiceSeries(rows, topN = SERVICE_TOP_N) {
     name,
     color: SERVICE_COLORS[index % SERVICE_COLORS.length],
     values: [],
+    // 曲线画的是"占整机显存的比例"（纵轴 0-100%），但人想看的往往是具体多少 GB，
+    // 所以另存一份同一刻的 MiB：悬停浮窗用它，和右边图例的口径一致。
+    hoverValues: [],
   }));
-  const other = { name: '其他', color: SERVICE_COLORS[SERVICE_COLORS.length - 1], values: [] };
+  const other = {
+    name: '其他',
+    color: SERVICE_COLORS[SERVICE_COLORS.length - 1],
+    values: [],
+    hoverValues: [],
+  };
   const times = [];
 
   for (const row of rows) {
     times.push(row.t);
     const byName = new Map(row.services.map((entry) => [entry.service, entry]));
     let shown = 0;
+    let shownMiB = 0;
     for (const line of lines) {
       const entry = byName.get(line.name);
       const share = entry ? (entry.sharePct ?? 0) : null;
       line.values.push(share);
-      if (share != null) shown += share;
+      line.hoverValues.push(entry ? (entry.memMiB ?? null) : null);
+      if (share != null) {
+        shown += share;
+        shownMiB += entry.memMiB ?? 0;
+      }
     }
     // "其他"是"这一帧所有服务之和减去已画出来的部分"，这样它永远和总量对得上，
     // 不会因为某个服务中途消失而算错
     const total = row.services.reduce((sum, entry) => sum + (entry.sharePct ?? 0), 0);
+    const totalMiB = row.services.reduce((sum, entry) => sum + (entry.memMiB ?? 0), 0);
     const rest = total - shown;
     other.values.push(rest > 0.05 ? rest : null);
+    other.hoverValues.push(rest > 0.05 ? Math.max(0, totalMiB - shownMiB) : null);
   }
   if (other.values.some((value) => value != null)) lines.push(other);
   return { lines, times };

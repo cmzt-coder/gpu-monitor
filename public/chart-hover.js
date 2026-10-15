@@ -54,7 +54,10 @@ export function hoverRows({
 } = {}) {
   if (index == null || index < 0) return null;
   const rows = seriesList.map((line) => {
-    const value = line.values ? line.values[index] : null;
+    // 系列可以另给一份"同一刻、但单位更适合读数"的值：服务曲线画的是占整机显存的
+    // 比例（0-100%），而浮窗里给的是 GB——两者同刻对齐，曲线本身不受影响
+    const source = Array.isArray(line.hoverValues) ? line.hoverValues : line.values;
+    const value = source ? source[index] : null;
     // 取不到值就一律写「无数据」；每个系列可以带自己的格式化（显存用 %、服务用 GB…），没带就用兜底的
     const format = typeof line.format === 'function' ? line.format : valueLabel;
     return {
