@@ -1,0 +1,25 @@
+name: CI
+
+# 这个项目零依赖、零构建，冒烟测试也不需要 GPU 与网络——所以 CI 只有一步：跑测试。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 是最低支持版本，但 node:sqlite 要 22.5+（历史库相关用例）；
+        # 这里跑生产上实际用的两个大版本。
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Smoke test (no GPU, no network, no install)
+        run: node tools/smoke-test.mjs

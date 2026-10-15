@@ -1072,6 +1072,27 @@ assert.ok(indexHtml.includes('id="export-time-hint"'), '导出弹窗要有时间
 assert.ok(appJs.includes('refs.exportTimeHint.textContent'), 'app.js 要往那行里写清楚两列时间分别是什么');
 assert.ok(appJs.includes('time_local') && appJs.includes('timestamp_iso'), '说明文字里要点名列名，不能只说"有两列时间"');
 
+/* ---------- 文档：相对链接都要落到真实文件 ---------- */
+// README 拆成 README + docs/ 六篇之后，最容易坏的就是跨文件链接（路径写错、改了文件名、
+// 搬运时忘了加 ../）。这里只查"指向仓库内文件"的相对链接，http(s) 与页内锚点跳过。
+const repoRoot = path.join(HERE, '..');
+const docFiles = [
+  'README.md', 'README.en.md', 'LICENSE',
+  'docs/features.md', 'docs/alerts.md', 'docs/deployment.md',
+  'docs/configuration.md', 'docs/faq.md', 'docs/development.md',
+];
+for (const file of docFiles) {
+  const text = fs.readFileSync(path.join(repoRoot, file), 'utf8');
+  for (const match of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+    const target = match[1];
+    if (/^(https?:|mailto:|#)/.test(target)) continue;
+    const relative = target.split('#')[0];
+    if (!relative) continue;
+    const resolved = path.resolve(path.dirname(path.join(repoRoot, file)), relative);
+    assert.ok(fs.existsSync(resolved), `${file} 里的链接指向不存在的文件：${target}`);
+  }
+}
+
 /* ---------- 硬件健康：XID（内核日志） ---------- */
 // 两种来源的总线号写法必须归一到一起，否则日志里的 XID 落不到具体的卡上
 assert.equal(normalizeBusId('00000000:3B:00.0'), '3b:00', 'nvidia-smi 的八位域 + 功能号');
@@ -2900,6 +2921,7 @@ process.stdout.write(
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
   + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流·健康·指标标签的行内判定 / 导出宽表布局 / '
   + '曲线悬停（位置→索引·浮窗内容·空数据区） / '
+  + '文档相对链接 / '
   + '状态胶囊（陈旧·降级·空闲降频·优先级） / '
   + '导航模式紧凑顶栏（结构约定）/ '
   + '导出时间列（本地时间 + UTC 双列·时区偏移·午夜边界）/ '

@@ -1,0 +1,74 @@
+# 启动参数与 HTTP 接口
+
+> 全部命令行参数与 `GET` 接口。参数也可以写进 [本机部署配置](deployment.md)（`gpu-monitor.conf`），那样启动时就不必带参数。
+
+## 启动参数
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--port` / `-p` | `8090` | 监听端口（启动脚本的默认值；直接跑 `server.js` 时默认 8080），也可用环境变量 `PORT` |
+| `--host` | `0.0.0.0` | 监听地址，也可用环境变量 `HOST` |
+| `--interval` | `1000` | 采集间隔（毫秒） |
+| `--window` | `300` | 内存中保留的采样点数，即页面曲线窗口 |
+| `--nvidia-smi` | 自动探测 | 手动指定 nvidia-smi；不指定时按平台依次尝试 `PATH` → `/usr/bin` → `/usr/local/bin` → WSL2 → Windows 系统目录，也可用环境变量 `NVIDIA_SMI_BIN` |
+| `--disk` | 平台默认 | 额外监控的挂载点，可重复：`--disk / --disk /data`。POSIX 默认 `/`，Windows 默认系统盘。想自定义页面上的显示名就写成 `路径=显示名`，例如容器里 `--disk /hostfs=/` 会显示成 `/` |
+| `--no-system` | 关闭 | 关掉宿主 CPU / 内存 / 磁盘 / 网络采集，只留 GPU 指标 |
+| `--no-extended` | 关闭 | 关掉扩展 GPU 指标（时钟 / P-State / 风扇 / PCIe / 编解码 / 节流原因） |
+| `--db` | `data/gpu-monitor.db` | 历史库文件路径，也可用环境变量 `GPU_MONITOR_DB` |
+| `--no-db` | 关闭 | 不落库，只保留内存窗口 |
+| `--store-interval` | `5000` | 落库间隔（毫秒），与页面刷新间隔解耦 |
+| `--retention-days` | `0` | 历史保留天数；默认 `0` = 永久保留，填天数才按天清理 |
+| `--no-store-processes` | 关闭 | 不把占用进程写进历史库 |
+| `--proc-min` | `0` | 占用不到这个值（MiB）的进程**不写进**历史库；默认 `0` = 全记。只想看得清爽点请用页面上的「占用下限」，那个不丢数据 |
+| `--reclaim` | 关闭 | 启动时把历史库整库重写一次，释放已删数据占用的空间（等价于 `db-maintenance --reclaim`） |
+| `--no-push` | 关闭 | 关掉 SSE 推送，页面自动回到轮询 |
+| `--alerts` | `alerts.json` | 告警配置文件路径，文件不存在则不启用告警 |
+| `--no-alerts` | 关闭 | 不启用告警 |
+| `--alerts-dry-run` | 关闭 | 只打印将要发送的通知，不真正发信 |
+| `--no-alerts-reload` | 关闭 | 关掉告警配置热加载（默认改了 `alerts.json` 会自动重新加载） |
+| `--idle-after` | `30` | 多久（秒）没有页面访问就转入空闲降频，`0` 表示不降频 |
+| `--idle-interval` | `10000` | 空闲期间的采集间隔（毫秒） |
+| `--tz` | 跟随系统时区 | 把**本服务**的时区固定成这个 IANA 名字（如 `Asia/Shanghai`）。影响导出里的 `time_local` 列、CSV 文件名、日志时间；也认 `TZ` 环境变量。**只对这个进程生效，不改系统时区，不影响这台机器上的其他服务**——详见 [deployment.md](deployment.md) 的「时区」一节 |
+| 环境变量 `GPU_MONITOR_HOSTNAME` | 自动探测 | 覆盖页面上显示的主机名（同一个值也会写进历史库的 `node_id` 和导出文件名）。`--mock` 下默认是 `demo-host`：模拟数据本来就是假的，主机名也该是假的，否则拿它截图放进文档就把本机名带出去了 |
+| `--mock` | 关闭 | 用模拟数据启动，便于无 GPU 环境联调 |
+
+环境变量：`GPU_MONITOR_MOCK=1` 等价于 `--mock`；`GPU_MONITOR_MOCK_GPUS=8` 指定模拟卡数；`GPU_MONITOR_MOCK_HIGH=1` 让 0 号卡稳定在 90% 以上，用来检查告警配色。
+
+## HTTP 接口
+
+| 路径 | 说明 |
+| --- | --- |
+| `GET /api/state` | 当前状态：每张卡的显存/利用率/温度/功耗、进程列表、采集元信息 |
+| `GET /api/health` | 健康检查：`200` 健康或仅有提醒、`503` 有致命项；探活不会打断空闲降频 |
+| `GET /api/stream` | SSE 推送：每采集一帧推一条，内容与 `/api/state` 同构；`--no-push` 时返回 404 |
+| `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
+| `GET /api/history?range=7d` | 历史区间（`3d` / `7d` / `30d` / `60d` / `90d` / `all`，或 `from`/`to`、`step`） |
+| `GET /api/processes?range=24h&limit=50` | 进程占用事件（谁在什么时候占上了哪张卡），区间写法同 `/api/history`，另返回 `total` 总数。`limit` 一次取多少条（上限 2000），`min` 是**占用下限**（MiB，如 `&min=1024` 只看 ≥ 1 GiB 的），默认取启动参数里的 `--proc-min` |
+| `GET /api/export.csv` | 下载曲线原始数据（每行 = 一个采样点 × 一张卡）；加 `&fields=full` 会带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流等扩展列（需要历史库）。加 `&layout=wide` 换成宽表：一行一个采样点，每张卡各占一组列（`gpu0_mem_used_mib`、`gpu1_mem_used_mib`…），那一刻没有数据的卡该组留空。宽表只带基础指标，所以和 `fields=full` 互斥（同时给会返回 400） |
+| `GET /api/export.system.csv` | 下载宿主指标（每行 = 一个采样点；磁盘只导出第一个挂载点，完整明细在 JSON 里） |
+| `GET /api/export.processes.csv?range=24h` | 下载进程占用事件（每行 = 一次事件：时间 / 卡 / PID / 进程名 / 占用 / 服务 / 用户）。**必须带时间范围**，不带会返回 400；区间内的事件全部导出，不设条数上限 |
+| `GET /api/export.json` | 下载当前完整状态 + 采样窗口 |
+
+`/api/state` 里几个值得单独说明的字段：
+
+- `gpus[]`：每张卡的实时指标。硬件健康相关的在 `eccMode` / `eccCorrectedVolatile` / `eccUncorrectedVolatile` / `eccCorrectedAggregate` / `eccUncorrectedAggregate`，以及 `remap`（`correctable` / `uncorrectable` / `pending` / `failure` / `banksMax`）和 `xid`（`count` / `lastCode` / `lastAt` / `recent`）。**读不到时这几个是 `null` / 缺失，不是 0**——"看不到"和"没有错误"必须能区分
+- `services[]`：按服务汇总的显存占用（`service` / `memMiB` / `sharePct` / `processes` / `users[]`）
+- `storage`：历史库状态（`mode` / `path` / `written` / `oldestTs` / `retentionDays` / `procMinMiB` …）
+- `utilAverage`：近 1 小时的 GPU 利用率均值（`avg` / `samples` / `cards` / `oldestTs` / `newestTs` / `windowMs`），就是概览里「平均 GPU 利用率」那张卡片的数。`avg` 为 `null` 表示算不出来（没有历史库或区间内没有数据），**不是 0%**；`oldestTs` 用来判断这一小时有没有攒满——服务刚部署时 `oldestTs` 距今不足一小时，页面据此标注"实为最近 N 分钟"。服务端每 60 秒重算一次并缓存，不会让每个打开的页面各自拉一小时原始数据回来自己平均
+- `alerts`：告警状态（`enabled` / `ruleCount` / `rules[]` / `firing[]` / `warnings[]` / `notifiedCount` …）
+- `remapStatus` / `xidStatus`：这两项的**采集状态**（是否读到、从哪读的、失败原因），对应页面「采集信息」里那两行
+- `system`：宿主指标快照（`cpu` / `mem` / `swap` / `load` / `disk[]` / `net` / `uptimeSec` / `unsupported[]`）
+- `fields`：扩展指标探测结果（`enabled`、`extended`、`count`、`unsupported[]`）
+- `idle`：空闲降频状态（`active`、`currentIntervalMs`、`idleAfterMs`、`idleIntervalMs`）
+- `systemEnabled`、`systemWarning`、`storeWarning`
+
+`/api/history` 的采样点与 `/api/state` 的 `gpus[]` 同构（含上面那些硬件健康字段），另外多一个 `system`。
+
+导出接口接受与 `/api/history` 相同的区间参数（`?range=7d` / `?from=…&to=…` / `?step=`），带区间时会**流式写出**——90 天那种几十万行的导出不会先整块读进内存。不带区间参数时行为与以前完全一致（导出内存窗口）。
+
+**时间列有两列，不是一个失误**：第一列 `time_local` 是**服务器本地时间**（`2026-10-14 14:25:03`），Excel / pandas 直接认成日期时间；第二列 `timestamp_iso` 是 **UTC**（`2026-10-14T06:25:03.000Z`），脚本读、跨时区对齐用。只给 UTC 的话，在东八区用 Excel 打开会看到比墙上时钟早 8 小时，像数据错了一样；只给本地时间又丢了时区信息，换台机器或改时区后老文件没法解释。服务器时区取系统设置，也可以用 `TZ=Asia/Shanghai` 显式指定（Node 原生支持）。页面导出弹窗里会写明当前服务器时区，不用猜。
+
+默认 CSV 的列是固定的（本地时间、UTC 时间、卡号、名称、显存、利用率、温度、功耗）；加 `?fields=full` 会再追加 `clock_sm_mhz / clock_mem_mhz / pstate / fan_pct / pcie_gen / pcie_width / enc_util_pct / dec_util_pct / throttled / ecc_mode / ecc_corrected_volatile / ecc_uncorrected_volatile / ecc_corrected_aggregate / ecc_uncorrected_aggregate` 共十四列（`throttled` 用 0/1 表示，空值代表这次采集没拿到节流信息）。这些扩展字段只存在历史库里，所以没有启用历史库时会返回 400 并说明原因；页面的导出弹窗里勾「包含扩展指标」就是它，没有历史库时这个勾选项会自动置灰并说明原因。
+
+**导出与时间范围的关系**：导出的时间范围由导出弹窗里那一组单独决定，默认「跟随曲线」——也就是曲线上方选的是什么（实时 → 内存窗口；3 天/90 天/全部 → 查库）就导什么。只有**「当前完整快照」不含时间范围**（它导的是"此刻"，选中时那一组会自动置灰），其余三项都跟着走。
+
