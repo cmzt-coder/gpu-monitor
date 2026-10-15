@@ -6,15 +6,19 @@
 // 背景：硬件健康（ECC / 行重映射 / XID）与节流状态本来各占一行，单看很清爽；
 // 但导航模式下 8 张卡平铺，就是 8 行「ECC 无错误」+ 8 行「无节流」，两整行
 // 全在说"一切正常"。所以正常时把「无节流」并进健康行尾，只有真降频才单独成行。
+//
+// 文案走 i18n 的 t()（i18n/index.js 不碰 DOM，本模块依然是纯计算、可直接单测）。
 
-// 节流原因的中文名与告警级别（gpuIdle 只是"显卡空闲"，不是故障）
-export const THROTTLE_LABELS = {
-  swPowerCap: { text: '功耗墙', tone: 'warning' },
-  hwSlowdown: { text: '硬件降速', tone: 'danger' },
-  hwThermal: { text: '温度墙', tone: 'danger' },
-  hwPowerBrake: { text: '功耗刹车', tone: 'danger' },
-  swThermal: { text: '软件温度墙', tone: 'warning' },
-  gpuIdle: { text: '空闲', tone: null },
+import { t } from './i18n/index.js';
+
+// 节流原因的文案 key 与告警级别（gpuIdle 只是"显卡空闲"，不是故障）
+const THROTTLE_KEYS = {
+  swPowerCap: { key: 'gpu.throttle.swPowerCap', tone: 'warning' },
+  hwSlowdown: { key: 'gpu.throttle.hwSlowdown', tone: 'danger' },
+  hwThermal: { key: 'gpu.throttle.hwThermal', tone: 'danger' },
+  hwPowerBrake: { key: 'gpu.throttle.hwPowerBrake', tone: 'danger' },
+  swThermal: { key: 'gpu.throttle.swThermal', tone: 'warning' },
+  gpuIdle: { key: 'gpu.throttle.gpuIdle', tone: null },
 };
 
 // 看到这几个编号就该按"这张卡要处理了"来对待；其余编号也值得看见，但不必同等紧张
@@ -32,7 +36,11 @@ export function throttleParts(gpu) {
   if (!gpu?.throttle) return { known: false, reasons: [] };
   const reasons = Object.entries(gpu.throttle)
     .filter(([, value]) => value === true)
-    .map(([key]) => THROTTLE_LABELS[key] || { text: key, tone: 'warning' });
+    .map(([key]) => {
+      const entry = THROTTLE_KEYS[key];
+      // 驱动冒出新字段时，原文照显比藏起来强（老驱动 / 新卡都会遇到）
+      return entry ? { text: t(entry.key), tone: entry.tone } : { text: key, tone: 'warning' };
+    });
   return { known: true, reasons };
 }
 
@@ -51,26 +59,33 @@ export function gpuFootItems(gpu, { dense = false, fmtPct = (v, digits = 0) => (
   const items = [];
 
   items.push(dense
-    ? { key: 'util', text: `利用率 ${fmtPct(gpu.utilGpuPct, 0)}`, title: 'GPU 利用率' }
-    : { key: 'util', text: `GPU 利用率 ${fmtPct(gpu.utilGpuPct, 0)}` });
+    ? { key: 'util', text: t('gpu.foot.util.dense', { pct: fmtPct(gpu.utilGpuPct, 0) }), title: t('gpu.foot.util.title') }
+    : { key: 'util', text: t('gpu.foot.util.full', { pct: fmtPct(gpu.utilGpuPct, 0) }) });
 
   items.push(dense
-    ? { key: 'mem-util', text: `带宽 ${fmtPct(gpu.utilMemPct, 0)}`, title: '显存带宽占用' }
-    : { key: 'mem-util', text: `显存带宽占用 ${fmtPct(gpu.utilMemPct, 0)}` });
+    ? { key: 'mem-util', text: t('gpu.foot.memUtil.dense', { pct: fmtPct(gpu.utilMemPct, 0) }), title: t('gpu.foot.memUtil.title') }
+    : { key: 'mem-util', text: t('gpu.foot.memUtil.full', { pct: fmtPct(gpu.utilMemPct, 0) }) });
 
   items.push(gpu.tempC == null
-    ? { key: 'temp', text: '温度 --' }
-    : { key: 'temp', text: `温度 ${Math.round(gpu.tempC)}°C`, title: dense ? 'GPU 温度' : undefined });
+    ? { key: 'temp', text: t('gpu.foot.temp.none') }
+    : { key: 'temp', text: t('gpu.foot.temp.value', { temp: Math.round(gpu.tempC) }), title: dense ? t('gpu.foot.temp.title') : undefined });
 
   if (gpu.powerW == null) {
-    items.push({ key: 'power', text: '功耗 --' });
+    items.push({ key: 'power', text: t('gpu.foot.power.none') });
   } else if (gpu.powerLimitW == null) {
-    items.push({ key: 'power', text: `功耗 ${Math.round(gpu.powerW)} W` });
+    items.push({ key: 'power', text: t('gpu.foot.power.value', { watts: Math.round(gpu.powerW) }) });
   } else {
     // 紧凑版把两次单位合并成 `239/700 W`，省下的宽度正好够这一行不折行
     items.push(dense
-      ? { key: 'power', text: `功耗 ${Math.round(gpu.powerW)}/${Math.round(gpu.powerLimitW)} W`, title: '功耗（当前 / 上限）' }
-      : { key: 'power', text: `功耗 ${Math.round(gpu.powerW)} W / ${Math.round(gpu.powerLimitW)} W` });
+      ? {
+        key: 'power',
+        text: t('gpu.foot.power.dense', { used: Math.round(gpu.powerW), limit: Math.round(gpu.powerLimitW) }),
+        title: t('gpu.foot.power.title'),
+      }
+      : {
+        key: 'power',
+        text: t('gpu.foot.power.full', { used: Math.round(gpu.powerW), limit: Math.round(gpu.powerLimitW) }),
+      });
   }
 
   items.push(gpu.clockSmMHz == null
@@ -78,23 +93,28 @@ export function gpuFootItems(gpu, { dense = false, fmtPct = (v, digits = 0) => (
     : {
       key: 'clock',
       // 紧凑版省掉 "SM"（这张卡只有 SM 时钟这一个时钟指标），保留单位
-      text: `${dense ? '时钟' : 'SM 时钟'} ${Math.round(gpu.clockSmMHz)} MHz`,
-      title: dense ? 'SM 时钟（MHz）' : undefined,
+      text: dense
+        ? t('gpu.foot.clock.dense', { mhz: Math.round(gpu.clockSmMHz) })
+        : t('gpu.foot.clock.full', { mhz: Math.round(gpu.clockSmMHz) }),
+      title: dense ? t('gpu.foot.clock.title') : undefined,
     });
 
+  // P-State 是 NVIDIA 的固定叫法（P0/P2/P8），两种语言都原样写
   items.push({ key: 'pstate', text: gpu.pstate ? (dense ? gpu.pstate : `P-State ${gpu.pstate}`) : null, title: dense && gpu.pstate ? 'P-State' : undefined });
 
   items.push(gpu.fanPct == null
     ? { key: 'fan', text: null }
-    : { key: 'fan', text: `风扇 ${Math.round(gpu.fanPct)}%` });
+    : { key: 'fan', text: t('gpu.foot.fan', { pct: Math.round(gpu.fanPct) }) });
 
   const hasEncdec = gpu.encUtilPct != null || gpu.decUtilPct != null;
   const enc = fmtPct(gpu.encUtilPct, 0);
   const dec = fmtPct(gpu.decUtilPct, 0);
   items.push({
     key: 'encdec',
-    text: hasEncdec ? (dense ? `编解码 ${enc}/${dec}` : `编解码 ${enc} / ${dec}`) : null,
-    title: hasEncdec && dense ? '编码 / 解码占用' : undefined,
+    text: hasEncdec
+      ? (dense ? t('gpu.foot.encdec.dense', { enc, dec }) : t('gpu.foot.encdec.full', { enc, dec }))
+      : null,
+    title: hasEncdec && dense ? t('gpu.foot.encdec.title') : undefined,
   });
 
   return items;
@@ -114,7 +134,7 @@ export function gpuFootItems(gpu, { dense = false, fmtPct = (v, digits = 0) => (
  * @param {{ relativeText?: (ts: number) => string }} [options] XID 要写"最近 N 分钟前"
  * @returns {{ visible: boolean, parts: string[], tone: string }}
  */
-export function healthParts(gpu, { relativeText = () => '刚刚' } = {}) {
+export function healthParts(gpu, { relativeText = () => t('time.justNow') } = {}) {
   const ce = gpu.eccCorrectedAggregate;
   const ue = gpu.eccUncorrectedAggregate;
   const eccKnown = !(gpu.eccMode == null && ce == null && ue == null);
@@ -129,27 +149,28 @@ export function healthParts(gpu, { relativeText = () => '刚刚' } = {}) {
   const ceV = gpu.eccCorrectedVolatile;
   const ueV = gpu.eccUncorrectedVolatile;
   const since = (volatileValue, total) => (
-    volatileValue > 0 && volatileValue !== total ? `（本次 ${volatileValue}）` : ''
+    volatileValue > 0 && volatileValue !== total ? t('gpu.ecc.sinceLoad', { count: volatileValue }) : ''
   );
   const parts = [];
   let tone = '';
 
   if (eccKnown) {
     if (gpu.eccMode && gpu.eccMode !== 'Enabled') {
-      parts.push(`ECC 已关闭（${gpu.eccMode}）`);
+      parts.push(t('gpu.ecc.disabled', { mode: gpu.eccMode }));
     } else if (!(ce > 0) && !(ue > 0)) {
       // 全 0 本身就是有用的信息：以后任何一个非 0 都是"从干净状态开始的变化"
-      parts.push('ECC 无错误');
+      parts.push(t('gpu.ecc.clean'));
     } else {
       const ecc = [];
       if (ue > 0) {
-        ecc.push(`不可纠正 ${ue}${since(ueV, ue)}`);
+        ecc.push(t('gpu.ecc.uncorrected', { count: ue, since: since(ueV, ue) }));
         tone = 'danger';
       }
       if (ce > 0) {
-        ecc.push(`可纠正 ${ce}${since(ceV, ce)}`);
+        ecc.push(t('gpu.ecc.corrected', { count: ce, since: since(ceV, ce) }));
         if (!tone) tone = 'warning';
       }
+      // ECC 是两种语言里都一样的缩写，不占一条文案
       parts.push(`ECC ${ecc.join(' · ')}`);
     }
   }
@@ -158,21 +179,21 @@ export function healthParts(gpu, { relativeText = () => '刚刚' } = {}) {
     const remapped = (remap.correctable ?? 0) + (remap.uncorrectable ?? 0);
     if (remap.failure === true) {
       // 备用行都不够用了，这是换卡依据
-      parts.push('行重映射失败');
+      parts.push(t('gpu.remap.failed'));
       tone = 'danger';
     } else if (remap.pending === true) {
-      parts.push('有行重映射待生效（下次 GPU 复位时应用）');
+      parts.push(t('gpu.remap.pending'));
       if (tone !== 'danger') tone = 'warning';
     } else if (remapped > 0) {
-      parts.push(`已重映射 ${remapped} 行`);
+      parts.push(t('gpu.remap.done', { rows: remapped }));
       if (!tone) tone = 'warning';
     }
   }
 
   if (xidKnown) {
-    const when = gpu.xid.lastAt ? `，最近 ${relativeText(gpu.xid.lastAt)}` : '';
-    const code = gpu.xid.lastCode == null ? '未知编号' : `XID ${gpu.xid.lastCode}`;
-    parts.push(`${code}（累计 ${gpu.xid.count} 次${when}）`);
+    const when = gpu.xid.lastAt ? t('gpu.xid.when', { rel: relativeText(gpu.xid.lastAt) }) : '';
+    const code = gpu.xid.lastCode == null ? t('gpu.xid.unknownCode') : `XID ${gpu.xid.lastCode}`;
+    parts.push(t('gpu.xid.summary', { code, count: gpu.xid.count, when }));
     if (XID_FATAL.has(gpu.xid.lastCode)) tone = 'danger';
     else if (tone !== 'danger') tone = 'warning';
   }

@@ -22,6 +22,7 @@ import {
   MESSAGES,
   detectLang,
   getLang,
+  hasKey,
   keysOf,
   normalizeLang,
   onLangChange,
@@ -3036,6 +3037,30 @@ await assert.rejects(
   for (const lang of ['zh-CN', 'en-US']) {
     assert.ok(indexHtml.includes(`data-lang="${lang}"`), `语言开关要有 ${lang} 这一枚`);
   }
+
+  // 反向校验：代码里 t('...') / tn('...') 用到的 key，必须在中文表里真的存在。
+  // 上面那条只保证中英两张表**一致**，管不住"两边都漏了同一个 key"——
+  // 那种情况下页面上会直接显示出 key 名（而且每秒重绘，肉眼很容易漏看）。
+  // 静态扫描只认字面量：像 t(TEXT_KEYS[status]) 这种间接用法要另靠人工与页面回归。
+  const usedKeys = new Set();
+  const scannedFiles = [
+    'app.js', 'status-pill.js', 'kpi-util.js', 'gpu-card-parts.js',
+    'chart-hover.js', 'backend-text.js', 'i18n/dom.js',
+  ];
+  for (const file of scannedFiles) {
+    const source = fs.readFileSync(path.join(HERE, '..', 'public', file), 'utf8');
+    for (const match of source.matchAll(/\bt\(\s*['"`]([A-Za-z0-9_.]+)['"`]/g)) usedKeys.add(match[1]);
+    for (const match of source.matchAll(/\btn\(\s*['"`]([A-Za-z0-9_.]+)['"`]/g)) {
+      usedKeys.add(`${match[1]}.one`);
+      usedKeys.add(`${match[1]}.other`);
+    }
+  }
+  const undefinedKeys = [...usedKeys].filter((key) => !hasKey(key, 'zh-CN')).sort();
+  assert.deepEqual(
+    undefinedKeys,
+    [],
+    `这些 key 在代码里用了却没定义（页面上会直接显示 key 名）：${undefinedKeys.join('、')}`,
+  );
 }
 
 process.stdout.write(

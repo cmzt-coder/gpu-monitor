@@ -3,6 +3,10 @@
 //
 // 单独放一个模块是为了能直接单测——它纯计算、不碰 DOM，而边界情况恰恰最容易出错：
 // 鼠标在绘图区外、窗口还没攒满点（左边那段是空的）、某个系列在那个点没有数据（断档）。
+//
+// 只有"无数据"这一个兜底文案要翻译，走 i18n 的 t()（该模块同样不碰 DOM）。
+
+import { t } from './i18n/index.js';
 
 /**
  * 鼠标位置 → 采样点索引。
@@ -50,7 +54,7 @@ export function hoverRows({
   times = [],
   index = null,
   timeLabel = (ts) => new Date(ts).toLocaleTimeString(),
-  valueLabel = (value) => (value == null ? '无数据' : String(value)),
+  valueLabel = (value) => (value == null ? t('chart.noData') : String(value)),
 } = {}) {
   if (index == null || index < 0) return null;
   const rows = seriesList.map((line) => {
@@ -63,12 +67,12 @@ export function hoverRows({
     return {
       label: line.label || line.name || '',
       color: line.color || 'currentColor',
-      value: value == null ? '无数据' : format(value),
+      value: value == null ? t('chart.noData') : format(value),
     };
   });
   const ts = times[index];
   return {
-    time: ts == null ? '无数据' : timeLabel(ts),
+    time: ts == null ? t('chart.noData') : timeLabel(ts),
     rows,
   };
 }

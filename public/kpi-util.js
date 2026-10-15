@@ -9,6 +9,10 @@
 //
 // 服务刚部署、库里还没攒满一小时时，用的是真数据但覆盖面不足，
 // 脚注要如实说"实为最近 N 分钟"，不能让人误以为是完整一小时。
+//
+// 文案走 i18n 的 t()（i18n/index.js 不碰 DOM，本模块依然是纯计算、可直接单测）。
+
+import { t, tn } from './i18n/index.js';
 
 /** 一小时，跨时间口径的固定窗口 */
 export const UTIL_WINDOW_MS = 3600000;
@@ -46,16 +50,22 @@ export function utilKpiView({
 } = {}) {
   const crossAvg = Number.isFinite(crossTime?.avg) ? crossTime.avg : null;
   const value = crossAvg ?? (Number.isFinite(avgUtilNow) ? avgUtilNow : null);
-  if (value == null) return { value: null, foot: '等待采集', footShort: '等待采集', title: '' };
+  if (value == null) {
+    const waiting = t('kpi.waiting');
+    return { value: null, foot: waiting, footShort: waiting, title: '' };
+  }
 
   // 降级：服务端没有历史库（Node 太旧 / --no-db），只能给这一帧的跨卡平均
   if (!crossTime) {
-    if (!cardCount) return { value: null, foot: '等待采集', footShort: '等待采集', title: '' };
+    if (!cardCount) {
+      const waiting = t('kpi.waiting');
+      return { value: null, foot: waiting, footShort: waiting, title: '' };
+    }
     return {
       value,
-      foot: `按 ${cardCount} 张卡平均（无历史库）`,
-      footShort: '无历史库',
-      title: '没有历史库，这里是当前这一帧所有显卡的平均；接上历史库后会改成近 1 小时的平均',
+      foot: t('kpi.util.foot.noStore', { cards: cardCount }),
+      footShort: t('kpi.util.footShort.noStore'),
+      title: t('kpi.util.title.noStore'),
     };
   }
 
@@ -63,9 +73,9 @@ export function utilKpiView({
   if (!crossTime.samples) {
     return {
       value,
-      foot: '近 1 小时暂无历史',
-      footShort: '暂无历史',
-      title: '历史库里近 1 小时还没有采样点',
+      foot: t('kpi.util.foot.noHistory'),
+      footShort: t('kpi.util.footShort.noHistory'),
+      title: t('kpi.util.title.noHistory'),
     };
   }
 
@@ -74,11 +84,15 @@ export function utilKpiView({
   const shortMinutes = crossTime.oldestTs ? describeCoverage({
     oldestTs: crossTime.oldestTs, windowMs, now, intervalMs,
   }) : null;
-  const title = `把历史库里近 1 小时的采样点整体平均（跨时间、跨卡），共 ${crossTime.samples} 个采样点`;
+  const title = t('kpi.util.title.avg', { samples: crossTime.samples });
   return {
     value,
-    foot: shortMinutes ? `近 1 小时未满 · 实为最近 ${shortMinutes} 分钟` : `近 1 小时 · ${cards} 张卡`,
-    footShort: shortMinutes ? `实为最近 ${shortMinutes} 分钟` : '近 1 小时',
+    foot: shortMinutes
+      ? t('kpi.util.foot.partial', { minutes: shortMinutes })
+      : t('kpi.util.foot.full', { gpus: tn('common.gpuCount', cards) }),
+    footShort: shortMinutes
+      ? t('kpi.util.footShort.partial', { minutes: shortMinutes })
+      : t('kpi.util.footShort.full'),
     title,
   };
 }

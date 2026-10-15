@@ -3,8 +3,9 @@ import { utilKpiView } from './kpi-util.js';
 import { throttleParts, healthParts, gpuFootItems } from './gpu-card-parts.js';
 import { hoverIndexFromX, hoverRows } from './chart-hover.js';
 import { statusView } from './status-pill.js';
-import { getLang, initI18n, onLangChange, setLang } from './i18n/index.js';
+import { getLang, initI18n, onLangChange, setLang, t, tn } from './i18n/index.js';
 import { applyStaticI18n, syncLangSwitch } from './i18n/dom.js';
+import { backendText } from './backend-text.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -160,21 +161,23 @@ const state = {
   stopped: false,
 };
 
+// label 用 getter 而不是普通字段：这些表是模块加载时建的，
+// 写成固定字符串会把"模块加载那一刻的语言"冻住，切语言后按钮文字就不动了。
 const RANGES = [
-  { value: 'live', label: '实时' },
-  { value: '3d', label: '3 天' },
-  { value: '7d', label: '7 天' },
-  { value: '30d', label: '30 天' },
-  { value: '60d', label: '60 天' },
-  { value: '90d', label: '90 天' },
-  { value: 'all', label: '全部' },
+  { value: 'live', get label() { return t('range.live'); } },
+  { value: '3d', get label() { return tn('range.days', 3); } },
+  { value: '7d', get label() { return tn('range.days', 7); } },
+  { value: '30d', get label() { return tn('range.days', 30); } },
+  { value: '60d', get label() { return tn('range.days', 60); } },
+  { value: '90d', get label() { return tn('range.days', 90); } },
+  { value: 'all', get label() { return t('range.all'); } },
 ];
 
 const PROC_HIST_RANGES = [
-  { value: '1h', label: '1 小时' },
-  { value: '24h', label: '24 小时' },
-  { value: '7d', label: '7 天' },
-  { value: '30d', label: '30 天' },
+  { value: '1h', get label() { return tn('range.hours', 1); } },
+  { value: '24h', get label() { return tn('range.hours', 24); } },
+  { value: '7d', get label() { return tn('range.days', 7); } },
+  { value: '30d', get label() { return tn('range.days', 30); } },
 ];
 const PROC_HIST_LIMIT = 200;
 // 进程历史一次画多少条：卡片高度直接跟这个数走，50 条大约一屏半。
@@ -183,7 +186,7 @@ const PROC_HIST_PAGE = 50;
 const PROC_HIST_MAX = 2000;
 // 占用下限的快捷选项：小进程（几十 MiB 到几百 MiB）在历史里基本是噪声
 const PROC_HIST_MIN_PRESETS = [
-  { value: 0, label: '全部' },
+  { value: 0, get label() { return t('range.all'); } },
   { value: 512, label: '≥ 512 MiB' },
   { value: 1024, label: '≥ 1 GiB' },
   { value: 4096, label: '≥ 4 GiB' },
@@ -202,11 +205,11 @@ const TEMP_DANGER = 85;
 
 const SYSTEM_FIELD_LABELS = {
   cpu: 'CPU',
-  mem: '内存',
-  swap: '交换分区',
-  load: '系统负载',
-  disk: '磁盘',
-  net: '网络',
+  get mem() { return t('sys.field.mem'); },
+  get swap() { return t('sys.field.swap'); },
+  get load() { return t('sys.field.load'); },
+  get disk() { return t('sys.field.disk'); },
+  get net() { return t('sys.field.net'); },
 };
 
 /* ---------- 格式化 ---------- */
@@ -275,11 +278,11 @@ function fmtClock(ts) {
 function fmtRelative(ts) {
   if (!ts) return '--';
   const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (seconds < 2) return '刚刚';
-  if (seconds < 60) return `${seconds} 秒前`;
+  if (seconds < 2) return t('time.justNow');
+  if (seconds < 60) return tn('time.secondsAgo', seconds);
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分钟前`;
-  return `${Math.floor(minutes / 60)} 小时前`;
+  if (minutes < 60) return tn('time.minutesAgo', minutes);
+  return tn('time.hoursAgo', Math.floor(minutes / 60));
 }
 
 function fmtDuration(seconds) {
@@ -287,9 +290,9 @@ function fmtDuration(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
-  if (h > 0) return `${h} 小时 ${m} 分`;
-  if (m > 0) return `${m} 分 ${s} 秒`;
-  return `${s} 秒`;
+  if (h > 0) return t('time.duration.hoursMinutes', { h, m });
+  if (m > 0) return t('time.duration.minutesSeconds', { m, s });
+  return t('time.duration.seconds', { s });
 }
 
 function gpuKey(gpu) {
@@ -430,7 +433,12 @@ async function poll() {
   } catch (error) {
     state.consecutiveErrors += 1;
     state.status = 'unreachable';
-    state.meta = { ...(state.meta || {}), error: `无法连接采集服务（${error.message}）` };
+    // 这条是前端自己拼的（后端的 error 字段另有来源），所以要在源头就翻好；
+    // 渲染时那层 backendText() 只认后端的原文，认不出的会原样返回，不会再动它
+    state.meta = {
+      ...(state.meta || {}),
+      error: t('app.error.unreachable', { message: error.message }),
+    };
     render();
   }
 }
@@ -548,8 +556,8 @@ function renderNotice(meta) {
   const noGpu = meta && meta.status === 'ok' && state.gpus.length === 0;
   if (state.status === 'unreachable') {
     showNotice({
-      title: '无法连接采集服务',
-      text: '页面会持续重试；如果长时间没有恢复，请确认采集进程是否还在运行。',
+      title: t('notice.unreachable.title'),
+      text: t('notice.unreachable.text'),
       hint: 'curl -s http://localhost:' + (location.port || '8080') + '/api/state | head',
     });
     return;
@@ -558,16 +566,21 @@ function renderNotice(meta) {
     const platform = meta?.platform || {};
     const unsupported = platform.supported === false;
     showNotice({
-      title: unsupported ? `当前平台无法监控显存（${platform.label || '未知系统'}）` : '采集失败：读不到 nvidia-smi 数据',
-      text: [meta?.error, meta?.hint].filter(Boolean).join('　·　') || '未知错误',
+      title: unsupported
+        ? t('notice.unsupported.title', { label: platform.label || t('common.unknownSystem') })
+        : t('notice.error.title'),
+      // error / hint 是后端拼好的中文句子，过一层对照翻译（认不出就原样显示）
+      text: [backendText(meta?.error), backendText(meta?.hint)]
+        .filter(Boolean)
+        .join(t('common.dotSeparator')) || t('common.unknownError'),
       hint: unsupported ? null : 'nvidia-smi -L',
     });
     return;
   }
   if (noGpu) {
     showNotice({
-      title: '没有检测到 GPU',
-      text: 'nvidia-smi 执行成功但没有返回显卡。请确认采集服务运行在有显卡的机器上。',
+      title: t('notice.noGpu.title'),
+      text: t('notice.noGpu.text'),
       hint: 'nvidia-smi -L',
     });
     return;
@@ -575,21 +588,30 @@ function renderNotice(meta) {
   refs.notice.hidden = true;
 }
 
+/** platform.note 是后端下发的整句中文，认得出就翻（映射表见 backend-text.js） */
+function platformNote(platform) {
+  return backendText(platform?.note || '');
+}
+
 /* ---------- 渲染：告警 ---------- */
-const ALERT_LEVEL_LABELS = { critical: '严重', warning: '警告' };
+// 同样用 getter：级别名是渲染时读的，不能冻在模块加载那一刻的语言上
+const ALERT_LEVEL_LABELS = {
+  get critical() { return t('alerts.level.critical'); },
+  get warning() { return t('alerts.level.warning'); },
+};
 
 // 判定时长：秒级写秒、分钟级写分钟，避免出现"240 秒"这种要心算的写法
 function fmtForMs(ms) {
   if (!(ms > 0)) return '';
-  if (ms < 60000) return `${Math.round(ms / 1000)} 秒`;
+  if (ms < 60000) return t('time.plainSeconds', { n: Math.round(ms / 1000) });
   const minutes = ms / 60000;
-  if (minutes < 60) return `${Math.round(minutes * 10) / 10} 分钟`;
-  return `${Math.round((minutes / 60) * 10) / 10} 小时`;
+  if (minutes < 60) return t('time.plainMinutes', { n: Math.round(minutes * 10) / 10 });
+  return t('time.plainHours', { n: Math.round((minutes / 60) * 10) / 10 });
 }
 
 // 阈值按单位渲染：显存类走 GiB/MiB，布尔量走"是/否"
 function fmtThreshold(rule) {
-  if (rule.isBoolean) return rule.threshold ? '是' : '否';
+  if (rule.isBoolean) return rule.threshold ? t('common.yes') : t('common.no');
   if (rule.threshold == null) return '--';
   if (rule.unit === 'MiB') {
     return rule.threshold >= 1024
@@ -605,10 +627,12 @@ function describeRule(rule) {
   // 规则自己起了名字时，条件里要写出指标名，否则"显存过高"没说清盯的是哪个指标
   const subject = rule.label === rule.metricLabel ? '' : `${rule.metricLabel} `;
   parts.push(`${subject}${rule.op} ${fmtThreshold(rule)}`);
-  if (rule.service) parts.push(`只看 ${rule.service}`);
-  parts.push(rule.effectiveForMs > 0 ? `持续 ${fmtForMs(rule.effectiveForMs)}` : '单点即报');
-  if (rule.clamped) parts.push(`原设定 ${fmtForMs(rule.forMs)}，无历史库改按窗口判定`);
-  return parts.join('，');
+  if (rule.service) parts.push(t('alerts.rule.onlyService', { service: rule.service }));
+  parts.push(rule.effectiveForMs > 0
+    ? t('alerts.rule.forDuration', { duration: fmtForMs(rule.effectiveForMs) })
+    : t('alerts.rule.instant'));
+  if (rule.clamped) parts.push(t('alerts.rule.clamped', { duration: fmtForMs(rule.forMs) }));
+  return parts.join(t('common.listSeparator'));
 }
 
 function renderAlerts(meta) {
@@ -621,37 +645,43 @@ function renderAlerts(meta) {
     refs.alerts.hidden = true;
     refs.alertsList.replaceChildren();
     refs.alertsRuleList.replaceChildren();
-    refs.alertsTitle.textContent = '告警';
+    refs.alertsTitle.textContent = t('alerts.title');
     return;
   }
   refs.alerts.hidden = false;
   // 面板常驻，但只有真触发时才该整块泛黄；"没事"要看起来像没事
   refs.alerts.dataset.state = firing.length ? 'firing' : 'idle';
-  refs.alertsTitle.textContent = firing.length ? `当前告警（${firing.length}）` : '告警';
+  refs.alertsTitle.textContent = firing.length
+    ? t('alerts.title.firing', { n: firing.length })
+    : t('alerts.title');
 
   // dry-run 必须一眼可见：只打印不发送时，页面看着"配好了"最容易误判
   const badges = [];
-  if (alerts.dryRun) badges.push('dry-run：只打印不发送');
-  if (alerts.problems?.length) badges.push(`${alerts.problems.length} 条规则被跳过`);
-  if (alerts.warnings?.length) badges.push(`${alerts.warnings.length} 条规则阈值可疑`);
-  if (alerts.lastReloadError) badges.push('配置有误，仍在用上一次的规则');
+  if (alerts.dryRun) badges.push(t('alerts.badge.dryRun'));
+  if (alerts.problems?.length) badges.push(t('alerts.badge.skipped', { n: alerts.problems.length }));
+  if (alerts.warnings?.length) badges.push(t('alerts.badge.suspect', { n: alerts.warnings.length }));
+  if (alerts.lastReloadError) badges.push(t('alerts.badge.reloadError'));
   refs.alertsBadge.textContent = badges.join(' · ');
   refs.alertsBadge.hidden = badges.length === 0;
 
-  const summary = [`${alerts.ruleCount} 条规则监控中`];
-  if (alerts.cooldownMs) summary.push(`抑制 ${Math.round(alerts.cooldownMs / 60000)} 分钟`);
-  summary.push(alerts.autoReload ? '改动自动生效' : '改动需重启');
-  if (alerts.lastCheckAt) summary.push(`检查于 ${fmtClock(alerts.lastCheckAt)}`);
-  if (alerts.notifiedCount) summary.push(`已通知 ${alerts.notifiedCount} 次`);
+  const summary = [t('alerts.summary.monitoring', { n: alerts.ruleCount })];
+  if (alerts.cooldownMs) {
+    summary.push(t('alerts.summary.cooldown', { minutes: Math.round(alerts.cooldownMs / 60000) }));
+  }
+  summary.push(alerts.autoReload ? t('alerts.summary.autoReload') : t('alerts.summary.manualReload'));
+  if (alerts.lastCheckAt) summary.push(t('alerts.summary.checkedAt', { time: fmtClock(alerts.lastCheckAt) }));
+  if (alerts.notifiedCount) summary.push(tn('alerts.summary.notified', alerts.notifiedCount));
   refs.alertsStatus.textContent = summary.join(' · ');
 
   refs.alertsEmpty.hidden = firing.length > 0;
-  refs.alertsEmpty.textContent = `当前无告警，${rules.length || alerts.ruleCount} 条规则未触发`;
+  refs.alertsEmpty.textContent = t('alerts.empty', { n: rules.length || alerts.ruleCount });
 
   // 读屏播报：只在触发集合变化时改这一行（它挂了 aria-live，每秒刷就会被反复念）
   const liveSummary = firing.length === 0
-    ? '当前无告警'
-    : `当前 ${firing.length} 条告警${firing.some((alert) => alert.level === 'critical') ? '，含严重级别' : ''}`;
+    ? t('alerts.live.none')
+    : `${t('alerts.live.firing', { n: firing.length })}${
+      firing.some((alert) => alert.level === 'critical') ? t('alerts.live.criticalSuffix') : ''
+    }`;
   if (refs.alertsLive.textContent !== liveSummary) refs.alertsLive.textContent = liveSummary;
 
   // 触发中的条目：身份（哪条规则、什么级别、什么文案）没变就只刷新"自 N 秒前"。
@@ -673,7 +703,7 @@ function renderAlerts(meta) {
       detail.textContent = alert.detail;
       const since = document.createElement('span');
       since.className = 'alerts__since';
-      since.textContent = alert.since ? `自 ${fmtRelative(alert.since)}` : '';
+      since.textContent = alert.since ? t('alerts.since', { rel: fmtRelative(alert.since) }) : '';
       item.append(level, detail, since);
       refs.alertsList.appendChild(item);
     }
@@ -682,14 +712,16 @@ function renderAlerts(meta) {
     [...refs.alertsList.children].forEach((item, index) => {
       const since = item.querySelector('.alerts__since');
       if (!since) return;
-      const sinceText = firing[index]?.since ? `自 ${fmtRelative(firing[index].since)}` : '';
+      const sinceText = firing[index]?.since
+        ? t('alerts.since', { rel: fmtRelative(firing[index].since) })
+        : '';
       if (since.textContent !== sinceText) since.textContent = sinceText;
     });
   }
 
   // 规则清单：确认"到底在盯什么"。零触发时这是页面上唯一能看出告警正常工作的东西。
   refs.alertsRules.hidden = rules.length === 0;
-  refs.alertsRulesSummary.textContent = `规则清单（${rules.length}）`;
+  refs.alertsRulesSummary.textContent = t('alerts.rules.summary', { n: rules.length });
   const ruleNotes = new Map();
   for (const item of alerts.warnings || []) {
     if (!ruleNotes.has(item.ruleId)) ruleNotes.set(item.ruleId, []);
@@ -722,17 +754,17 @@ function renderAlerts(meta) {
     // 规则名就是指标名时不加冒号：读起来就是"显存占用率 >= 85%，持续 4 分钟"一句完整的话
     condition.textContent = rule.label === rule.metricLabel
       ? ` ${describeRule(rule)}`
-      : `：${describeRule(rule)}`;
+      : t('alerts.rule.condWithName', { condition: describeRule(rule) });
     text.append(name, condition);
     const state = document.createElement('span');
     state.className = 'alerts__rule-state';
     state.dataset.state = rule.firingCount > 0 ? 'firing' : 'normal';
     if (rule.firingCount > 0) {
       state.textContent = rule.targets?.length
-        ? `触发中：${rule.targets.join('、')}`
-        : `触发中（${rule.firingCount}）`;
+        ? t('alerts.rule.firingTargets', { targets: rule.targets.join(t('common.enumSeparator')) })
+        : t('alerts.rule.firingCount', { n: rule.firingCount });
     } else {
-      state.textContent = '正常';
+      state.textContent = t('alerts.rule.normal');
     }
     item.append(level, text, state);
     // 阈值顺序反了照常判定，但得让人看见，否则真出事时只会收到警告那条
@@ -759,9 +791,11 @@ function renderKpis() {
   const temps = gpus.map((gpu) => gpu.tempC).filter((v) => v != null);
 
   refs.kpiCount.innerHTML = gpus.length
-    ? `${gpus.length}<span class="kpi__unit">张</span>`
+    ? `${gpus.length}<span class="kpi__unit">${t('kpi.count.unit')}</span>`
     : '--';
-  refs.kpiCountFoot.textContent = gpus.length ? `主机 ${state.meta?.hostname || '--'}` : '等待采集';
+  refs.kpiCountFoot.textContent = gpus.length
+    ? t('kpi.count.foot.host', { host: state.meta?.hostname || '--' })
+    : t('kpi.waiting');
 
   refs.kpiMem.innerHTML = gpus.length
     ? `${(toGiB(usedMem) || 0).toFixed(0)}<span class="kpi__unit">/ ${(toGiB(totalMem) || 0).toFixed(0)} GB</span>`
@@ -769,9 +803,11 @@ function renderKpis() {
   refs.kpiMemFill.style.width = usedPct == null ? '0%' : `${Math.min(100, usedPct).toFixed(1)}%`;
   refs.kpiMemFill.dataset.tone = toneFor(usedPct) || '';
   refs.kpiMemFoot.textContent = usedPct == null
-    ? '占用率 --'
-    : (dense ? `${usedPct.toFixed(1)}%` : `整机占用率 ${usedPct.toFixed(1)}%`);
-  refs.kpiMemFoot.title = dense && usedPct != null ? `整机占用率 ${usedPct.toFixed(1)}%` : '';
+    ? t('kpi.mem.foot.unknown')
+    : (dense ? `${usedPct.toFixed(1)}%` : t('kpi.mem.foot.machine', { pct: usedPct.toFixed(1) }));
+  refs.kpiMemFoot.title = dense && usedPct != null
+    ? t('kpi.mem.foot.machine', { pct: usedPct.toFixed(1) })
+    : '';
   refs.kpiMemFoot.dataset.tone = toneFor(usedPct) || '';
 
   // 「平均 GPU 利用率」是跨时间的：服务端把历史库里近 1 小时的采样点整体平均好给过来。
@@ -796,51 +832,75 @@ function renderKpis() {
     : `${Math.round(maxTemp)}<span class="kpi__unit">°C</span>`;
   const hotIndex = maxTemp == null ? null : (gpus.find((gpu) => gpu.tempC === maxTemp)?.index ?? '--');
   refs.kpiTempFoot.textContent = hotIndex == null
-    ? '等待采集'
-    : (dense ? `GPU ${hotIndex}` : `最高温度来自 GPU ${hotIndex}`);
-  refs.kpiTempFoot.title = dense && hotIndex != null ? `最高温度来自 GPU ${hotIndex}` : '';
+    ? t('kpi.waiting')
+    : (dense ? `GPU ${hotIndex}` : t('kpi.temp.foot.fromGpu', { index: hotIndex }));
+  refs.kpiTempFoot.title = dense && hotIndex != null
+    ? t('kpi.temp.foot.fromGpu', { index: hotIndex })
+    : '';
   refs.kpiTempFoot.dataset.tone = tempTone(maxTemp) || '';
 
   const procCount = state.processes.length;
   refs.kpiProc.innerHTML = state.meta?.status === 'ok'
-    ? `${procCount}<span class="kpi__unit">个</span>`
-    : '--<span class="kpi__unit">个</span>';
+    ? `${procCount}<span class="kpi__unit">${t('kpi.proc.unit')}</span>`
+    : `--<span class="kpi__unit">${t('kpi.proc.unit')}</span>`;
   const procMem = state.processes.reduce((sum, proc) => sum + (proc.usedMemMiB || 0), 0);
   refs.kpiProcFoot.textContent = state.meta?.status === 'ok'
-    ? (dense ? fmtGiB(procMem) : `合计占用 ${fmtGiB(procMem)}`)
-    : '等待采集';
-  refs.kpiProcFoot.title = dense && state.meta?.status === 'ok' ? `合计占用 ${fmtGiB(procMem)}` : '';
+    ? (dense ? fmtGiB(procMem) : t('kpi.proc.foot.total', { mem: fmtGiB(procMem) }))
+    : t('kpi.waiting');
+  refs.kpiProcFoot.title = dense && state.meta?.status === 'ok'
+    ? t('kpi.proc.foot.total', { mem: fmtGiB(procMem) })
+    : '';
 }
 
 /* ---------- 渲染：曲线 ---------- */
 function rangeLabel() {
-  if (state.range === 'live') return '实时窗口';
-  if (state.range === 'all') return '全部现存历史';
+  if (state.range === 'live') return t('chart.range.liveWindow');
+  if (state.range === 'all') return t('chart.range.allStored');
   const item = RANGES.find((entry) => entry.value === state.range);
-  return `历史区间 ${item?.label || state.range}`;
+  return t('chart.range.historyWithLabel', { label: item?.label || state.range });
 }
 
 function describeRange() {
   if (state.range === 'live') {
-    return `最近 ${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒的实时窗口`;
+    return t('chart.window.live', { seconds: Math.round(state.windowSamples * state.intervalMs / 1000) });
   }
   const item = RANGES.find((entry) => entry.value === state.range);
   const label = item?.label || state.range;
   // 曲线切到历史区间时，顶部指标、右侧卡片和系统资源里的读数是"现在"的，
   // 不写清楚很容易把两种时间尺度混着看
-  const liveNote = '　·　其余卡片与顶部指标仍是当前实时值';
-  if (state.historyNotice) return `${label}：${state.historyNotice}`;
-  if (!state.historyPoints) return `${label}：这段时间没有数据`;
-  const stepText = state.historyStep > 0 ? `，每 ${Math.round(state.historyStep / 1000)} 秒一点` : '';
-  const truncated = state.historyTruncated ? '（已截断）' : '';
+  const liveNote = t('chart.note.liveCards');
+  // historyNotice 存的是原文（reason / message），翻译放在这里做，切语言才会跟着变
+  if (state.historyNotice?.error) {
+    return t('chart.range.withNotice', {
+      label,
+      notice: t('chart.historyFailed', { message: state.historyNotice.error }),
+    });
+  }
+  if (state.historyNotice) {
+    return t('chart.range.withNotice', {
+      label,
+      notice: backendText(state.historyNotice.reason) || t('procHist.noStore'),
+    });
+  }
+  if (!state.historyPoints) return t('chart.range.noData', { label });
+  const stepText = state.historyStep > 0
+    ? t('chart.step.every', { seconds: Math.round(state.historyStep / 1000) })
+    : '';
+  const truncated = state.historyTruncated ? t('chart.range.truncated') : '';
   // 「全部」是"库里现存的全部"，不是"历史上的全部"：默认保留期会把更早的行清掉。
   // 不写明白的话，选了「全部」却只看到 90 天，很容易以为是 bug
   if (state.range === 'all') {
     const retention = state.meta?.storage?.retentionDays;
-    const bound = retention > 0 ? `保留 ${retention} 天，更早的已按保留期清理` : '未设保留期，一直留着';
-    return `库里现存的全部历史（${bound}），共 ${state.historyPoints} 个点${stepText}${truncated}${liveNote}`;
+    const bound = retention > 0
+      ? t('chart.range.retained', { days: retention })
+      : t('chart.range.noRetention');
+    return t('chart.range.allDetail', {
+      bound, points: state.historyPoints, step: stepText, truncated, note: liveNote,
+    });
   }
-  return `历史区间：最近 ${label}，共 ${state.historyPoints} 个点${stepText}${truncated}${liveNote}`;
+  return t('chart.range.historyDetail', {
+    label, points: state.historyPoints, step: stepText, truncated, note: liveNote,
+  });
 }
 
 function chartSlots() {
@@ -1142,7 +1202,7 @@ function drawLines(canvas, seriesList, windowSamples, { limit = null, times = []
   // 贴左边的那行字看起来像在给一段空白标注时间（悬停那块区域也是按"无数据"处理的）
   ctx.fillText(count > 0 && times[0] ? fmtClock(times[0]) : '--:--:--', count > 0 ? xAt(0) : pad.left, pad.top + plotH + 5);
   ctx.textAlign = 'right';
-  ctx.fillText('现在', pad.left + plotW, pad.top + plotH + 5);
+  ctx.fillText(t('chart.axis.now'), pad.left + plotW, pad.top + plotH + 5);
 
   // 悬停点的圆点画在最后（压在折线之上），加白描边是为了在密集的曲线里也能看清
   if (hoverX != null) {
@@ -1171,17 +1231,17 @@ function renderCharts() {
       state.chartSignature = '';
     }
     if (state.status === 'loading' || state.status === 'starting') {
-      refs.emptyTitle.textContent = '正在读取 GPU 数据';
-      refs.emptyText.textContent = '服务启动后第一帧数据通常在一两秒内出现。';
+      refs.emptyTitle.textContent = t('state.empty.loading.title');
+      refs.emptyText.textContent = t('state.empty.loading.text');
     } else if (state.meta?.status === 'ok') {
-      refs.emptyTitle.textContent = '没有检测到 GPU';
-      refs.emptyText.textContent = 'nvidia-smi 执行成功但返回为空，请确认采集服务运行在有显卡的机器上。';
+      refs.emptyTitle.textContent = t('state.empty.noGpu.title');
+      refs.emptyText.textContent = t('state.empty.noGpu.text');
     } else if (state.meta?.platform?.supported === false) {
-      refs.emptyTitle.textContent = '当前平台没有可用的显存数据';
-      refs.emptyText.textContent = state.meta.platform.note || '这个平台上没有 NVIDIA 驱动可供读取。';
+      refs.emptyTitle.textContent = t('state.empty.unsupported.title');
+      refs.emptyText.textContent = platformNote(state.meta.platform) || t('state.empty.unsupported.text');
     } else {
-      refs.emptyTitle.textContent = '暂时读不到 GPU 数据';
-      refs.emptyText.textContent = '处理完上面的采集异常后，曲线会自动出现。';
+      refs.emptyTitle.textContent = t('state.empty.error.title');
+      refs.emptyText.textContent = t('state.empty.error.text');
     }
     return;
   }
@@ -1204,9 +1264,9 @@ function renderCharts() {
           <span class="chart__name"></span>
         </div>
         <div class="chart__stats">
-          <span class="chart__stat" data-role="mem"><span>显存</span><b></b></span>
-          <span class="chart__stat" data-role="util"><span>利用率</span><b></b></span>
-          <span class="chart__stat" data-role="temp"><span>温度</span><b></b></span>
+          <span class="chart__stat" data-role="mem"><span>${t('chart.stat.mem')}</span><b></b></span>
+          <span class="chart__stat" data-role="util"><span>${t('chart.stat.util')}</span><b></b></span>
+          <span class="chart__stat" data-role="temp"><span>${t('chart.stat.temp')}</span><b></b></span>
         </div>`;
       head.querySelector('.chart__name').textContent = gpu.name;
 
@@ -1215,7 +1275,7 @@ function renderCharts() {
       const canvas = document.createElement('canvas');
       canvas.className = 'chart__canvas';
       canvas.setAttribute('role', 'img');
-      canvas.setAttribute('aria-label', `GPU ${gpu.index} 的显存占用与利用率曲线（${rangeLabel()}）`);
+      canvas.setAttribute('aria-label', t('chart.canvas.label', { index: gpu.index, range: rangeLabel() }));
       // 鼠标停在图上时给参考线与浮窗；canvas 是重建的，所以监听也在这里挂
       attachChartHover(canvas);
       canvasWrap.appendChild(canvas);
@@ -1234,7 +1294,11 @@ function renderCharts() {
     const memStat = node.head.querySelector('[data-role="mem"]');
     const utilStat = node.head.querySelector('[data-role="util"]');
     const tempStat = node.head.querySelector('[data-role="temp"]');
-    memStat.querySelector('b').textContent = `${fmtGiB(gpu.memUsedMiB)} / ${fmtGiB(gpu.memTotalMiB)}（${fmtPct(gpu.memUsedPct, 1)}）`;
+    memStat.querySelector('b').textContent = t('gpu.memValue', {
+      used: fmtGiB(gpu.memUsedMiB),
+      total: fmtGiB(gpu.memTotalMiB),
+      pct: fmtPct(gpu.memUsedPct, 1),
+    });
     memStat.dataset.tone = toneFor(gpu.memUsedPct) || '';
     utilStat.querySelector('b').textContent = fmtPct(gpu.utilGpuPct, 0);
     tempStat.querySelector('b').textContent = gpu.tempC == null ? '--' : `${Math.round(gpu.tempC)}°C`;
@@ -1245,11 +1309,11 @@ function renderCharts() {
         [
           {
             values: series.mem, color: colors.primary, width: 2, fill: true,
-            label: '显存占用', format: (value) => fmtPct(value, 1),
+            label: t('chart.legend.mem'), format: (value) => fmtPct(value, 1),
           },
           {
             values: series.util, color: colors.signal, width: 1.5,
-            label: '利用率', format: (value) => fmtPct(value, 0),
+            label: t('chart.series.util'), format: (value) => fmtPct(value, 0),
           },
         ],
         chartSlots(),
@@ -1265,7 +1329,13 @@ function renderCharts() {
 const SERVICE_COLORS = [1, 2, 3, 4, 5].map((i) => cssVar(`--jf-chart-${i}`, '#005bac'))
   .concat(cssVar('--jf-chart-other', '#c87700'));
 const SERVICE_TOP_N = 5;
-const SERVICE_LABELS = { 未识别: '未识别（拿不到服务身份的进程）' };
+// 后端把"拿不到服务身份"的进程固定叫「未识别」，曲线里合成的那条叫「其他」。
+// 这两个名字是**身份**（用来比对、去重、当图例的 key），所以只翻显示、不改身份。
+const SERVICE_LABEL_KEYS = { 未识别: 'svc.unknown', 其他: 'svc.other' };
+const serviceDisplayName = (name) => {
+  const key = SERVICE_LABEL_KEYS[name];
+  return key ? t(key) : name;
+};
 
 /**
  * 从逐帧的服务汇总里挑出这段时间占用最高的几个，剩下的归入"其他"。
@@ -1295,6 +1365,9 @@ function buildServiceSeries(rows, topN = SERVICE_TOP_N) {
   }));
   const other = {
     name: '其他',
+    // 悬停浮窗优先用 label（chart-hover 里就是 line.label || line.name），
+    // 所以身份留中文、显示翻成当前语言，两边互不干扰
+    label: t('svc.other'),
     color: SERVICE_COLORS[SERVICE_COLORS.length - 1],
     values: [],
     hoverValues: [],
@@ -1329,7 +1402,7 @@ function buildServiceSeries(rows, topN = SERVICE_TOP_N) {
 }
 
 function renderServiceChart() {
-  refs.svcSub.textContent = `按服务汇总 · ${rangeLabel()} · 最多画占用最高的 ${SERVICE_TOP_N} 个`;
+  refs.svcSub.textContent = t('svc.sub', { range: rangeLabel(), n: SERVICE_TOP_N });
   const rows = state.serviceRows;
   const usable = rows.filter((row) => row.services.length > 0);
 
@@ -1337,10 +1410,10 @@ function renderServiceChart() {
     refs.svcChartWrap.hidden = true;
     refs.svcLegend.replaceChildren();
     refs.svcEmpty.hidden = false;
-    refs.svcEmptyTitle.textContent = '还没有服务维度的数据';
+    refs.svcEmptyTitle.textContent = t('svc.empty.title');
     refs.svcEmptyText.textContent = rows.length === 0
-      ? '曲线还没有采样点，稍等一两秒。'
-      : '这个区间里没有服务汇总记录。服务维度是后加的，更早写入的历史补不回来。';
+      ? t('svc.empty.noSamples')
+      : t('svc.empty.oldRows');
     return;
   }
   refs.svcChartWrap.hidden = false;
@@ -1374,8 +1447,8 @@ function renderServiceChart() {
     legendSpecs.push({
       key: line.name,
       color: line.color,
-      text: `${SERVICE_LABELS[line.name] || line.name} ${mem == null ? '--' : fmtGiB(mem)}`
-        + (gone ? '（区间末尾已退出）' : ''),
+      text: `${serviceDisplayName(line.name)} ${mem == null ? '--' : fmtGiB(mem)}`
+        + (gone ? t('svc.legend.gone') : ''),
     });
   }
   syncLegendItems(refs.svcLegend, legendSpecs);
@@ -1517,18 +1590,20 @@ function renderSystemCard() {
   if (!enabled) {
     refs.sysChartWrap.hidden = true;
     refs.sysEmpty.hidden = false;
-    refs.sysSub.textContent = '已关闭（--no-system）';
-    refs.sysEmptyTitle.textContent = '宿主指标采集已关闭';
-    refs.sysEmptyText.textContent = '启动参数带了 --no-system，服务只采集 GPU 指标。去掉该参数并重启即可恢复。';
+    refs.sysSub.textContent = t('sys.sub.closed');
+    refs.sysEmptyTitle.textContent = t('sys.empty.closed.title');
+    refs.sysEmptyText.textContent = t('sys.empty.closed.text');
     return;
   }
 
   if (!system) {
     refs.sysChartWrap.hidden = true;
     refs.sysEmpty.hidden = false;
-    refs.sysSub.textContent = '等待采集';
-    refs.sysEmptyTitle.textContent = meta.status === 'ok' ? '还没有宿主指标' : '宿主指标暂不可用';
-    refs.sysEmptyText.textContent = meta.systemWarning || '采集服务还没有拿到宿主 CPU / 内存数据，稍后会自动重试。';
+    refs.sysSub.textContent = t('kpi.waiting');
+    refs.sysEmptyTitle.textContent = meta.status === 'ok'
+      ? t('sys.empty.noMetrics.title')
+      : t('sys.empty.unavailable.title');
+    refs.sysEmptyText.textContent = backendText(meta.systemWarning) || t('sys.empty.fallbackText');
     return;
   }
 
@@ -1540,47 +1615,49 @@ function renderSystemCard() {
   const unsupported = new Set(system.unsupported || []);
   const missing = [...unsupported].map((key) => SYSTEM_FIELD_LABELS[key] || key);
   // 曲线跟着所选区间走，读数是当前值：切到历史区间时标出来，免得两种时间尺度被混着看
-  const liveMark = state.range === 'live' ? '' : '（当前）';
+  const liveMark = state.range === 'live' ? '' : t('sys.mark.current');
 
   refs.sysSub.textContent = [
-    cpu?.cores ? `${cpu.cores} 个逻辑核` : null,
+    cpu?.cores ? t('sys.sub.cores', { n: cpu.cores }) : null,
     cpu?.model || null,
-    missing.length ? `${missing.join(' / ')} 在当前平台不可用` : null,
-    state.range === 'live' ? null : '上方曲线为所选历史区间，下面读数是当前值',
-  ].filter(Boolean).join(' · ') || '宿主资源概览';
+    missing.length ? t('sys.sub.unavailable', { fields: missing.join(' / ') }) : null,
+    state.range === 'live' ? null : t('sys.sub.historyNote'),
+  ].filter(Boolean).join(' · ') || t('sys.sub.overview');
 
   // 先攒成"想要的样子"，再交给 sync* 去和现有节点对账：标签没变就只改值，
   // 这样每秒的重绘不会重建节点（悬停不闪、正文能选中、焦点不丢）
   const meters = [
     {
-      label: `CPU 使用率${liveMark}`,
+      label: `${t('sys.legend.cpu')}${liveMark}`,
       value: cpu?.usagePct == null ? '--' : `${cpu.usagePct.toFixed(0)}%`,
-      foot: cpu?.usagePct == null ? '首次采样后出现' : `整机平均，共 ${cpu.cores} 个逻辑核`,
+      foot: cpu?.usagePct == null
+        ? t('sys.meter.noSample')
+        : t('sys.meter.cpuFoot', { n: cpu.cores }),
       pct: cpu?.usagePct ?? null,
       tone: toneFor(cpu?.usagePct ?? null),
     },
     {
-      label: `内存使用率${liveMark}`,
+      label: `${t('sys.legend.mem')}${liveMark}`,
       value: mem?.usedPct == null ? '--' : `${mem.usedPct.toFixed(0)}%`,
-      foot: mem ? `${fmtGiB(mem.usedMiB)} / ${fmtGiB(mem.totalMiB)}` : '取不到内存数据',
+      foot: mem ? `${fmtGiB(mem.usedMiB)} / ${fmtGiB(mem.totalMiB)}` : t('sys.meter.memFoot.missing'),
       pct: mem?.usedPct ?? null,
       tone: toneFor(mem?.usedPct ?? null),
     },
   ];
   if (unsupported.has('swap')) {
     meters.push({
-      label: `交换分区${liveMark}`,
-      value: '平台不支持',
-      foot: '这个系统没有可读的交换分区数据源',
+      label: `${t('sys.field.swap')}${liveMark}`,
+      value: t('sys.meter.unsupported'),
+      foot: t('sys.meter.swapUnsupportedFoot'),
       available: false,
     });
   } else if (system.swap) {
     meters.push({
-      label: `交换分区${liveMark}`,
+      label: `${t('sys.field.swap')}${liveMark}`,
       value: system.swap.usedPct == null ? '--' : `${system.swap.usedPct.toFixed(0)}%`,
       foot: system.swap.totalMiB > 0
         ? `${fmtGiB(system.swap.usedMiB)} / ${fmtGiB(system.swap.totalMiB)}`
-        : '未启用交换分区',
+        : t('sys.meter.swapDisabled'),
       pct: system.swap.usedPct ?? 0,
     });
   }
@@ -1589,29 +1666,41 @@ function renderSystemCard() {
   const details = [];
   if (system.load) {
     details.push([
-      '系统负载',
-      `${system.load.l1.toFixed(2)} / ${system.load.l5.toFixed(2)} / ${system.load.l15.toFixed(2)}（1 / 5 / 15 分钟）`,
+      t('sys.field.load'),
+      t('sys.detail.loadValue', {
+        l1: system.load.l1.toFixed(2),
+        l5: system.load.l5.toFixed(2),
+        l15: system.load.l15.toFixed(2),
+      }),
     ]);
   } else if (unsupported.has('load')) {
-    details.push(['系统负载', '当前平台不支持']);
+    details.push([t('sys.field.load'), t('sys.detail.unsupported')]);
   }
   for (const disk of system.disk || []) {
     details.push([
       // 显示名优先：容器里宿主的根分区挂成了 /hostfs，可以按实情写成 /
-      `磁盘 ${disk.label || disk.path}`,
-      `${fmtGiB(disk.usedMiB)} / ${fmtGiB(disk.totalMiB)}（${fmtPct(disk.usedPct, 1)}）`,
+      t('sys.detail.disk', { name: disk.label || disk.path }),
+      t('sys.detail.diskValue', {
+        used: fmtGiB(disk.usedMiB),
+        total: fmtGiB(disk.totalMiB),
+        pct: fmtPct(disk.usedPct, 1),
+      }),
     ]);
   }
   if (system.net) {
     details.push([
-      '网络吞吐',
-      `↓ ${fmtRate(system.net.rxBytesPerSec)}　↑ ${fmtRate(system.net.txBytesPerSec)}（${system.net.interfaces} 个网卡）`,
+      t('sys.detail.netThroughput'),
+      t('sys.detail.netValue', {
+        rx: fmtRate(system.net.rxBytesPerSec),
+        tx: fmtRate(system.net.txBytesPerSec),
+        n: system.net.interfaces,
+      }),
     ]);
   } else if (unsupported.has('net')) {
-    details.push(['网络吞吐', '当前平台不支持']);
+    details.push([t('sys.detail.netThroughput'), t('sys.detail.unsupported')]);
   }
-  if (system.uptimeSec != null) details.push(['系统运行时长', fmtDuration(system.uptimeSec)]);
-  if (meta.systemWarning) details.push(['采集提示', meta.systemWarning]);
+  if (system.uptimeSec != null) details.push([t('sys.detail.uptime'), fmtDuration(system.uptimeSec)]);
+  if (meta.systemWarning) details.push([t('sys.detail.collectHint'), backendText(meta.systemWarning)]);
   syncLabelValueRows(refs.sysDetail, details, {
     rowClass: 'sys-detail__row',
     labelClass: 'sys-detail__label',
@@ -1625,11 +1714,11 @@ function renderSystemCard() {
       [
         {
           values: series.mem, color: themeColors().primary, width: 2, fill: true,
-          label: '内存使用率', format: (value) => fmtPct(value, 0),
+          label: t('sys.legend.mem'), format: (value) => fmtPct(value, 0),
         },
         {
           values: series.cpu, color: themeColors().signal, width: 1.5,
-          label: 'CPU 使用率', format: (value) => fmtPct(value, 0),
+          label: t('sys.legend.cpu'), format: (value) => fmtPct(value, 0),
         },
       ],
       chartSlots(),
@@ -1645,6 +1734,7 @@ function renderSystemCard() {
  */
 function syncThrottleChips(node, gpu) {
   const parts = throttleParts(gpu);
+  // 这里的两个中文只是**签名**（内部比较用），不显示给用户，所以不进文案表
   const signature = parts.known
     ? parts.reasons.map((reason) => `${reason.text}¦${reason.tone || ''}`).join('\u0001') || '无节流'
     : '未知';
@@ -1658,12 +1748,12 @@ function renderThrottleChips(gpu) {
   wrap.className = 'gpu-card__chips';
   const { known, reasons } = throttleParts(gpu);
   if (!known) {
-    wrap.appendChild(stateChip('节流状态未知', null));
+    wrap.appendChild(stateChip(t('gpu.throttle.unknown'), null));
     return wrap;
   }
 
   if (reasons.length === 0) {
-    wrap.appendChild(stateChip('无节流', null));
+    wrap.appendChild(stateChip(t('gpu.throttle.none'), null));
   } else {
     for (const reason of reasons) wrap.appendChild(stateChip(reason.text, reason.tone));
   }
@@ -1754,7 +1844,7 @@ function renderGpuCards() {
     const healthShown = renderHealthNode(
       card.querySelector('[data-role="health"]'),
       gpu,
-      mergeThrottle ? ['无节流'] : [],
+      mergeThrottle ? [t('gpu.throttle.none')] : [],
     );
     const throttleNode = card.querySelector('[data-role="throttle"]');
     if (mergeThrottle && healthShown) {
@@ -1788,7 +1878,7 @@ function renderHealthNode(node, gpu, extraParts = []) {
 
 /* ---------- 渲染：进程表与过滤 ---------- */
 function renderProcFilter() {
-  const options = [{ value: 'all', label: '全部' }].concat(
+  const options = [{ value: 'all', label: t('range.all') }].concat(
     state.gpus.map((gpu) => ({ value: String(gpu.index), label: `GPU ${gpu.index}` })),
   );
   if (refs.procFilter.dataset.signature !== options.map((o) => o.value).join('|')) {
@@ -1835,7 +1925,7 @@ function buildProcRow(proc, gpu) {
   const tdGpu = document.createElement('td');
   const tag = document.createElement('span');
   tag.className = 'gpu-tag';
-  tag.textContent = proc.gpuIndex == null ? '未知' : `GPU ${proc.gpuIndex}`;
+  tag.textContent = proc.gpuIndex == null ? t('common.unknown') : `GPU ${proc.gpuIndex}`;
   tdGpu.appendChild(tag);
 
   const tdPid = document.createElement('td');
@@ -1895,18 +1985,18 @@ function renderProcTable() {
 
   if (empty) {
     if (state.meta?.processWarning) {
-      refs.procEmptyText.textContent = state.meta.processWarning;
+      refs.procEmptyText.textContent = backendText(state.meta.processWarning);
     } else if (state.filter !== 'all') {
-      refs.procEmptyText.textContent = `GPU ${state.filter} 上没有正在占用显存的进程。`;
+      refs.procEmptyText.textContent = t('proc.empty.filtered', { index: state.filter });
     } else {
-      refs.procEmptyText.textContent = '显卡当前空闲，或采集服务权限不足（需要与业务进程相同的用户）。';
+      refs.procEmptyText.textContent = t('proc.empty.text');
     }
   }
 
   const total = state.processes.length;
   refs.procSub.textContent = state.filter === 'all'
-    ? `按显存占用从高到低排列，共 ${total} 个进程`
-    : `筛选 GPU ${state.filter}，显示 ${rows.length} / ${total} 个进程`;
+    ? t('proc.sub.all', { total })
+    : t('proc.sub.filtered', { index: state.filter, shown: rows.length, total });
 }
 
 /* ---------- 渲染：采集信息 ---------- */
@@ -1922,7 +2012,7 @@ function gpuTagCell(index) {
   const td = document.createElement('td');
   const tag = document.createElement('span');
   tag.className = 'gpu-tag';
-  tag.textContent = index == null ? '未知' : `GPU ${index}`;
+  tag.textContent = index == null ? t('common.unknown') : `GPU ${index}`;
   td.appendChild(tag);
   return td;
 }
@@ -1931,7 +2021,7 @@ function procNameCell(name) {
   const td = document.createElement('td');
   const span = document.createElement('span');
   span.className = 'proc-name';
-  span.textContent = name || '未知进程';
+  span.textContent = name || t('proc.unknownProcess');
   td.appendChild(span);
   td.title = name || '';
   return td;
@@ -1951,9 +2041,9 @@ function serviceCell(proc) {
   td.appendChild(tag);
 
   const hints = [
-    proc.user ? `运行用户：${proc.user}` : null,
-    proc.cmdline && proc.cmdline !== proc.name ? `命令行：${proc.cmdline}` : null,
-    proc.containerId && !proc.containerName ? `容器 ID：${proc.containerId}` : null,
+    proc.user ? t('proc.hint.user', { user: proc.user }) : null,
+    proc.cmdline && proc.cmdline !== proc.name ? t('proc.hint.cmdline', { cmd: proc.cmdline }) : null,
+    proc.containerId && !proc.containerName ? t('proc.hint.containerId', { id: proc.containerId }) : null,
   ].filter(Boolean);
   if (hints.length) td.title = hints.join('\n');
   return td;
@@ -2035,13 +2125,15 @@ async function loadProcessHistory() {
     history.total = data.total ?? history.rows.length;
     // 服务端可能因为更小的 --proc-min 而过滤掉一些行，这里如实记下实际生效的下限
     history.effectiveMin = data.minMiB ?? 0;
-    // 没启用历史库时后端会明确说原因，这里如实显示，而不是给个空表让人以为"这段时间没进程"
-    history.notice = data.source === 'memory' ? (data.reason || '未启用历史库') : null;
+    // 没启用历史库时后端会明确说原因，这里如实显示，而不是给个空表让人以为"这段时间没进程"。
+    // 存**原文**、渲染时才翻译：翻译结果存进 state 的话，切语言后这一段会留在旧语言里。
+    // '' 表示"确实是内存模式，但后端没给原因"，渲染时用默认说法兜底
+    history.notice = data.source === 'memory' ? (data.reason || '') : null;
   } catch (error) {
     history.rows = [];
     history.total = 0;
     history.notice = null;
-    history.error = `读取失败（${error.message}）`;
+    history.error = error.message;
   } finally {
     history.loading = false;
   }
@@ -2052,15 +2144,21 @@ function renderProcHistory() {
   const history = state.processHistory;
   const label = PROC_HIST_RANGES.find((item) => item.value === history.range)?.label || history.range;
   const rows = history.rows || [];
+  const noticeText = history.notice === null
+    ? null
+    : (backendText(history.notice) || t('procHist.noStore'));
+  const errorText = history.error ? t('procHist.readFailed', { message: history.error }) : null;
 
-  if (history.loading) refs.procHistSub.textContent = `最近 ${label}：读取中…`;
-  else if (history.error) refs.procHistSub.textContent = history.error;
-  else if (history.notice) refs.procHistSub.textContent = `最近 ${label}：${history.notice}`;
-  else if (history.total === 0) refs.procHistSub.textContent = `最近 ${label}没有进程占用记录`;
+  if (history.loading) refs.procHistSub.textContent = t('procHist.sub.loading', { label });
+  else if (errorText) refs.procHistSub.textContent = errorText;
+  else if (noticeText) refs.procHistSub.textContent = t('procHist.sub.notice', { label, notice: noticeText });
+  else if (history.total === 0) refs.procHistSub.textContent = t('procHist.sub.empty', { label });
   else {
-    const shown = history.total > rows.length ? `，已显示最近 ${rows.length} 条` : '';
-    const min = history.effectiveMin > 0 ? `，只看 ≥ ${fmtMiB(history.effectiveMin)}` : '';
-    refs.procHistSub.textContent = `最近 ${label}共 ${history.total} 条记录${min}${shown}`;
+    const shown = history.total > rows.length ? t('procHist.sub.shown', { n: rows.length }) : '';
+    const min = history.effectiveMin > 0 ? t('procHist.sub.min', { min: fmtMiB(history.effectiveMin) }) : '';
+    refs.procHistSub.textContent = t('procHist.sub.total', {
+      label, total: history.total, min, shown,
+    });
   }
 
   refs.procHistBody.replaceChildren();
@@ -2071,15 +2169,17 @@ function renderProcHistory() {
   const more = !empty && history.total > rows.length && rows.length < PROC_HIST_MAX;
   refs.procHistMore.hidden = !more;
   if (more) {
-    refs.procHistMoreHint.textContent = `已显示 ${rows.length} / ${history.total} 条`;
+    refs.procHistMoreHint.textContent = t('procHist.moreHint', { shown: rows.length, total: history.total });
   }
   if (empty) {
-    refs.procHistEmptyTitle.textContent = (history.error || history.notice) ? '进程历史不可用' : '这段时间没有进程记录';
-    refs.procHistEmptyText.textContent = history.error
-      || history.notice
+    refs.procHistEmptyTitle.textContent = (errorText || noticeText)
+      ? t('procHist.empty.unavailable')
+      : t('procHist.empty.none');
+    refs.procHistEmptyText.textContent = errorText
+      || noticeText
       || (history.effectiveMin > 0
-        ? `这段时间没有占用 ≥ ${fmtMiB(history.effectiveMin)} 的进程。把上面的「占用下限」调回全部试试。`
-        : '进程只在身份变化（或每 5 分钟补一次快照）时留档，这段时间没有新的占用出现。');
+        ? t('procHist.empty.minHint', { min: fmtMiB(history.effectiveMin) })
+        : t('procHist.empty.text'));
     return;
   }
 
@@ -2100,46 +2200,57 @@ function renderProcHistory() {
 function describeCadence(meta) {
   const idle = meta.idle;
   if (!idle) return '--';
-  if (!idle.idleAfterMs) return '固定间隔（未启用空闲降频）';
+  if (!idle.idleAfterMs) return t('meta.cadence.fixed');
   const seconds = Math.round(idle.idleAfterMs / 1000);
-  if (idle.active) return `空闲降频中（每 ${idle.currentIntervalMs} ms）`;
-  return `实时（无人访问 ${seconds} 秒后降频到 ${idle.idleIntervalMs} ms）`;
+  if (idle.active) return t('meta.cadence.idleNow', { ms: idle.currentIntervalMs });
+  return t('meta.cadence.live', { seconds, ms: idle.idleIntervalMs });
 }
 
 function describeFields(meta) {
   const fields = meta.fields;
   if (!fields) return '--';
-  if (!fields.enabled) return '已关闭（--no-extended）';
-  if (fields.mock) return `模拟数据源（${fields.count} 项，未做驱动探测）`;
-  if (fields.extended == null) return '探测中…';
-  if (fields.extended) return `全部可用（${fields.count} 项）`;
-  return `可用 ${fields.count} 项，跳过 ${fields.unsupported.length} 项`;
+  if (!fields.enabled) return t('meta.fields.disabled');
+  if (fields.mock) return t('meta.fields.mock', { n: fields.count });
+  if (fields.extended == null) return t('meta.fields.probing');
+  if (fields.extended) return t('meta.fields.all', { n: fields.count });
+  return t('meta.fields.partial', { n: fields.count, skipped: fields.unsupported.length });
 }
 
 function describeChannel(meta) {
-  if (meta.push && meta.push.enabled === false) return 'HTTP 轮询（服务端已用 --no-push 关闭推送）';
+  if (meta.push && meta.push.enabled === false) return t('meta.channel.pollNoPush');
   if (state.pushActive) {
     const subscribers = meta.push?.subscribers;
-    return `SSE 推送${subscribers ? `（${subscribers} 个页面订阅中）` : ''}`;
+    return t('meta.channel.sse', {
+      subscribers: subscribers ? tn('meta.channel.sseSubscribers', subscribers) : '',
+    });
   }
-  return 'HTTP 轮询（推送未连接）';
+  return t('meta.channel.pollDisconnected');
 }
 
 function describeStorage(meta) {
   const storage = meta.storage;
   if (!storage) return '--';
-  if (storage.mode === 'disabled') return '已关闭（--no-db）';
-  if (storage.mode !== 'sqlite') return `不可用（${storage.reason || '未知原因'}）`;
+  if (storage.mode === 'disabled') return t('meta.storage.disabled');
+  if (storage.mode !== 'sqlite') {
+    // reason 大多来自后端（见 backend-text.js），认不出就原样显示
+    return t('meta.storage.unavailable', {
+      reason: backendText(storage.reason) || t('meta.storage.unknownReason'),
+    });
+  }
   const parts = [];
   if (storage.path) parts.push(storage.path);
   if (storage.sizeBytes != null) parts.push(fmtBytes(storage.sizeBytes));
-  if (storage.written) parts.push(`本次已写入 ${storage.written.gpu} 行`);
-  if (storage.oldestTs) parts.push(`最早 ${fmtDateTime(storage.oldestTs)}`);
-  parts.push(storage.retentionDays > 0 ? `保留 ${storage.retentionDays} 天` : '永久保留');
-  if (storage.storeIntervalMs) parts.push(`每 ${Math.round(storage.storeIntervalMs / 1000)} 秒落一行`);
+  if (storage.written) parts.push(tn('meta.storage.written', storage.written.gpu));
+  if (storage.oldestTs) parts.push(t('meta.storage.oldest', { time: fmtDateTime(storage.oldestTs) }));
+  parts.push(storage.retentionDays > 0
+    ? t('meta.storage.retention', { days: storage.retentionDays })
+    : t('meta.storage.forever'));
+  if (storage.storeIntervalMs) {
+    parts.push(t('meta.storage.storeInterval', { seconds: Math.round(storage.storeIntervalMs / 1000) }));
+  }
   // 只有可回收空间足够大才提示：稳态运行时这个值很小，提示了反而是噪音
   if (storage.freelistBytes > 32 * 1024 * 1024) {
-    parts.push(`可回收 ${fmtBytes(storage.freelistBytes)}（node tools/db-maintenance.mjs --reclaim）`);
+    parts.push(t('meta.storage.reclaim', { size: fmtBytes(storage.freelistBytes) }));
   }
   return parts.join(' · ');
 }
@@ -2152,12 +2263,12 @@ function describeStorage(meta) {
 function describeXid(meta) {
   const xid = meta?.xidStatus;
   if (!xid) return '--';
-  if (meta?.mock) return '模拟数据源不支持（真机上才有）';
-  if (!xid.available) return xid.error || '未读到内核日志';
+  if (meta?.mock) return t('meta.xid.mock');
+  if (!xid.available) return backendText(xid.error) || t('meta.xid.unreadable');
   const source = xid.source === 'journalctl' ? 'journalctl' : 'dmesg';
-  const parts = [`已读（${source}）`];
-  parts.push(xid.total > 0 ? `累计 ${xid.total} 条` : '累计 0 条');
-  if (xid.updatedAt) parts.push(`检查于 ${fmtClock(xid.updatedAt)}`);
+  const parts = [t('meta.xid.read', { source })];
+  parts.push(t('meta.xid.total', { n: xid.total }));
+  if (xid.updatedAt) parts.push(t('alerts.summary.checkedAt', { time: fmtClock(xid.updatedAt) }));
   return parts.join(' · ');
 }
 
@@ -2165,26 +2276,34 @@ function describeAlerts(meta) {
   const alerts = meta.alerts;
   if (!alerts) return '--';
   if (!alerts.enabled) {
-    if (alerts.problems?.length) return `未启用（${alerts.problems.join('；')}）`;
-    return `未启用（${alerts.reason || '没有配置规则'}）`;
+    if (alerts.problems?.length) {
+      return t('meta.alerts.disabledWith', { detail: alerts.problems.join(t('common.listSeparator')) });
+    }
+    return t('meta.alerts.disabledWith', { detail: alerts.reason || t('meta.alerts.noRules') });
   }
-  const parts = [`${alerts.ruleCount} 条规则`];
-  if (alerts.dryRun) parts.push('dry-run（只打印不发送）');
-  if (alerts.autoReload) parts.push('改动自动生效');
-  if (alerts.cooldownMs) parts.push(`抑制 ${Math.round(alerts.cooldownMs / 60000)} 分钟`);
-  parts.push(alerts.firing.length ? `当前 ${alerts.firing.length} 条触发中` : '当前无告警');
+  const parts = [t('meta.alerts.ruleCount', { n: alerts.ruleCount })];
+  if (alerts.dryRun) parts.push(t('meta.alerts.dryRun'));
+  if (alerts.autoReload) parts.push(t('alerts.summary.autoReload'));
+  if (alerts.cooldownMs) {
+    parts.push(t('alerts.summary.cooldown', { minutes: Math.round(alerts.cooldownMs / 60000) }));
+  }
+  parts.push(alerts.firing.length
+    ? t('meta.alerts.firing', { n: alerts.firing.length })
+    : t('alerts.live.none'));
   // 长周期（for 超过内存窗口）规则的判定数据来自哪里，值得写清楚
   const history = alerts.history;
   if (history?.enabled) {
-    const granularity = history.step > 0 ? `按 ${Math.round(history.step / 60000)} 分钟分桶` : '原始粒度';
-    parts.push(`${history.longRuleCount} 条长周期规则查历史库（${granularity}）`);
-    if (history.truncated) parts.push('历史区间被截断');
-    if (history.lastError) parts.push(`取历史失败：${history.lastError}`);
+    const granularity = history.step > 0
+      ? t('meta.alerts.bucketed', { minutes: Math.round(history.step / 60000) })
+      : t('meta.alerts.rawGranularity');
+    parts.push(t('meta.alerts.longFromStore', { n: history.longRuleCount, granularity }));
+    if (history.truncated) parts.push(t('meta.alerts.truncated'));
+    if (history.lastError) parts.push(t('meta.alerts.historyFailed', { message: history.lastError }));
   } else if (history?.longRuleCount > 0) {
-    parts.push(`${history.longRuleCount} 条长周期规则只能按内存窗口判定（未启用历史库）`);
+    parts.push(t('meta.alerts.longFromMemory', { n: history.longRuleCount }));
   }
-  if (alerts.notifiedCount) parts.push(`已通知 ${alerts.notifiedCount} 次`);
-  if (alerts.problems?.length) parts.push(`${alerts.problems.length} 条规则被跳过`);
+  if (alerts.notifiedCount) parts.push(tn('alerts.summary.notified', alerts.notifiedCount));
+  if (alerts.problems?.length) parts.push(t('alerts.badge.skipped', { n: alerts.problems.length }));
   if (alerts.lastError) parts.push(alerts.lastError);
   return parts.join(' · ');
 }
@@ -2192,36 +2311,51 @@ function describeAlerts(meta) {
 function renderMeta() {
   const meta = state.meta || {};
   const rows = [
-    ['主机名', meta.hostname || '--'],
-    ['运行平台', meta.platform ? `${meta.platform.label} ${meta.platform.arch}（node ${meta.platform.nodeVersion || '--'}）` : '--'],
-    ['驱动版本', meta.driverVersion || '--'],
-    ['采集间隔', meta.intervalMs ? `${meta.intervalMs} ms` : '--'],
-    ['采集模式', describeCadence(meta)],
-    ['数据通道', describeChannel(meta)],
-    ['曲线窗口', meta.windowSamples ? `${meta.windowSamples} 点 / 约 ${Math.round(meta.windowSamples * (meta.intervalMs || 1000) / 1000)} 秒` : '--'],
-    ['已缓存采样点', meta.samples == null ? '--' : `${meta.samples} 点`],
-    ['单次采集耗时', meta.collectMs == null ? '--' : `${meta.collectMs} ms`],
-    ['服务运行时长', fmtDuration(meta.uptimeSec)],
-    ['扩展 GPU 指标', describeFields(meta)],
-    ['宿主指标', meta.systemEnabled === false
-      ? '已关闭（--no-system）'
+    [t('meta.row.hostname'), meta.hostname || '--'],
+    [t('meta.row.platform'), meta.platform ? t('meta.row.platformValue', { label: meta.platform.label, arch: meta.platform.arch, node: meta.platform.nodeVersion || '--' }) : '--'],
+    [t('meta.row.driver'), meta.driverVersion || '--'],
+    [t('meta.row.interval'), meta.intervalMs ? `${meta.intervalMs} ms` : '--'],
+    [t('meta.row.cadence'), describeCadence(meta)],
+    [t('meta.row.channel'), describeChannel(meta)],
+    [t('meta.row.window'), meta.windowSamples
+      ? t('meta.row.windowValue', {
+        points: meta.windowSamples,
+        seconds: Math.round(meta.windowSamples * (meta.intervalMs || 1000) / 1000),
+      })
+      : '--'],
+    [t('meta.row.cached'), meta.samples == null ? '--' : t('meta.row.points', { n: meta.samples })],
+    [t('meta.row.collectCost'), meta.collectMs == null ? '--' : `${meta.collectMs} ms`],
+    [t('meta.row.uptime'), fmtDuration(meta.uptimeSec)],
+    [t('meta.row.extended'), describeFields(meta)],
+    [t('meta.row.system'), meta.systemEnabled === false
+      ? t('sys.sub.closed')
       : meta.system
-        ? `开启${(meta.system.unsupported || []).length ? `（${meta.system.unsupported.map((key) => SYSTEM_FIELD_LABELS[key] || key).join(' / ')} 不可用）` : ''}`
-        : '等待采集'],
-    ['历史库', describeStorage(meta)],
-    ['XID 日志', describeXid(meta)],
-    ['告警', describeAlerts(meta)],
-    ['数据源', meta.mock
-      ? '模拟数据（--mock）'
+        ? t('meta.row.systemOn', {
+          detail: (meta.system.unsupported || []).length
+            ? t('meta.row.systemOnPartial', {
+              fields: meta.system.unsupported.map((key) => SYSTEM_FIELD_LABELS[key] || key).join(' / '),
+            })
+            : '',
+        })
+        : t('kpi.waiting')],
+    [t('meta.row.storage'), describeStorage(meta)],
+    [t('meta.row.xid'), describeXid(meta)],
+    [t('meta.row.alerts'), describeAlerts(meta)],
+    [t('meta.row.source'), meta.mock
+      ? t('meta.row.sourceMock')
       : meta.collector?.bin
-        ? `${meta.collector.bin}（${meta.collector.source || '自定义'}）`
-        : '未找到 nvidia-smi'],
-    ['最近更新', state.lastSampleAt ? `${fmtClock(state.lastSampleAt)}（${fmtRelative(state.lastSampleAt)}）` : '--'],
+        ? t('meta.row.sourceBin', { bin: meta.collector.bin, source: meta.collector.source || t('meta.row.sourceCustom') })
+        : t('meta.row.sourceMissing')],
+    [t('meta.row.updated'), state.lastSampleAt
+      ? t('meta.row.updatedValue', { time: fmtClock(state.lastSampleAt), rel: fmtRelative(state.lastSampleAt) })
+      : '--'],
   ];
   if (!meta.mock && meta.collector?.tried?.length && !meta.collector?.bin) {
     rows.splice(rows.length - 1, 0, [
-      '探测过的位置',
-      meta.collector.tried.map((item) => `${item.bin}（${item.result}）`).join('；'),
+      t('meta.row.tried'),
+      meta.collector.tried
+        .map((item) => t('meta.row.triedItem', { bin: item.bin, result: item.result }))
+        .join(t('common.listSeparator')),
     ]);
   }
   // 这 17 行里只有「最近更新」「服务运行时长」「已缓存采样点」这类每秒在变，
@@ -2245,28 +2379,60 @@ function render() {
   // 放在这里而不是 boot：服务端的 --proc-min 要等第一帧 /api/state 才知道
   renderProcHistMin();
 
-  const windowText = `${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒`;
-  const idleNote = state.meta?.idle?.active ? ` · 空闲降频中（每 ${state.meta.idle.currentIntervalMs} ms）` : '';
+  const windowSeconds = Math.round(state.windowSamples * state.intervalMs / 1000);
+  const windowText = t('time.duration.seconds', { s: windowSeconds });
+  const idleNote = state.meta?.idle?.active
+    ? t('app.orient.idleNote', { ms: state.meta.idle.currentIntervalMs })
+    : '';
   if (state.gpus.length) {
-    refs.orientSub.textContent = `${state.meta?.hostname || '--'} · ${state.gpus.length} 张卡 · 每 ${state.intervalMs} ms 采集 · 窗口最近 ${windowText}${idleNote} · 更新于 ${fmtClock(state.lastSampleAt)}`;
+    refs.orientSub.textContent = t('app.orient.summary', {
+      host: state.meta?.hostname || '--',
+      gpus: tn('app.orient.gpus', state.gpus.length),
+      interval: state.intervalMs,
+      window: windowText,
+      idle: idleNote,
+      time: fmtClock(state.lastSampleAt),
+    });
   } else if (state.status === 'error' || state.status === 'unreachable') {
     const host = state.meta?.hostname ? `${state.meta.hostname} · ` : '';
-    const tail = state.lastSampleAt ? `数据停留在 ${fmtRelative(state.lastSampleAt)}` : '还没有采到任何数据';
-    refs.orientSub.textContent = `${host}${state.status === 'unreachable' ? '无法连接采集服务' : '采集异常'} · ${tail}`;
+    const tail = state.lastSampleAt
+      ? t('app.orient.stalled', { rel: fmtRelative(state.lastSampleAt) })
+      : t('app.orient.noDataYet');
+    refs.orientSub.textContent = `${host}${
+      state.status === 'unreachable' ? t('notice.unreachable.title') : t('notice.title')
+    } · ${tail}`;
   } else {
-    refs.orientSub.textContent = '正在连接采集服务…';
+    refs.orientSub.textContent = t('app.connecting');
   }
 
-  const sources = [state.meta?.mock ? '模拟数据源' : 'nvidia-smi'];
-  if (state.meta?.systemEnabled !== false) sources.push('宿主 /proc 与系统接口');
+  const sources = [state.meta?.mock ? t('app.source.mock') : 'nvidia-smi'];
+  if (state.meta?.systemEnabled !== false) sources.push(t('app.source.host'));
   const storage = state.meta?.storage;
   if (storage?.mode === 'sqlite') {
-    const keep = storage.retentionDays > 0 ? `超过 ${storage.retentionDays} 天的自动清理` : '不自动清理';
-    refs.footerText.textContent = `数据来自 ${sources.join(' + ')}：实时窗口保留最近 ${state.windowSamples} 个采样点（约 ${windowText}），同时每 ${Math.round(storage.storeIntervalMs / 1000)} 秒向 ${storage.path || '历史库'} 落一行，${keep}。`;
+    const keep = storage.retentionDays > 0
+      ? t('app.footer.pruned', { days: storage.retentionDays })
+      : t('app.footer.keepForever');
+    refs.footerText.textContent = t('app.footer.withStore', {
+      sources: sources.join(' + '),
+      points: state.windowSamples,
+      window: windowText,
+      interval: Math.round(storage.storeIntervalMs / 1000),
+      path: storage.path || t('app.footer.storeName'),
+      keep,
+    });
   } else if (storage) {
-    refs.footerText.textContent = `数据来自 ${sources.join(' + ')}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}）；未启用历史库（${storage.reason || '--no-db'}）。`;
+    refs.footerText.textContent = t('app.footer.noStore', {
+      sources: sources.join(' + '),
+      points: state.windowSamples,
+      window: windowText,
+      reason: backendText(storage.reason) || '--no-db',
+    });
   } else {
-    refs.footerText.textContent = `数据来自 ${sources.join(' + ')}，仅在内存中保留最近 ${state.windowSamples} 个采样点（约 ${windowText}）。`;
+    refs.footerText.textContent = t('app.footer.memoryOnly', {
+      sources: sources.join(' + '),
+      points: state.windowSamples,
+      window: windowText,
+    });
   }
 
   // 放在最后：这时各卡的内容才都渲染完，量出来的高度才是准的
@@ -2358,11 +2524,12 @@ async function loadHistoryRange(range) {
     state.historyStep = data.step ?? null;
     state.historyTruncated = Boolean(data.truncated);
     // 没启用历史库时会走内存窗口，这里如实说明而不是画一条假的区间
-    state.historyNotice = data.source === 'memory' ? (data.reason || '未启用历史库') : null;
+    // 同 renderProcHistory：这里存原文，翻译放到 describeRange() 里做（切语言才会跟着变）
+    state.historyNotice = data.source === 'memory' ? { reason: data.reason || '' } : null;
     for (const sample of data.samples || []) appendSample(sample, { force: true });
   } catch (error) {
     state.historyPoints = 0;
-    state.historyNotice = `读取历史失败（${error.message}）`;
+    state.historyNotice = { error: error.message };
   }
 }
 
@@ -2481,8 +2648,9 @@ function syncEvidenceSticky() {
 const EXPORT_ITEMS = [
   {
     id: 'gpu',
-    label: 'GPU 曲线',
-    desc: '每行 = 一个采样点 × 一张卡：显存占用、利用率、温度、功耗',
+    // label / desc 用 getter：这张表是模块级常量，写成固定字符串会把语言冻在加载那一刻
+    get label() { return t('export.item.gpu.label'); },
+    get desc() { return t('export.item.gpu.desc'); },
     path: '/api/export.csv',
     format: 'CSV',
     // 同一份数据可以按两种布局导出：长表（每行一卡）或宽表（每张卡各占一组列）
@@ -2492,16 +2660,16 @@ const EXPORT_ITEMS = [
   },
   {
     id: 'host',
-    label: '宿主指标',
-    desc: '每行 = 一个采样点：CPU、内存、交换分区、负载、磁盘、网络',
+    get label() { return t('export.item.host.label'); },
+    get desc() { return t('export.item.host.desc'); },
     path: '/api/export.system.csv',
     format: 'CSV',
     range: true,
   },
   {
     id: 'processes',
-    label: '进程占用历史',
-    desc: '每行 = 一次进程事件：谁在什么时候占上了哪张卡、占了多少、属于哪个服务',
+    get label() { return t('export.item.processes.label'); },
+    get desc() { return t('export.item.processes.desc'); },
     path: '/api/export.processes.csv',
     format: 'CSV',
     range: true,
@@ -2509,8 +2677,8 @@ const EXPORT_ITEMS = [
   },
   {
     id: 'snapshot',
-    label: '当前完整快照',
-    desc: '此刻的全部状态：整机概览、每张卡、进程列表、宿主明细、告警状态',
+    get label() { return t('export.item.snapshot.label'); },
+    get desc() { return t('export.item.snapshot.desc'); },
     path: '/api/export.json',
     format: 'JSON',
     // 快照的语义就是"此刻"，带时间范围会让人以为导的是那段时间的数据
@@ -2519,20 +2687,20 @@ const EXPORT_ITEMS = [
 ];
 
 const EXPORT_RANGES = [
-  { value: 'follow', label: '跟随曲线' },
-  { value: '1h', label: '1 小时' },
-  { value: '24h', label: '24 小时' },
-  { value: '7d', label: '7 天' },
-  { value: '30d', label: '30 天' },
-  { value: '90d', label: '90 天' },
-  { value: 'all', label: '全部' },
+  { value: 'follow', get label() { return t('export.range.follow'); } },
+  { value: '1h', get label() { return tn('range.hours', 1); } },
+  { value: '24h', get label() { return tn('range.hours', 24); } },
+  { value: '7d', get label() { return tn('range.days', 7); } },
+  { value: '30d', get label() { return tn('range.days', 30); } },
+  { value: '90d', get label() { return tn('range.days', 90); } },
+  { value: 'all', get label() { return t('range.all'); } },
 ];
 
 const exportChoice = { content: 'gpu', layout: 'long', range: 'follow', full: false };
 
 const EXPORT_LAYOUTS = [
-  { value: 'long', label: '长表' },
-  { value: 'wide', label: '宽表' },
+  { value: 'long', get label() { return t('export.layout.long'); } },
+  { value: 'wide', get label() { return t('export.layout.wide'); } },
 ];
 
 function exportItem() {
@@ -2557,9 +2725,13 @@ function exportRangeParams() {
 
 function rangeLabelOf(value) {
   if (value === 'follow') {
-    if (state.range === 'live') return `跟随曲线（最近的 ${Math.round(state.windowSamples * state.intervalMs / 1000)} 秒实时窗口）`;
+    if (state.range === 'live') {
+      return t('export.range.followLive', {
+        seconds: Math.round(state.windowSamples * state.intervalMs / 1000),
+      });
+    }
     const item = RANGES.find((entry) => entry.value === state.range);
-    return `跟随曲线（${item?.label || state.range}）`;
+    return t('export.range.followWith', { label: item?.label || state.range });
   }
   return EXPORT_RANGES.find((entry) => entry.value === value)?.label || value;
 }
@@ -2587,8 +2759,10 @@ function renderExportContent() {
     title.textContent = item.label;
     const desc = document.createElement('span');
     desc.textContent = blocked
-      ? '需要历史库（当前不可用）'
-      : `${item.desc}　·　${item.format}${item.range ? '' : '　·　不含时间范围'}`;
+      ? t('export.item.needsHistory')
+      : `${item.desc}${t('common.dotSeparator')}${item.format}${
+        item.range ? '' : `${t('common.dotSeparator')}${t('export.item.noRange')}`
+      }`;
     text.append(title, desc);
     option.append(radio, text);
     refs.exportContent.appendChild(option);
@@ -2651,14 +2825,14 @@ function exportTimeHint() {
   const zone = state.meta?.timeZone;
   const fixed = state.meta?.timeZoneFixed === true;
   const own = ownTimeZone();
-  const subject = fixed ? `导出时区 ${zone}` : `服务器系统时区 ${zone || '未知'}`;
-  let text = `时间有两列：time_local 用${subject}，Excel 直接认成日期时间；`
-    + 'timestamp_iso 是 UTC，脚本和跨时区对齐用。';
+  const subject = fixed
+    ? t('export.time.zoneFixed', { zone })
+    : t('export.time.zoneServer', { zone: zone || t('common.unknown') });
+  let text = t('export.time.intro', { subject });
   // 判断只看"两边对不对得上"：哪怕时区是显式固定的，只要和看文件的人不一致，
   // 他就一定会把 06:25 当成错误数据——这跟当初是不是有意选的没有关系
   if (zone && own && zone !== own) {
-    text += ` 注意：这台机器是 ${own}，导出的 time_local 会和你看到的时间对不上；`
-      + `在服务器上用 --tz ${own} 启动就能固定成同一个口径（只影响本服务，不改系统时区）。`;
+    text += t('export.time.mismatch', { own });
   }
   return text;
 }
@@ -2673,34 +2847,36 @@ function syncExportPanel() {
 
   refs.exportLayoutGroup.hidden = item.layout !== true;
   refs.exportLayoutHint.textContent = wide
-    ? '一行一个采样点，每张卡各占一组列（gpu0_mem_used_mib、gpu1_mem_used_mib…）：在 Excel 里横向对比多张卡最方便，列数随卡数增长，所以只带基础指标'
-    : '一行 = 一个采样点 × 一张卡，所有列都是同一套字段名：适合丢给脚本按 gpu_index 过滤';
+    ? t('export.layout.hint.wide')
+    : t('export.layout.hint.long');
 
   refs.exportRangeGroup.dataset.disabled = canRange ? 'false' : 'true';
   for (const button of refs.exportRange.querySelectorAll('.chip')) button.disabled = !canRange;
   refs.exportRangeHint.textContent = canRange
-    ? '默认跟随曲线上方选的范围；你也可以在这里单独选一个，不用先改曲线'
-    : `${item.label} 是"此刻"的快照，不含时间范围`;
+    ? t('export.range.hint')
+    : t('export.range.hintSnapshot', { label: item.label });
 
   refs.exportFullGroup.dataset.disabled = canFull ? 'false' : 'true';
   refs.exportFull.disabled = !canFull;
   if (!canFull) exportChoice.full = false;
   refs.exportFullHint.textContent = !item.full
-    ? '只有 GPU 曲线有扩展指标'
+    ? t('export.full.hint.onlyGpu')
     : (wide
-      ? '宽表只导出基础指标（列数会随卡数增长）；要扩展字段请把上面的布局切回长表'
+      ? t('export.full.hint.wide')
       : (historyAvailable()
-        ? '扩展字段只存在历史库里，导出会比基础列多一点时间（流式写出）'
-        : '需要历史库：当前不可用，只导出基础列'));
+        ? t('export.full.hint.streamed')
+        : t('export.full.hint.noStore')));
 
   // 时间列有两列，说清楚各自是谁——否则用 Excel 打开看到的是 UTC，会以为数据错了
   refs.exportTimeHint.textContent = item.format === 'CSV' ? exportTimeHint() : '';
 
-  const parts = [`${item.label}（${item.format}）`];
-  if (wide) parts.push('宽表');
-  if (canFull && exportChoice.full) parts.push('含扩展指标');
+  const parts = [t('export.summary.item', { label: item.label, format: item.format })];
+  if (wide) parts.push(t('export.layout.wide'));
+  if (canFull && exportChoice.full) parts.push(t('export.summary.withExtended'));
   if (canRange) parts.push(rangeLabelOf(exportChoice.range));
-  refs.exportSummary.textContent = `将导出：${parts.join(' · ')}`;
+  refs.exportSummary.textContent = t('export.summary.prefix', {
+    parts: parts.join(' · '),
+  });
   refs.exportConfirm.disabled = Boolean(item.needsHistory && !historyAvailable());
 }
 
@@ -2763,6 +2939,10 @@ function applyLanguage(lang) {
   syncLangSwitch(refs.langSwitch, lang);
   resetTextSignatures();
   renderRangePicker();
+  // 进程历史卡片不在 render() 的调用链里（它只在"进程身份变化"时单独刷新），
+  // 所以切语言时要显式重放一次，否则那一块会留着上一种语言的文字
+  renderProcHistRange();
+  renderProcHistory();
   render();
 }
 

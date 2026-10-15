@@ -4,15 +4,20 @@
 //   · 数据陈旧（采集没报错，但好几个周期没有新样本）要和"采集失败"分开
 //   · 空闲降频是"故意放慢"，不能被当成陈旧
 //   · 推送掉线退回轮询是降级，但"服务端本来就用 --no-push 关掉了推送"是正常模式
+//
+// 文案走 i18n 的 t()。i18n/index.js 本身不碰 DOM，所以这个模块依然是纯计算、
+// 依然能被 Node 直接 import 单测；要验英文输出就在测试里 setLang('en-US')。
 
-const TEXT = {
-  live: '实时采集中',
-  ok: '实时采集中',
-  loading: '连接中',
-  starting: '服务启动中',
-  empty: '未检测到 GPU',
-  error: '采集失败',
-  unreachable: '连接中断',
+import { t } from './i18n/index.js';
+
+const TEXT_KEYS = {
+  live: 'status.live',
+  ok: 'status.live',
+  loading: 'status.loading',
+  starting: 'status.starting',
+  empty: 'status.empty',
+  error: 'status.error',
+  unreachable: 'status.unreachable',
 };
 
 /**
@@ -43,7 +48,7 @@ export function statusView({
   relative = (ts) => String(ts),
 } = {}) {
   const broken = status === 'error' || status === 'unreachable';
-  const base = TEXT[status] || '连接中';
+  const base = t(TEXT_KEYS[status] || 'status.loading');
   const tone = (status === 'live' || status === 'ok') ? 'live'
     : (status === 'loading' || status === 'starting') ? 'loading'
       : status === 'empty' ? 'empty' : 'error';
@@ -74,20 +79,25 @@ export function statusView({
   if (broken) {
     return {
       tone: 'error',
-      text: lastSampleAt ? `${base} · 数据停留在 ${relative(lastSampleAt)}` : base,
+      text: lastSampleAt ? t('status.staleSuffix', { base, rel: relative(lastSampleAt) }) : base,
       stale: false,
       fellBack: false,
     };
   }
   if (stale) {
-    return { tone: 'stale', text: `${base} · 数据停留在 ${relative(lastSampleAt)}`, stale: true, fellBack: false };
+    return {
+      tone: 'stale',
+      text: t('status.staleSuffix', { base, rel: relative(lastSampleAt) }),
+      stale: true,
+      fellBack: false,
+    };
   }
   if (fellBack) {
-    return { tone: 'poll', text: '已退回轮询（推送未连接）', stale: false, fellBack: true };
+    return { tone: 'poll', text: t('status.poll'), stale: false, fellBack: true };
   }
   if (tone === 'live' && idle?.active) {
     const seconds = Math.round((idle.currentIntervalMs || 0) / 1000);
-    return { tone: 'live', text: `空闲降频中（每 ${seconds} 秒）`, stale: false, fellBack: false };
+    return { tone: 'live', text: t('status.idle', { seconds }), stale: false, fellBack: false };
   }
   return { tone, text: base, stale: false, fellBack: false };
 }
