@@ -3074,5 +3074,8 @@ initI18n({
 applyStaticI18n(document);
 // 语言下拉先对齐到刚定下来的语言（选项文字此时已经是当前语言）
 langDropdown.setValue(getLang());
+// 展示模式按钮上那行"当前值"是从选项文字里读出来的，也要在首帧之前刷一次：
+// HTML 里写死的默认值是中文，英文界面下不刷就会先闪一个"单页"（等 applyView 跑到才变）
+viewDropdown.refresh();
 
 boot();
