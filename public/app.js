@@ -991,8 +991,9 @@ function drawLines(canvas, seriesList, windowSamples, { limit = null, times = []
 
     if (line.fill && count >= 2) {
       const gradient = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
-      gradient.addColorStop(0, 'rgba(0, 91, 172, 0.20)');
-      gradient.addColorStop(1, 'rgba(0, 91, 172, 0.02)');
+      // 面积色走 token：改主题主色时曲线和界面一起变，不会留下"旧蓝"
+      gradient.addColorStop(0, cssVar('--jf-chart-fill-from', 'rgba(0, 91, 172, 0.2)'));
+      gradient.addColorStop(1, cssVar('--jf-chart-fill-to', 'rgba(0, 91, 172, 0.02)'));
       // 按连续的非空段分别填充，避免面积跨过没有数据的区间
       let start = -1;
       for (let i = 0; i <= count; i += 1) {
@@ -1182,7 +1183,10 @@ function renderCharts() {
 }
 
 /* ---------- 渲染：服务显存曲线 ---------- */
-const SERVICE_COLORS = ['#005bac', '#00a0e3', '#2f988c', '#ed7d31', '#8e6bbf', '#c87700'];
+// 图表分类色板也从 token 读（见 styles.css 的 --jf-chart-* ）：
+// 这条曲线是青色、那条是橙色，与状态色是两回事——图形要鲜亮，正文要够深，取舍相反
+const SERVICE_COLORS = [1, 2, 3, 4, 5].map((i) => cssVar(`--jf-chart-${i}`, '#005bac'))
+  .concat(cssVar('--jf-chart-other', '#c87700'));
 const SERVICE_TOP_N = 5;
 const SERVICE_LABELS = { 未识别: '未识别（拿不到服务身份的进程）' };
 

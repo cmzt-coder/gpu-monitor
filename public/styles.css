@@ -18,21 +18,53 @@
   --jf-color-control-border: #647a8a;
   --jf-color-primary: #005bac;
   --jf-color-primary-hover: #023b6c;
+  /* 主色的浅底：容器类服务标签用它 */
+  --jf-color-primary-surface: #e7f2fb;
+  /* secondary 专门给焦点环用（见下面的 --jf-focus-ring），别再当"第二个主色" */
   --jf-color-secondary: #007bc7;
   --jf-color-signal: #00a0e3;
   --jf-color-signal-soft: #aaddfd;
   --jf-color-accent: #ffc000;
   --jf-color-accent-end: #ed7d31;
-  --jf-color-warning: #c87700;
-  --jf-color-success: #2f988c;
-  --jf-color-danger: #cd412d;
+
+  /* 这三个是"状态色"，既要当图形色（曲线、进度条、色块），也要当正文色
+     （告警级别、规则状态、状态胶囊）。做正文时它们必须过 WCAG AA（≥4.5:1），
+     所以取值比"好看的橙/青/红"深一档——改小之前先用附录 C 的脚本复算一遍。 */
+  --jf-color-warning: #a35f00;
+  --jf-color-success: #23786e;
+  --jf-color-danger: #b8371f;
+  /* 与状态色配套的浅底 / 浅描边（告警面板、节流标签、规则徽标） */
+  --jf-color-warning-surface: #fdf7e8;
+  --jf-color-warning-border: #e8d49b;
+  --jf-color-danger-surface: #fdf4f2;
+  --jf-color-danger-border: #f0c4bc;
+  --jf-color-success-surface: #e9f6f4;
+
   --jf-color-on-primary: #ffffff;
+  /* 表格行悬停、导出选项选中这类"淡淡一层"的底 */
+  --jf-color-hover-surface: #f4f9fd;
+  /* 弹窗遮罩：底色带透明度，别在各处再拼一遍 rgb() */
+  --jf-color-overlay: rgb(17 30 53 / 45%);
+
+  /* 图表分类色板：服务曲线最多画 5 个服务，其余归入"其他"。
+     单独列一组而不是直接引用状态色——同一个青/橙，在曲线里要鲜亮，做正文时又得够深，
+     两者的取舍正好相反，混用就会顾此失彼。 */
+  --jf-chart-1: #005bac;
+  --jf-chart-2: #00a0e3;
+  --jf-chart-3: #2f988c;
+  --jf-chart-4: #ed7d31;
+  --jf-chart-5: #8e6bbf;
+  --jf-chart-other: #c87700;
+  /* 折线下方的面积渐变（两道）。写传统 rgba() 而不是空格分隔语法——
+     这两个值要传到 canvas 的 addColorStop()，用最保守的写法免得解析上有差异 */
+  --jf-chart-fill-from: rgba(0, 91, 172, 0.2);
+  --jf-chart-fill-to: rgba(0, 91, 172, 0.02);
 
   --jf-radius-sm: 6px;
   --jf-radius-md: 12px;
   --jf-radius-lg: 18px;
   --jf-shadow-card: 0 12px 32px rgb(2 59 108 / 10%);
-  --jf-focus-ring: 0 0 0 2px #ffffff, 0 0 0 5px #007bc7;
+  --jf-focus-ring: 0 0 0 2px var(--jf-color-surface), 0 0 0 5px var(--jf-color-secondary);
   --jf-duration-fast: 160ms;
   --jf-duration-base: 280ms;
   --jf-page-gutter: clamp(20px, 3vw, 48px);
@@ -67,7 +99,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .skip-link {
   position: absolute; left: 12px; top: -60px; z-index: 20;
   padding: 10px 16px; border-radius: var(--jf-radius-sm);
-  background: var(--jf-color-primary); color: #fff; text-decoration: none;
+  background: var(--jf-color-primary); color: var(--jf-color-on-primary); text-decoration: none;
   transition: top var(--jf-duration-fast) ease;
 }
 .skip-link:focus { top: 12px; }
@@ -134,7 +166,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .status-pill__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--jf-color-ink-muted); flex: none; }
 .status-pill[data-state="live"] { color: var(--jf-color-primary); border-color: var(--jf-color-signal-soft); }
 .status-pill[data-state="live"] .status-pill__dot { background: var(--jf-color-signal); }
-.status-pill[data-state="error"] { color: var(--jf-color-danger); border-color: #f0c4bc; }
+.status-pill[data-state="error"] { color: var(--jf-color-danger); border-color: var(--jf-color-danger-border); }
 .status-pill[data-state="error"] .status-pill__dot { background: var(--jf-color-danger); }
 .status-pill[data-state="empty"] { color: var(--jf-color-warning); }
 .status-pill[data-state="empty"] .status-pill__dot { background: var(--jf-color-warning); }
@@ -166,10 +198,10 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .notice {
   display: flex; gap: 14px; align-items: flex-start;
   margin-top: 20px; padding: 16px 18px;
-  border: 1px solid #f0c4bc;
+  border: 1px solid var(--jf-color-danger-border);
   border-left: 4px solid var(--jf-color-danger);
   border-radius: var(--jf-radius-md);
-  background: #fdf4f2;
+  background: var(--jf-color-danger-surface);
 }
 .notice__icon { color: var(--jf-color-danger); margin-top: 2px; }
 .notice__body { flex: 1 1 auto; min-width: 0; }
@@ -460,7 +492,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   border-bottom: 1px solid var(--jf-color-border);
   vertical-align: middle;
 }
-.table tbody tr:hover td { background: #f4f9fd; }
+.table tbody tr:hover td { background: var(--jf-color-hover-surface); }
 .table tbody tr:last-child td { border-bottom: none; }
 .table .proc-name {
   display: inline-block;
@@ -492,9 +524,9 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   white-space: nowrap;
   vertical-align: bottom;
 }
-.table .service-tag[data-kind="container"] { background: #e7f2fb; color: var(--jf-color-primary-hover); }
-.table .service-tag[data-kind="systemd"] { background: #e9f6f4; color: #1f6d63; }
-.table .service-tag[data-kind="session"] { background: #fdf7e8; color: var(--jf-color-warning); }
+.table .service-tag[data-kind="container"] { background: var(--jf-color-primary-surface); color: var(--jf-color-primary-hover); }
+.table .service-tag[data-kind="systemd"] { background: var(--jf-color-success-surface); color: var(--jf-color-success); }
+.table .service-tag[data-kind="session"] { background: var(--jf-color-warning-surface); color: var(--jf-color-warning); }
 .table .service-tag[data-kind="none"] { background: none; color: var(--jf-color-ink-muted); }
 
 /* ---------- 各卡当前占用 ---------- */
@@ -610,8 +642,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   background: var(--jf-color-surface-muted);
   font-size: 12px; color: var(--jf-color-ink-muted);
 }
-.state-chip[data-tone="warning"] { border-color: #e8d49b; background: #fdf7e8; color: var(--jf-color-warning); }
-.state-chip[data-tone="danger"] { border-color: #f0c4bc; background: #fdf4f2; color: var(--jf-color-danger); }
+.state-chip[data-tone="warning"] { border-color: var(--jf-color-warning-border); background: var(--jf-color-warning-surface); color: var(--jf-color-warning); }
+.state-chip[data-tone="danger"] { border-color: var(--jf-color-danger-border); background: var(--jf-color-danger-surface); color: var(--jf-color-danger); }
 .state-chip__dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
 
 /* ---------- 曲线时间范围 ---------- */
@@ -624,10 +656,10 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .alerts {
   margin-top: 20px;
   padding: 16px 18px;
-  border: 1px solid #e8d49b;
+  border: 1px solid var(--jf-color-warning-border);
   border-left: 4px solid var(--jf-color-warning);
   border-radius: var(--jf-radius-md);
-  background: #fdf7e8;
+  background: var(--jf-color-warning-surface);
 }
 /* 面板常驻：没有触发时走中性配色，只有真出事才整块泛黄 */
 .alerts[data-state="idle"] {
@@ -653,7 +685,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 }
 .alerts__level {
   padding: 2px 8px; border-radius: 999px;
-  background: var(--jf-color-warning); color: #fff;
+  background: var(--jf-color-warning); color: var(--jf-color-on-primary);
   font-size: 12px; font-weight: 600; white-space: nowrap;
 }
 .alerts__level[data-level="critical"] { background: var(--jf-color-danger); }
@@ -685,7 +717,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .alerts__rule[data-state="firing"] .alerts__level {
   background: var(--jf-color-warning);
   border-color: var(--jf-color-warning);
-  color: #fff;
+  color: var(--jf-color-on-primary);
 }
 .alerts__rule[data-state="firing"] .alerts__level[data-level="critical"] {
   background: var(--jf-color-danger);
@@ -728,7 +760,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   color: var(--jf-color-ink);
   box-shadow: var(--jf-shadow-card);
 }
-.export::backdrop { background: rgb(17 30 53 / 45%); }
+.export::backdrop { background: var(--jf-color-overlay); }
 .export__head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 18px 20px 12px;
@@ -759,7 +791,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .export__option:hover { border-color: var(--jf-color-control-border); }
 .export__option:has(input:checked) {
   border-color: var(--jf-color-primary);
-  background: #f4f9fd;
+  background: var(--jf-color-hover-surface);
 }
 .export__option[data-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
 .export__option input { margin-top: 3px; accent-color: var(--jf-color-primary); }
