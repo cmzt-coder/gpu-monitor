@@ -69,7 +69,7 @@ node server.js --mock --port 8090       # 没有显卡的机器上先看效果
 
 ## 界面语言
 
-顶栏的 `中 / EN` 下拉是唯一入口，切换后**整页即时生效**（含 canvas 上的坐标轴文字与曲线读数浮窗）。它和旁边的「单页 / 导航」一样都是原生 `<select>`：收起时只占一行，英文文案（`Single page`）也不会把顶栏撑开。
+顶栏的 `中 / EN` 下拉是唯一入口，切换后**整页即时生效**（含 canvas 上的坐标轴文字与曲线读数浮窗）。它和旁边的「单页 / 导航」一样都是**自绘的下拉**（不是原生 `<select>`，见 `public/dropdown.js`）——收起时只占一行，展开面板和页面其他部分同一套设计；英文文案（`Single page`）也不会把顶栏撑开。
 
 - **优先级**：URL 显式指定（`?lang=` / `#lang=`）→ 上次的选择（`localStorage`）→ `navigator.language` → 中文
 - **加新文案**：在 `public/i18n/zh-CN.js` 里加一条 key，再到 `en-US.js` 补同名的英文；两边 key 必须一一对应，占位符（`{name}`）也要一致。`node tools/smoke-test.mjs` 会逐条校验这两点，也会拦住"代码里用了但资源里没定义"的 key
