@@ -44,7 +44,7 @@
 | `GET /api/state` | 当前状态：每张卡的显存/利用率/温度/功耗、进程列表、采集元信息 |
 | `GET /api/inference` | 推理服务快照：每个 vLLM 实例的可用性、运行/等待队列、KV Cache、TTFT 与吞吐 |
 | `GET /api/inference/history?range=24h&service=ID` | 推理服务历史序列（按时间桶平均）；`service` 可选 |
-| `GET /api/inference/probes?range=24h&service=ID&limit=200` | 最近的主动探针记录（冷/热 TTFT、总耗时、错误） |
+| `GET /api/inference/probes?range=24h&service=ID&result=ok&limit=20&offset=0` | 主动探针记录（冷/热 TTFT、总耗时、错误）；`result` 可选 `all` / `ok` / `fail` / `skipped`，返回 `total` 用于分页 |
 | `GET /api/health` | 健康检查：`200` 健康或仅有提醒、`503` 有致命项；探活不会打断空闲降频 |
 | `GET /api/stream` | SSE 推送：每采集一帧推一条，内容与 `/api/state` 同构；`--no-push` 时返回 404 |
 | `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
@@ -115,6 +115,7 @@
 | `services[].apiKeyEnv` | 视部署 | **环境变量名**，不是密钥本身。vLLM 启用了 `--api-key` 时必填 |
 | `services[].model` | 是 | 必须与 `/v1/models` 返回的 `id` 完全一致，用来发现配置漂移 |
 | `services[].kind` | 否 | `chat` / `completions` / `embeddings` / `rerank`，默认 `chat` |
+| `services[].maxConcurrency` | 否 | vLLM 的 `--max-num-seqs`；填了以后卡片会显示“运行中 / 并发上限”的占用比例 |
 | `services[].paths` | 否 | 覆盖默认路径，反向代理改过路由时用 |
 | `services[].headers` | 否 | 额外请求头，适合反向代理鉴权；同样只写 `${ENV_VAR}` 占位 |
 
@@ -134,7 +135,20 @@
 | `maxTokens` | `32` | 生成上限。推理模型别设太小，否则 token 全被 reasoning 吃掉 |
 | `prompt` / `input` / `query` / `documents` | `ping` / `pong` | chat/embeddings/rerank 各自的探针输入 |
 
-探针结果会在推理卡片上显示"冷 / 热"两个 TTFT（鼠标悬停可见），完整记录在「推理」页签的探针表里。`idleOnly` 跳过时会写一条 `skipped=1` 的记录，说明是忙碌跳过，而不是服务失败。
+探针结果会在推理卡片的“质量”分组显示冷热差距与成功率，完整记录在「推理」页签的探针表里。`idleOnly` 跳过时会写一条 `skipped=1` 的记录，说明是忙碌跳过，而不是服务失败。
+
+### 指标分组
+
+「推理」页签的每张服务卡片可以独立切换四组指标，互不影响：
+
+| 分组 | 指标 |
+| --- | --- |
+| 负载 | 运行、等待、KV Cache、排队·容量、排队·延迟、抢占/分、并发占用、探针 |
+| 延迟 | P95 TTFT、P95 总耗时、ITL P95、排队 P95、Prefill P95、Decode P95 |
+| 吞吐 | 输入 tokens/s、输出 tokens/s、请求/分、每 step token 数 |
+| 质量 | 错误率、中断率、前缀缓存命中率、探针成功率、冷热差距、最近探针时间 |
+
+指标名称支持鼠标悬停和键盘聚焦提示；取不到的指标显示 `--` 并说明“该版本未提供 / 该功能未启用”。探针表支持 `全部 / 通过 / 失败 / 跳过` 过滤，以及每页 `20 / 50 / 100` 条的分页。
 
 使用要点：
 

@@ -10,6 +10,7 @@
       "apiKeyEnv": "VLLM_CHAT_API_KEY",
       "model": "your-model-id",
       "kind": "chat",
+      "maxConcurrency": 16,
       "paths": {
         "health": "/health",
         "models": "/v1/models",

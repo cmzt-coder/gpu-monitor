@@ -119,15 +119,36 @@ const TABLES = [
       ['health_ms', 'REAL'],
       ['running', 'REAL'],
       ['waiting', 'REAL'],
+      ['waiting_capacity', 'REAL'],
+      ['waiting_deferred', 'REAL'],
       ['kv_cache_pct', 'REAL'],
       ['preemptions_total', 'REAL'],
       ['prompt_tokens_total', 'REAL'],
       ['generation_tokens_total', 'REAL'],
       ['request_success_total', 'REAL'],
       ['request_error_total', 'REAL'],
+      ['request_abort_total', 'REAL'],
+      ['prefix_cache_hits', 'REAL'],
+      ['prefix_cache_queries', 'REAL'],
       ['tokens_per_sec', 'REAL'],
       ['ttft_avg_ms', 'REAL'],
       ['e2e_avg_ms', 'REAL'],
+      ['ttft_p95_ms', 'REAL'],
+      ['e2e_p95_ms', 'REAL'],
+      ['itl_p95_ms', 'REAL'],
+      ['queue_p95_ms', 'REAL'],
+      ['prefill_p95_ms', 'REAL'],
+      ['decode_p95_ms', 'REAL'],
+      ['prompt_tokens_per_sec', 'REAL'],
+      ['generation_tokens_per_sec', 'REAL'],
+      ['requests_per_min', 'REAL'],
+      ['error_rate_pct', 'REAL'],
+      ['abort_rate_pct', 'REAL'],
+      ['cache_hit_pct', 'REAL'],
+      ['preemptions_per_min', 'REAL'],
+      ['step_tokens_avg', 'REAL'],
+      ['max_concurrency', 'REAL'],
+      ['concurrency_pct', 'REAL'],
       ['version', 'TEXT'],
     ],
   },
@@ -395,15 +416,36 @@ export async function createSqliteStore({
       health_ms: service.healthMs ?? null,
       running: service.running ?? null,
       waiting: service.waiting ?? null,
+      waiting_capacity: service.waitingCapacity ?? null,
+      waiting_deferred: service.waitingDeferred ?? null,
       kv_cache_pct: service.kvCachePct ?? null,
       preemptions_total: service.preemptionsTotal ?? null,
       prompt_tokens_total: service.promptTokensTotal ?? null,
       generation_tokens_total: service.generationTokensTotal ?? null,
       request_success_total: service.requestSuccessTotal ?? null,
       request_error_total: service.requestErrorTotal ?? null,
+      request_abort_total: service.requestAbortTotal ?? null,
+      prefix_cache_hits: service.prefixCacheHits ?? null,
+      prefix_cache_queries: service.prefixCacheQueries ?? null,
       tokens_per_sec: service.tokensPerSec ?? null,
       ttft_avg_ms: service.ttftAvgMs ?? null,
       e2e_avg_ms: service.e2eAvgMs ?? null,
+      ttft_p95_ms: service.ttftP95Ms ?? null,
+      e2e_p95_ms: service.e2eP95Ms ?? null,
+      itl_p95_ms: service.itlP95Ms ?? null,
+      queue_p95_ms: service.queueP95Ms ?? null,
+      prefill_p95_ms: service.prefillP95Ms ?? null,
+      decode_p95_ms: service.decodeP95Ms ?? null,
+      prompt_tokens_per_sec: service.promptTokensPerSec ?? null,
+      generation_tokens_per_sec: service.generationTokensPerSec ?? null,
+      requests_per_min: service.requestsPerMin ?? null,
+      error_rate_pct: service.errorRatePct ?? null,
+      abort_rate_pct: service.abortRatePct ?? null,
+      cache_hit_pct: service.cacheHitPct ?? null,
+      preemptions_per_min: service.preemptionsPerMin ?? null,
+      step_tokens_avg: service.stepTokensAvg ?? null,
+      max_concurrency: service.maxConcurrency ?? null,
+      concurrency_pct: service.concurrencyPct ?? null,
       version: service.version ?? null,
     };
   }
@@ -827,15 +869,36 @@ export async function createSqliteStore({
       healthMs: row.health_ms ?? null,
       running: row.running ?? null,
       waiting: row.waiting ?? null,
+      waitingCapacity: row.waiting_capacity ?? null,
+      waitingDeferred: row.waiting_deferred ?? null,
       kvCachePct: row.kv_cache_pct ?? null,
       preemptionsTotal: row.preemptions_total ?? null,
       promptTokensTotal: row.prompt_tokens_total ?? null,
       generationTokensTotal: row.generation_tokens_total ?? null,
       requestSuccessTotal: row.request_success_total ?? null,
       requestErrorTotal: row.request_error_total ?? null,
+      requestAbortTotal: row.request_abort_total ?? null,
+      prefixCacheHits: row.prefix_cache_hits ?? null,
+      prefixCacheQueries: row.prefix_cache_queries ?? null,
       tokensPerSec: row.tokens_per_sec ?? null,
       ttftAvgMs: row.ttft_avg_ms ?? null,
       e2eAvgMs: row.e2e_avg_ms ?? null,
+      ttftP95Ms: row.ttft_p95_ms ?? null,
+      e2eP95Ms: row.e2e_p95_ms ?? null,
+      itlP95Ms: row.itl_p95_ms ?? null,
+      queueP95Ms: row.queue_p95_ms ?? null,
+      prefillP95Ms: row.prefill_p95_ms ?? null,
+      decodeP95Ms: row.decode_p95_ms ?? null,
+      promptTokensPerSec: row.prompt_tokens_per_sec ?? null,
+      generationTokensPerSec: row.generation_tokens_per_sec ?? null,
+      requestsPerMin: row.requests_per_min ?? null,
+      errorRatePct: row.error_rate_pct ?? null,
+      abortRatePct: row.abort_rate_pct ?? null,
+      cacheHitPct: row.cache_hit_pct ?? null,
+      preemptionsPerMin: row.preemptions_per_min ?? null,
+      stepTokensAvg: row.step_tokens_avg ?? null,
+      maxConcurrency: row.max_concurrency ?? null,
+      concurrencyPct: row.concurrency_pct ?? null,
       version: row.version ?? null,
     };
   }
@@ -871,8 +934,18 @@ export async function createSqliteStore({
       rows = db.prepare(`
         SELECT CAST(ts / ? AS INTEGER) * ? AS bucket, service_id,
           AVG(running) AS running, AVG(waiting) AS waiting,
+          AVG(waiting_capacity) AS waiting_capacity, AVG(waiting_deferred) AS waiting_deferred,
           AVG(kv_cache_pct) AS kv_cache_pct, AVG(tokens_per_sec) AS tokens_per_sec,
-          AVG(ttft_avg_ms) AS ttft_avg_ms, MIN(up) AS up, COUNT(*) AS points
+          AVG(ttft_avg_ms) AS ttft_avg_ms, AVG(ttft_p95_ms) AS ttft_p95_ms,
+          AVG(e2e_p95_ms) AS e2e_p95_ms, AVG(itl_p95_ms) AS itl_p95_ms,
+          AVG(queue_p95_ms) AS queue_p95_ms, AVG(prefill_p95_ms) AS prefill_p95_ms,
+          AVG(decode_p95_ms) AS decode_p95_ms, AVG(prompt_tokens_per_sec) AS prompt_tokens_per_sec,
+          AVG(generation_tokens_per_sec) AS generation_tokens_per_sec,
+          AVG(requests_per_min) AS requests_per_min, AVG(error_rate_pct) AS error_rate_pct,
+          AVG(abort_rate_pct) AS abort_rate_pct, AVG(cache_hit_pct) AS cache_hit_pct,
+          AVG(preemptions_per_min) AS preemptions_per_min, AVG(step_tokens_avg) AS step_tokens_avg,
+          AVG(max_concurrency) AS max_concurrency, AVG(concurrency_pct) AS concurrency_pct,
+          MIN(up) AS up, COUNT(*) AS points
         FROM inference_sample
         WHERE ts >= ? AND ts <= ?${filter}
         GROUP BY bucket, service_id
@@ -882,8 +955,13 @@ export async function createSqliteStore({
     } else {
       rows = db.prepare(`
         SELECT ts, service_id, state, up, models_ok, metrics_ok, health_ms, running, waiting,
-          kv_cache_pct, preemptions_total, prompt_tokens_total, generation_tokens_total,
-          request_success_total, request_error_total, tokens_per_sec, ttft_avg_ms, e2e_avg_ms, version
+          waiting_capacity, waiting_deferred, kv_cache_pct, preemptions_total, prompt_tokens_total,
+          generation_tokens_total, request_success_total, request_error_total, request_abort_total,
+          prefix_cache_hits, prefix_cache_queries, tokens_per_sec, ttft_avg_ms, e2e_avg_ms,
+          ttft_p95_ms, e2e_p95_ms, itl_p95_ms, queue_p95_ms, prefill_p95_ms, decode_p95_ms,
+          prompt_tokens_per_sec, generation_tokens_per_sec, requests_per_min, error_rate_pct,
+          abort_rate_pct, cache_hit_pct, preemptions_per_min, step_tokens_avg,
+          max_concurrency, concurrency_pct, version
         FROM inference_sample
         WHERE ts >= ? AND ts <= ?${filter}
         ORDER BY ts ASC
@@ -903,17 +981,42 @@ export async function createSqliteStore({
     };
   }
 
-  function queryInferenceProbes({ from, to, serviceId = null, limit = 200 } = {}) {
+  function probeWhere({ serviceId = null, result = 'all' } = {}) {
+    const parts = [];
+    const args = [];
+    if (serviceId) {
+      parts.push('service_id = ?');
+      args.push(serviceId);
+    }
+    if (result === 'ok') parts.push('ok = 1 AND skipped = 0');
+    else if (result === 'fail') parts.push('ok = 0 AND skipped = 0');
+    else if (result === 'skipped') parts.push('skipped = 1');
+    return { sql: parts.length ? ` AND ${parts.join(' AND ')}` : '', args };
+  }
+
+  function queryInferenceProbes({
+    from, to, serviceId = null, result = 'all', limit = 200, offset = 0,
+  } = {}) {
     const cap = Math.max(1, Math.min(50000, Math.floor(limit)));
-    const filter = serviceId ? ' AND service_id = ?' : '';
-    const args = serviceId ? [from, to, serviceId, cap] : [from, to, cap];
+    const skip = Math.max(0, Math.floor(offset));
+    const filter = probeWhere({ serviceId, result });
+    const args = [from, to, ...filter.args, cap, skip];
     return db.prepare(`
       SELECT ts, service_id, kind, ok, skipped, status, cold, ttft_ms, e2e_ms, output_tokens, tokens_per_sec, error
       FROM inference_probe
-      WHERE ts >= ? AND ts <= ?${filter}
+      WHERE ts >= ? AND ts <= ?${filter.sql}
       ORDER BY ts DESC
-      LIMIT ?
+      LIMIT ? OFFSET ?
     `).all(...args).map(probeFromRow);
+  }
+
+  function countInferenceProbes({ from, to, serviceId = null, result = 'all' } = {}) {
+    const filter = probeWhere({ serviceId, result });
+    const row = db.prepare(`
+      SELECT COUNT(*) AS total FROM inference_probe
+      WHERE ts >= ? AND ts <= ?${filter.sql}
+    `).get(from, to, ...filter.args);
+    return Number(row?.total ?? 0);
   }
 
   /** 流式导出推理采样：按 (ts, service_id) 翻页，避免 90 天整段读进内存 */
@@ -928,8 +1031,13 @@ export async function createSqliteStore({
       const page = Math.min(5000, Math.max(1, limit - emitted));
       const rows = db.prepare(`
         SELECT ts, service_id, state, up, models_ok, metrics_ok, health_ms, running, waiting,
-          kv_cache_pct, preemptions_total, prompt_tokens_total, generation_tokens_total,
-          request_success_total, request_error_total, tokens_per_sec, ttft_avg_ms, e2e_avg_ms, version
+          waiting_capacity, waiting_deferred, kv_cache_pct, preemptions_total, prompt_tokens_total,
+          generation_tokens_total, request_success_total, request_error_total, request_abort_total,
+          prefix_cache_hits, prefix_cache_queries, tokens_per_sec, ttft_avg_ms, e2e_avg_ms,
+          ttft_p95_ms, e2e_p95_ms, itl_p95_ms, queue_p95_ms, prefill_p95_ms, decode_p95_ms,
+          prompt_tokens_per_sec, generation_tokens_per_sec, requests_per_min, error_rate_pct,
+          abort_rate_pct, cache_hit_pct, preemptions_per_min, step_tokens_avg,
+          max_concurrency, concurrency_pct, version
         FROM inference_sample
         WHERE (ts > ? OR (ts = ? AND service_id > ?)) AND ts <= ?${filter}
         ORDER BY ts ASC, service_id ASC
@@ -1102,6 +1210,7 @@ export async function createSqliteStore({
     queryProcesses,
     queryInferenceSamples,
     queryInferenceProbes,
+    countInferenceProbes,
     inferencePages,
     processPages,
     countProcesses,

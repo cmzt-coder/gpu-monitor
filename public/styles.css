@@ -692,6 +692,24 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
   margin-top: 6px; font-size: 12px; color: var(--jf-color-ink-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.infer-svc__tabs {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px;
+}
+.infer-svc__tab {
+  padding: 3px 9px;
+  border: 1px solid var(--jf-color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--jf-color-ink-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.infer-svc__tab:hover { background: var(--jf-color-hover-surface); }
+.infer-svc__tab[aria-pressed="true"] {
+  border-color: var(--jf-color-primary);
+  background: var(--jf-color-primary);
+  color: var(--jf-color-on-primary);
+}
 .infer-svc__metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -732,6 +750,15 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 }
 .infer-probe-title { font-size: 14px; font-weight: 600; }
 .infer-probe-sub { margin-top: 4px; font-size: 12px; color: var(--jf-color-ink-muted); }
+.infer-probe-tools {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-top: 10px;
+}
+.infer-probe-pager {
+  display: flex; align-items: center; justify-content: center;
+  gap: 12px; margin-top: 12px; font-size: 12.5px; color: var(--jf-color-ink-muted);
+}
+.infer-probe-pageinfo { font-variant-numeric: tabular-nums; }
 #infer-probe-wrap { margin-top: 12px; }
 .metric-tip {
   position: fixed;

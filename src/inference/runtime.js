@@ -6,7 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { loadInferenceConfig } from './config.js';
-import { counterDelta, extractVllmMetrics } from './metrics.js';
+import {
+  counterDelta, extractVllmMetrics, histogramQuantile, subtractHistograms,
+} from './metrics.js';
 import { mockInferenceServices } from './mock.js';
 
 // /version 基本不变，低频刷新即可
@@ -407,11 +409,20 @@ export async function scrapeService(service, previous, { fetchImpl, timeoutMs, e
   }
 
   const elapsedSec = previous?.updatedAt ? (now() - previous.updatedAt) / 1000 : null;
+  const promptDelta = counterDelta(metricsData?.promptTokensTotal, previous?.metrics?.promptTokensTotal);
   const generationDelta = counterDelta(metricsData?.generationTokensTotal, previous?.metrics?.generationTokensTotal);
   const requestDelta = counterDelta(metricsData?.requestSuccessTotal, previous?.metrics?.requestSuccessTotal);
   const errorDelta = counterDelta(metricsData?.requestErrorTotal, previous?.metrics?.requestErrorTotal);
+  const abortDelta = counterDelta(metricsData?.requestAbortTotal, previous?.metrics?.requestAbortTotal);
   const preemptionsDelta = counterDelta(metricsData?.preemptionsTotal, previous?.metrics?.preemptionsTotal);
+  const cacheHitsDelta = counterDelta(metricsData?.prefixCacheHits, previous?.metrics?.prefixCacheHits);
+  const cacheQueriesDelta = counterDelta(metricsData?.prefixCacheQueries, previous?.metrics?.prefixCacheQueries);
+  const perSecond = (delta) => (delta != null && elapsedSec > 0 ? delta / elapsedSec : null);
   const errorRatePct = requestDelta > 0 && errorDelta != null ? (errorDelta / requestDelta) * 100 : null;
+  const abortRatePct = requestDelta > 0 && abortDelta != null ? (abortDelta / requestDelta) * 100 : null;
+  const cacheHitPct = cacheQueriesDelta > 0 && cacheHitsDelta != null
+    ? (cacheHitsDelta / cacheQueriesDelta) * 100
+    : null;
 
   // 优先用"两次抓取之间"的增量，首帧没有增量时退回累计均值
   const ttftCountDelta = counterDelta(metricsData?.ttftCount, previous?.metrics?.ttftCount);
@@ -428,6 +439,30 @@ export async function scrapeService(service, previous, { fetchImpl, timeoutMs, e
   const e2eAvgMs = hasPreviousE2e
     ? (e2eCountDelta > 0 && e2eSumDelta != null ? (e2eSumDelta / e2eCountDelta) * 1000 : null)
     : averageFrom(metricsData?.e2eCount, metricsData?.e2eSum);
+
+  // 分位数：首帧用累计直方图，之后只用两次抓取之间的增量；没有新样本返回 null。
+  const currentHistograms = metricsData?.histograms || null;
+  const previousHistograms = previous?.metrics?.histograms || null;
+  const p95 = (key) => {
+    if (!currentHistograms) return null;
+    if (!previousHistograms) return histogramQuantile(0.95, currentHistograms[key]);
+    const window = subtractHistograms(currentHistograms[key], previousHistograms[key]);
+    if (!window || !(window.count > 0)) return null;
+    return histogramQuantile(0.95, window);
+  };
+  const iterationAvg = (() => {
+    if (!currentHistograms?.iterationTokens) return null;
+    let histogram = currentHistograms.iterationTokens;
+    if (previousHistograms?.iterationTokens) {
+      histogram = subtractHistograms(currentHistograms.iterationTokens, previousHistograms.iterationTokens);
+    }
+    if (!histogram || !(histogram.count > 0)) return null;
+    return histogram.sum != null ? histogram.sum / histogram.count : null;
+  })();
+  const maxConcurrency = Number(service.maxConcurrency) > 0 ? Number(service.maxConcurrency) : null;
+  const concurrencyPct = maxConcurrency && metricsData?.running != null
+    ? (metricsData.running / maxConcurrency) * 100
+    : null;
 
   let state = 'unknown';
   if (health.status > 0 || health.error) {
@@ -451,19 +486,39 @@ export async function scrapeService(service, previous, { fetchImpl, timeoutMs, e
       version,
       running: metricsData?.running ?? null,
       waiting: metricsData?.waiting ?? null,
+      waitingCapacity: metricsData?.waitingCapacity ?? null,
+      waitingDeferred: metricsData?.waitingDeferred ?? null,
       kvCachePct: round2(metricsData?.kvCachePct ?? null),
       preemptionsTotal: metricsData?.preemptionsTotal ?? null,
       promptTokensTotal: metricsData?.promptTokensTotal ?? null,
       generationTokensTotal: metricsData?.generationTokensTotal ?? null,
       requestSuccessTotal: metricsData?.requestSuccessTotal ?? null,
       requestErrorTotal: metricsData?.requestErrorTotal ?? null,
+      requestAbortTotal: metricsData?.requestAbortTotal ?? null,
+      prefixCacheHits: metricsData?.prefixCacheHits ?? null,
+      prefixCacheQueries: metricsData?.prefixCacheQueries ?? null,
       requestsDelta: requestDelta,
       errorDelta,
       preemptionsDelta,
       errorRatePct: round2(errorRatePct),
-      tokensPerSec: round2(generationDelta != null && elapsedSec > 0 ? generationDelta / elapsedSec : null),
+      abortRatePct: round2(abortRatePct),
+      cacheHitPct: round2(cacheHitPct),
+      promptTokensPerSec: round2(perSecond(promptDelta)),
+      generationTokensPerSec: round2(perSecond(generationDelta)),
+      requestsPerMin: round2(perSecond(requestDelta) == null ? null : perSecond(requestDelta) * 60),
+      preemptionsPerMin: round2(perSecond(preemptionsDelta) == null ? null : perSecond(preemptionsDelta) * 60),
+      stepTokensAvg: round2(iterationAvg),
+      tokensPerSec: round2(perSecond(generationDelta)),
       ttftAvgMs: round2(ttftAvgMs),
       e2eAvgMs: round2(e2eAvgMs),
+      ttftP95Ms: round2(p95('ttft')),
+      e2eP95Ms: round2(p95('e2e')),
+      itlP95Ms: round2(p95('itl')),
+      queueP95Ms: round2(p95('queue')),
+      prefillP95Ms: round2(p95('prefill')),
+      decodeP95Ms: round2(p95('decode')),
+      maxConcurrency,
+      concurrencyPct: round2(concurrencyPct),
       updatedAt: now(),
       error,
       warning: metricsOk ? null : '该实例的 /metrics 不可用或格式不兼容',
@@ -590,7 +645,7 @@ export function createInferenceRuntime({
   function probeStateFor(serviceId) {
     let state = runtime.probeStates.get(serviceId);
     if (!state) {
-      state = { firstSeenAt: 0, lastAt: 0, inFlight: false, lastResult: null };
+      state = { firstSeenAt: 0, lastAt: 0, inFlight: false, lastResult: null, history: [] };
       runtime.probeStates.set(serviceId, state);
     }
     return state;
@@ -600,7 +655,17 @@ export function createInferenceRuntime({
   function attachProbeResults() {
     for (const service of runtime.services) {
       const state = runtime.probeStates.get(service.id);
-      if (state?.lastResult) service.probe = state.lastResult;
+      if (!state?.lastResult) continue;
+      service.probe = state.lastResult;
+      const rated = state.history || [];
+      const successCount = rated.filter((item) => item.ok).length;
+      service.probeStats = {
+        samples: rated.length,
+        successPct: rated.length > 0 ? round2((successCount / rated.length) * 100) : null,
+        coldWarmRatio: state.lastResult.coldTtftMs != null && state.lastResult.warmTtftMs > 0
+          ? round2(state.lastResult.coldTtftMs / state.lastResult.warmTtftMs)
+          : null,
+      };
     }
   }
 
@@ -632,6 +697,10 @@ export function createInferenceRuntime({
       warmTtftMs: row.cold ? (previous.warmTtftMs ?? null) : row.ttftMs,
       error: row.error,
     };
+    if (!row.skipped) {
+      state.history.push({ ts: row.ts, ok: Boolean(row.ok) });
+      if (state.history.length > 50) state.history.shift();
+    }
     attachProbeResults();
   }
 

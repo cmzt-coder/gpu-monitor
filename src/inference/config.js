@@ -133,6 +133,8 @@ function normalizeService(raw, index, warnings, seen) {
     baseUrl,
     model,
     kind,
+    // 可选：vLLM 的 --max-num-seqs，用来显示并发余量；不填就只显示运行数
+    maxConcurrency: Number(raw?.maxConcurrency) > 0 ? Math.floor(Number(raw.maxConcurrency)) : null,
     apiKeyEnv,
     headers: normalizeHeaders(raw?.headers, warnings, id),
     paths: {

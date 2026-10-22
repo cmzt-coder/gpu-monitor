@@ -81,7 +81,9 @@ import { sendTestNotice } from './notify-test.mjs';
 import { runPreflight } from './preflight.mjs';
 import { evaluateHealth } from '../src/health.js';
 import { loadInferenceConfig, normalizeInferenceConfig, parseDurationMs } from '../src/inference/config.js';
-import { counterDelta, extractVllmMetrics, parsePrometheus } from '../src/inference/metrics.js';
+import {
+  counterDelta, extractVllmMetrics, histogramQuantile, parsePrometheus, subtractHistograms,
+} from '../src/inference/metrics.js';
 import { runProbe, scrapeService } from '../src/inference/runtime.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -3162,6 +3164,34 @@ vllm:num_requests_running{engine="0",model_name="other"} 99.0
   assert.ok(!extracted.metricNames.includes('vllm:num_preemptions_created'), '_created 不能进指标名列表');
   assert.equal(counterDelta(5, 3), 2, '计数器增量正常');
   assert.equal(counterDelta(3, 5), null, '计数器回绕/重置时返回 null');
+
+  const HIST_METRICS = `
+vllm:num_requests_waiting_by_reason{engine="0",reason="capacity",model_name="m"} 1
+vllm:num_requests_waiting_by_reason{engine="0",reason="deferred",model_name="m"} 2
+vllm:prefix_cache_hits_total{engine="0",model_name="m"} 30
+vllm:prefix_cache_queries_total{engine="0",model_name="m"} 100
+vllm:request_success_total{engine="0",finished_reason="stop",model_name="m"} 10
+vllm:request_success_total{engine="0",finished_reason="abort",model_name="m"} 3
+vllm:time_to_first_token_seconds_bucket{engine="0",le="0.1",model_name="m"} 8
+vllm:time_to_first_token_seconds_bucket{engine="0",le="0.2",model_name="m"} 10
+vllm:time_to_first_token_seconds_bucket{engine="0",le="0.5",model_name="m"} 12
+vllm:time_to_first_token_seconds_bucket{engine="0",le="+Inf",model_name="m"} 12
+vllm:time_to_first_token_seconds_sum{engine="0",model_name="m"} 2.4
+vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
+`;
+  const hist = extractVllmMetrics(HIST_METRICS, { model: 'm' });
+  assert.equal(hist.waitingCapacity, 1);
+  assert.equal(hist.waitingDeferred, 2);
+  assert.equal(hist.prefixCacheHits, 30);
+  assert.equal(hist.prefixCacheQueries, 100);
+  assert.equal(hist.requestAbortTotal, 3);
+  assert.ok(Math.abs(histogramQuantile(0.95, hist.histograms.ttft) - 410) < 1e-6, '直方图 P95 要按桶插值');
+  const deltaHist = subtractHistograms(
+    hist.histograms.ttft,
+    { buckets: [{ le: 0.1, value: 4 }, { le: 0.2, value: 6 }, { le: 0.5, value: 8 }, { le: Infinity, value: 8 }], sum: 1.2, count: 8 },
+  );
+  assert.equal(deltaHist.count, 4);
+  assert.deepEqual(deltaHist.buckets.map((bucket) => bucket.value), [4, 4, 4, 4]);
   assert.equal(parseDurationMs('15s'), 15000);
   assert.equal(parseDurationMs('2m'), 120000);
   assert.equal(parseDurationMs('bad', 7000), 7000);
@@ -3186,9 +3216,13 @@ vllm:num_requests_running{engine="0",model_name="other"} 99.0
   assert.equal(normalizedInference.config.services[1].kind, 'chat', '不支持的 kind 回退成 chat');
   assert.ok(normalizedInference.warnings.length >= 4, '每条被跳过的配置都要留下 warning');
   const probeInterval = normalizeInferenceConfig({
-    services: [{ id: 'p', baseUrl: 'http://127.0.0.1:8000', model: 'm', probe: { enabled: true, interval: '30s' } }],
+    services: [{
+      id: 'p', baseUrl: 'http://127.0.0.1:8000', model: 'm',
+      maxConcurrency: 16, probe: { enabled: true, interval: '30s' },
+    }],
   });
   assert.equal(probeInterval.config.services[0].probe.intervalMs, 30000, '探针允许 30 秒间隔');
+  assert.equal(probeInterval.config.services[0].maxConcurrency, 16, '保留可选的并发上限');
 
   const missingConfig = await loadInferenceConfig(path.join(os.tmpdir(), `gpu-monitor-no-inference-${Date.now()}.json`));
   assert.equal(missingConfig.config, null);
@@ -3295,7 +3329,12 @@ vllm:num_requests_running{engine="0",model_name="other"} 99.0
   inferStore.appendInferenceSample({
     t: 10_000,
     services: [
-      { id: 'a', state: 'up', up: true, modelsOk: true, metricsOk: true, healthMs: 2, running: 3, waiting: 1, kvCachePct: 42, tokensPerSec: 12.5, ttftAvgMs: 200, version: '0.31.0' },
+      {
+        id: 'a', state: 'up', up: true, modelsOk: true, metricsOk: true, healthMs: 2,
+        running: 3, waiting: 1, waitingCapacity: 1, waitingDeferred: 0, kvCachePct: 42,
+        tokensPerSec: 12.5, ttftAvgMs: 200, ttftP95Ms: 300, errorRatePct: 5,
+        cacheHitPct: 30, maxConcurrency: 16, concurrencyPct: 18.75, version: '0.31.0',
+      },
       { id: 'b', state: 'degraded', up: true, modelsOk: false, metricsOk: true, healthMs: 4, running: 0, waiting: 0, kvCachePct: 0 },
     ],
   });
@@ -3305,10 +3344,23 @@ vllm:num_requests_running{engine="0",model_name="other"} 99.0
   const inferSamples = inferStore.queryInferenceSamples({ from: 0, to: 20_000, serviceId: 'a' });
   assert.equal(inferSamples.rows.length, 2, '推理采样按服务查询');
   assert.equal(inferSamples.rows[0].service, 'a');
+  assert.equal(inferSamples.rows[0].ttftP95Ms, 300, '新增 P95 指标要能落库并查回');
+  assert.equal(inferSamples.rows[0].cacheHitPct, 30);
+  assert.equal(inferSamples.rows[0].maxConcurrency, 16);
   assert.equal(inferSamples.rows[1].waiting, 2);
   const inferProbes = inferStore.queryInferenceProbes({ from: 0, to: 20_000, serviceId: 'a' });
   assert.equal(inferProbes.length, 1);
   assert.equal(inferProbes[0].ttftMs, 190);
+  inferStore.appendInferenceProbe({
+    ts: 12_000, serviceId: 'a', kind: 'chat', ok: false, skipped: true,
+    status: null, cold: null, ttftMs: null, e2eMs: null, tokensPerSec: null,
+    error: '服务忙碌',
+  });
+  inferStore.flush();
+  assert.equal(inferStore.countInferenceProbes({ from: 0, to: 20_000, result: 'ok' }), 1);
+  assert.equal(inferStore.countInferenceProbes({ from: 0, to: 20_000, result: 'skipped' }), 1);
+  assert.equal(inferStore.queryInferenceProbes({ from: 0, to: 20_000, result: 'skipped' }).length, 1);
+  assert.equal(inferStore.queryInferenceProbes({ from: 0, to: 20_000, limit: 1, offset: 1 }).length, 1);
   const exported = [...inferStore.inferencePages({ from: 0, to: 20_000 })];
   assert.equal(exported.length, 3, '流式导出要覆盖两个服务与多个采样点');
   inferStore.appendInferenceSample({ t: 125_000, services: [{ id: 'a', state: 'up', up: true, running: 1, waiting: 0 }] });

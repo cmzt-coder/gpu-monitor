@@ -67,6 +67,9 @@ export function createMemoryStore(reason = null) {
     queryInferenceProbes() {
       return [];
     },
+    countInferenceProbes() {
+      return 0;
+    },
     countProcesses() {
       return 0;
     },

@@ -16,7 +16,7 @@ export function mockInferenceServices(now = Date.now()) {
     updatedAt: now,
     error: null,
   };
-  return [
+  const services = [
     {
       ...base,
       id: 'chat-large',
@@ -104,4 +104,39 @@ export function mockInferenceServices(now = Date.now()) {
       },
     },
   ];
+
+  return services.map((service, index) => {
+    const chat = service.kind === 'chat';
+    const maxConcurrency = chat ? 16 : null;
+    return {
+      ...service,
+      waitingCapacity: service.waiting ?? 0,
+      waitingDeferred: 0,
+      preemptionsPerMin: Number(wave(37 + index, 0, 0.4).toFixed(2)),
+      maxConcurrency,
+      concurrencyPct: maxConcurrency
+        ? Number((((service.running ?? 0) / maxConcurrency) * 100).toFixed(1))
+        : null,
+      ttftP95Ms: service.ttftAvgMs == null ? null : Math.round(service.ttftAvgMs * 1.35),
+      e2eP95Ms: service.probe?.e2eMs == null ? null : Math.round(service.probe.e2eMs * 1.3),
+      itlP95Ms: chat ? Number(wave(9 + index, 8, 24).toFixed(1)) : null,
+      queueP95Ms: chat ? Number(wave(7 + index, 1, 18).toFixed(1)) : null,
+      prefillP95Ms: chat ? Number(wave(5 + index, 40, 180).toFixed(1)) : null,
+      decodeP95Ms: chat ? Number(wave(6 + index, 120, 420).toFixed(1)) : null,
+      promptTokensPerSec: Number(wave(8 + index, 80, 420).toFixed(1)),
+      generationTokensPerSec: service.tokensPerSec,
+      requestsPerMin: Number(wave(11 + index, 3, 40).toFixed(1)),
+      stepTokensAvg: chat ? Number(wave(12 + index, 8, 64).toFixed(1)) : null,
+      errorRatePct: Number(wave(13 + index, 0, 2).toFixed(1)),
+      abortRatePct: Number(wave(14 + index, 0, 1).toFixed(1)),
+      cacheHitPct: chat ? Number(wave(15 + index, 0, 70).toFixed(1)) : null,
+      probeStats: {
+        samples: 20,
+        successPct: 98,
+        coldWarmRatio: service.probe?.coldTtftMs != null && service.probe?.warmTtftMs
+          ? Number((service.probe.coldTtftMs / service.probe.warmTtftMs).toFixed(1))
+          : null,
+      },
+    };
+  });
 }

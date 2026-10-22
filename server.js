@@ -453,8 +453,12 @@ function roundCell(value) {
 
 const INFERENCE_CSV_HEADER = [
   'time_local', 'timestamp_iso', 'timestamp_ms', 'service_id', 'state', 'up',
-  'models_ok', 'metrics_ok', 'health_ms', 'running', 'waiting', 'kv_cache_pct',
-  'tokens_per_sec', 'ttft_avg_ms', 'e2e_avg_ms', 'prompt_tokens_total',
+  'models_ok', 'metrics_ok', 'health_ms', 'running', 'waiting', 'waiting_capacity',
+  'waiting_deferred', 'kv_cache_pct', 'tokens_per_sec', 'ttft_avg_ms', 'e2e_avg_ms',
+  'ttft_p95_ms', 'e2e_p95_ms', 'itl_p95_ms', 'queue_p95_ms', 'prefill_p95_ms',
+  'decode_p95_ms', 'prompt_tokens_per_sec', 'generation_tokens_per_sec', 'requests_per_min',
+  'error_rate_pct', 'abort_rate_pct', 'cache_hit_pct', 'preemptions_per_min',
+  'step_tokens_avg', 'max_concurrency', 'concurrency_pct', 'prompt_tokens_total',
   'generation_tokens_total', 'request_success_total', 'request_error_total', 'version',
 ].join(',');
 
@@ -466,8 +470,13 @@ function inferenceCsvLine(row) {
     row.modelsOk == null ? '' : (row.modelsOk ? 1 : 0),
     row.metricsOk == null ? '' : (row.metricsOk ? 1 : 0),
     roundCell(row.healthMs),
-    row.running ?? '', row.waiting ?? '', roundCell(row.kvCachePct),
-    roundCell(row.tokensPerSec), roundCell(row.ttftAvgMs), roundCell(row.e2eAvgMs),
+    row.running ?? '', row.waiting ?? '', roundCell(row.waitingCapacity), roundCell(row.waitingDeferred),
+    roundCell(row.kvCachePct), roundCell(row.tokensPerSec), roundCell(row.ttftAvgMs), roundCell(row.e2eAvgMs),
+    roundCell(row.ttftP95Ms), roundCell(row.e2eP95Ms), roundCell(row.itlP95Ms), roundCell(row.queueP95Ms),
+    roundCell(row.prefillP95Ms), roundCell(row.decodeP95Ms), roundCell(row.promptTokensPerSec),
+    roundCell(row.generationTokensPerSec), roundCell(row.requestsPerMin), roundCell(row.errorRatePct),
+    roundCell(row.abortRatePct), roundCell(row.cacheHitPct), roundCell(row.preemptionsPerMin),
+    roundCell(row.stepTokensAvg), row.maxConcurrency ?? '', roundCell(row.concurrencyPct),
     row.promptTokensTotal ?? '', row.generationTokensTotal ?? '',
     row.requestSuccessTotal ?? '', row.requestErrorTotal ?? '', csvCell(row.version),
   ].join(',');
@@ -720,12 +729,25 @@ const server = http.createServer(async (req, res) => {
     const resolved = range ?? { from: Date.now() - 86400000, to: Date.now() };
     const service = (url.searchParams.get('service') || '').trim() || null;
     const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit')) || 200));
+    const offset = Math.max(0, Math.floor(Number(url.searchParams.get('offset')) || 0));
+    const resultParam = (url.searchParams.get('result') || 'all').toLowerCase();
+    const result = ['ok', 'fail', 'skipped'].includes(resultParam) ? resultParam : 'all';
     if (!store.supportsHistory) {
-      sendJson(res, 200, { ...resolved, limit, service, probes: [], supported: false, reason: store.reason || '未启用历史库' });
+      sendJson(res, 200, {
+        ...resolved, limit, offset, total: 0, result, service, probes: [], supported: false,
+        reason: store.reason || '未启用历史库',
+      });
       return;
     }
-    const probes = store.queryInferenceProbes({ from: resolved.from, to: resolved.to, serviceId: service, limit });
-    sendJson(res, 200, { ...resolved, limit, service, probes, supported: true, source: 'db' });
+    const probes = store.queryInferenceProbes({
+      from: resolved.from, to: resolved.to, serviceId: service, result, limit, offset,
+    });
+    const total = store.countInferenceProbes({
+      from: resolved.from, to: resolved.to, serviceId: service, result,
+    });
+    sendJson(res, 200, {
+      ...resolved, limit, offset, total, result, service, probes, supported: true, source: 'db',
+    });
     return;
   }
 

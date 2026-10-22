@@ -256,6 +256,10 @@
           </div>
           <div class="range-picker" id="infer-hist-range" role="group" aria-label="选择探针记录的范围" data-i18n-attr="aria-label:inferHist.range.group"></div>
         </div>
+        <div class="infer-probe-tools">
+          <div class="chips" id="infer-probe-result" role="group" aria-label="按探针结果过滤" data-i18n-attr="aria-label:inferHist.result.group"></div>
+          <div class="chips" id="infer-probe-size" role="group" aria-label="选择每页条数" data-i18n-attr="aria-label:inferHist.size.group"></div>
+        </div>
         <div class="table-wrap table-wrap--scroll" id="infer-probe-wrap" hidden>
           <table class="table" id="infer-probe-table">
             <caption class="visually-hidden" data-i18n="inferHist.table.caption">最近的推理探针记录</caption>
@@ -271,6 +275,11 @@
             </thead>
             <tbody id="infer-probe-body"></tbody>
           </table>
+        </div>
+        <div class="infer-probe-pager" id="infer-probe-pager" hidden>
+          <button type="button" class="btn btn--ghost btn--sm" id="infer-probe-prev" data-i18n="inferHist.pager.prev">上一页</button>
+          <span class="infer-probe-pageinfo" id="infer-probe-pageinfo"></span>
+          <button type="button" class="btn btn--ghost btn--sm" id="infer-probe-next" data-i18n="inferHist.pager.next">下一页</button>
         </div>
         <div class="state-block" id="infer-hist-empty" hidden>
           <p class="state-block__title" id="infer-hist-empty-title"></p>

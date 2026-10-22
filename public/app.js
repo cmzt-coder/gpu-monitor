@@ -122,6 +122,12 @@ const refs = {
   inferHistEmptyText: $('infer-hist-empty-text'),
   inferProbeWrap: $('infer-probe-wrap'),
   inferProbeBody: $('infer-probe-body'),
+  inferProbeResult: $('infer-probe-result'),
+  inferProbeSize: $('infer-probe-size'),
+  inferProbePager: $('infer-probe-pager'),
+  inferProbePrev: $('infer-probe-prev'),
+  inferProbeNext: $('infer-probe-next'),
+  inferProbePageInfo: $('infer-probe-pageinfo'),
   metaList: $('meta-list'),
   footerText: $('footer-text'),
 };
@@ -143,10 +149,16 @@ const state = {
   cardNodes: new Map(),
   cardSignature: '',
   inferSignature: '',
+  // 每张推理卡片独立选择指标分组（load/latency/throughput/quality）
+  inferCardGroups: {},
   // 推理历史：与实时卡片的抓取节奏解耦，前端按需拉取
   inferHistory: {
     range: '24h',
     service: null,
+    result: 'all',
+    page: 0,
+    pageSize: 20,
+    total: 0,
     probes: [],
     supported: null,
     loading: false,
@@ -1995,15 +2007,77 @@ function inferMetricTile(label, tipKey, value) {
   return item;
 }
 
+const INFER_GROUPS = [
+  { id: 'load', key: 'inferGroup.load' },
+  { id: 'latency', key: 'inferGroup.latency' },
+  { id: 'throughput', key: 'inferGroup.throughput' },
+  { id: 'quality', key: 'inferGroup.quality' },
+];
+
+function fmtInferRate(value, unit = '') {
+  if (value == null) return '--';
+  const rounded = Math.abs(value) >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded}${unit}`;
+}
+
+function inferGroupTiles(service, group) {
+  if (group === 'latency') {
+    return [
+      [t('infer.metric.p95Ttft'), 'infer.tip.p95Ttft', fmtInferMs(service.ttftP95Ms)],
+      [t('infer.metric.p95E2e'), 'infer.tip.p95E2e', fmtInferMs(service.e2eP95Ms)],
+      [t('infer.metric.itl'), 'infer.tip.itl', fmtInferMs(service.itlP95Ms)],
+      [t('infer.metric.queueP95'), 'infer.tip.queueP95', fmtInferMs(service.queueP95Ms)],
+      [t('infer.metric.prefillP95'), 'infer.tip.prefillP95', fmtInferMs(service.prefillP95Ms)],
+      [t('infer.metric.decodeP95'), 'infer.tip.decodeP95', fmtInferMs(service.decodeP95Ms)],
+    ];
+  }
+  if (group === 'throughput') {
+    return [
+      [t('infer.metric.promptTps'), 'infer.tip.promptTps', fmtInferRate(service.promptTokensPerSec, ' tok/s')],
+      [t('infer.metric.genTps'), 'infer.tip.genTps', fmtInferRate(service.generationTokensPerSec ?? service.tokensPerSec, ' tok/s')],
+      [t('infer.metric.rpm'), 'infer.tip.rpm', fmtInferRate(service.requestsPerMin, ' req/min')],
+      [t('infer.metric.stepTokens'), 'infer.tip.stepTokens', fmtInferRate(service.stepTokensAvg)],
+    ];
+  }
+  if (group === 'quality') {
+    const probe = service.probeStats;
+    return [
+      [t('infer.metric.errorRate'), 'infer.tip.errorRate', service.errorRatePct == null ? '--' : fmtPct(service.errorRatePct, 1)],
+      [t('infer.metric.abortRate'), 'infer.tip.abortRate', service.abortRatePct == null ? '--' : fmtPct(service.abortRatePct, 1)],
+      [t('infer.metric.cacheHit'), 'infer.tip.cacheHit', service.cacheHitPct == null ? '--' : fmtPct(service.cacheHitPct, 1)],
+      [t('infer.metric.probeSuccess'), 'infer.tip.probeSuccess', probe?.successPct == null ? '--' : fmtPct(probe.successPct, 0)],
+      [t('infer.metric.coldWarm'), 'infer.tip.coldWarm', probe?.coldWarmRatio == null ? '--' : `${probe.coldWarmRatio.toFixed(1)}×`],
+      [t('infer.metric.lastProbe'), 'infer.tip.lastProbe', service.probe?.at ? fmtRelative(service.probe.at) : '--'],
+    ];
+  }
+  return [
+    [t('infer.metric.running'), 'infer.tip.running', fmtInferCount(service.running)],
+    [t('infer.metric.waiting'), 'infer.tip.waiting', fmtInferCount(service.waiting)],
+    [t('infer.metric.kv'), 'infer.tip.kv', service.kvCachePct == null ? '--' : fmtPct(service.kvCachePct, 1)],
+    [t('infer.metric.waitCap'), 'infer.tip.waitCap', fmtInferCount(service.waitingCapacity)],
+    [t('infer.metric.waitDef'), 'infer.tip.waitDef', fmtInferCount(service.waitingDeferred)],
+    [t('infer.metric.preempt'), 'infer.tip.preempt', fmtInferRate(service.preemptionsPerMin, '/min')],
+    [t('infer.metric.concurrency'), 'infer.tip.concurrency', service.concurrencyPct == null ? '--' : fmtPct(service.concurrencyPct, 0)],
+    [t('infer.metric.probe'), 'infer.tip.probe', probeSummary(service).text],
+  ];
+}
+
 function renderInferServiceCards(info) {
   const history = state.inferHistory;
   const services = (info.services || []).filter((service) => !history.service || service.id === history.service);
-  const signature = `${getLang()}#${history.service ?? '*'}#${services.map((service) => [
+  const groups = services.map((service) => state.inferCardGroups[service.id] || 'load');
+  const signature = `${getLang()}#${history.service ?? '*'}#${services.map((service, index) => `${groups[index]}¦${[
     service.id, service.state, service.model, service.version,
-    service.running, service.waiting, service.kvCachePct, service.ttftAvgMs,
-    service.tokensPerSec, service.probe?.at, service.probe?.ok, service.probe?.skipped,
+    service.running, service.waiting, service.waitingCapacity, service.waitingDeferred,
+    service.kvCachePct, service.ttftAvgMs, service.tokensPerSec, service.promptTokensPerSec,
+    service.generationTokensPerSec, service.requestsPerMin, service.stepTokensAvg,
+    service.ttftP95Ms, service.e2eP95Ms, service.itlP95Ms, service.queueP95Ms,
+    service.prefillP95Ms, service.decodeP95Ms, service.errorRatePct, service.abortRatePct,
+    service.cacheHitPct, service.preemptionsPerMin, service.concurrencyPct, service.maxConcurrency,
+    service.probe?.at, service.probe?.ok, service.probe?.skipped,
     service.probe?.coldTtftMs, service.probe?.warmTtftMs,
-  ].join('¦')).join('|')}`;
+    service.probeStats?.successPct, service.probeStats?.coldWarmRatio,
+  ].join('¦')}`).join('|')}`;
   if (signature === history.cardSignature) return;
   history.cardSignature = signature;
 
@@ -2016,7 +2090,8 @@ function renderInferServiceCards(info) {
     return;
   }
 
-  for (const service of services) {
+  services.forEach((service, index) => {
+    const group = groups[index];
     const card = document.createElement('article');
     card.className = 'infer-svc';
     card.dataset.state = service.state || 'unknown';
@@ -2034,28 +2109,41 @@ function renderInferServiceCards(info) {
     kind.className = 'infer-svc__kind';
     kind.textContent = service.kind || '';
     title.append(name, kind);
-    const state = document.createElement('span');
-    state.className = 'infer-svc__state';
-    state.textContent = inferServiceStateText(service.state);
-    head.append(dot, title, state);
+    const stateNode = document.createElement('span');
+    stateNode.className = 'infer-svc__state';
+    stateNode.textContent = inferServiceStateText(service.state);
+    head.append(dot, title, stateNode);
 
     const meta = document.createElement('p');
     meta.className = 'infer-svc__meta';
     meta.textContent = `${service.model || '--'}${service.version ? ` · vLLM ${service.version}` : ''}`;
 
-    const probe = probeSummary(service);
+    const tabs = document.createElement('div');
+    tabs.className = 'infer-svc__tabs';
+    tabs.setAttribute('role', 'tablist');
+    for (const item of INFER_GROUPS) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'infer-svc__tab';
+      button.textContent = t(item.key);
+      button.setAttribute('role', 'tab');
+      button.setAttribute('aria-pressed', item.id === group ? 'true' : 'false');
+      button.addEventListener('click', () => {
+        state.inferCardGroups[service.id] = item.id;
+        history.cardSignature = '';
+        render();
+      });
+      tabs.appendChild(button);
+    }
+
     const metrics = document.createElement('dl');
     metrics.className = 'infer-svc__metrics';
-    metrics.append(
-      inferMetricTile(t('infer.metric.running'), 'infer.tip.running', fmtInferCount(service.running)),
-      inferMetricTile(t('infer.metric.waiting'), 'infer.tip.waiting', fmtInferCount(service.waiting)),
-      inferMetricTile(t('infer.metric.kv'), 'infer.tip.kv', service.kvCachePct == null ? '--' : fmtPct(service.kvCachePct, 1)),
-      inferMetricTile(t('infer.metric.ttft'), 'infer.tip.ttft', fmtInferMs(service.ttftAvgMs)),
-      inferMetricTile(t('infer.metric.tps'), 'infer.tip.tps', service.tokensPerSec == null ? '--' : `${Math.round(service.tokensPerSec)} tok/s`),
-      inferMetricTile(t('infer.metric.probe'), 'infer.tip.probe', probe.text),
-    );
+    for (const [label, tip, value] of inferGroupTiles(service, group)) {
+      metrics.appendChild(inferMetricTile(label, tip, value));
+    }
 
-    card.append(head, meta, metrics);
+    const probe = probeSummary(service);
+    card.append(head, meta, tabs, metrics);
     if (probe.detail) {
       const note = document.createElement('p');
       note.className = 'infer-svc__note';
@@ -2069,7 +2157,7 @@ function renderInferServiceCards(info) {
       card.appendChild(error);
     }
     refs.inferServiceCards.appendChild(card);
-  }
+  });
 }
 
 function showMetricTip(target, x, y) {
@@ -2113,6 +2201,26 @@ function bindMetricTips() {
   window.addEventListener('scroll', hideMetricTip, true);
 }
 
+function bindInferPager() {
+  refs.inferProbePrev?.addEventListener('click', () => {
+    const history = state.inferHistory;
+    if (history.page <= 0) return;
+    history.page -= 1;
+    history.fetchedAt = 0;
+    loadInferenceProbes();
+    render();
+  });
+  refs.inferProbeNext?.addEventListener('click', () => {
+    const history = state.inferHistory;
+    const pages = Math.max(1, Math.ceil(history.total / history.pageSize));
+    if (history.page + 1 >= pages) return;
+    history.page += 1;
+    history.fetchedAt = 0;
+    loadInferenceProbes();
+    render();
+  });
+}
+
 function renderInferPageControls() {
   const current = state.inferHistory;
   const rangeSignature = `${getLang()}#${INFER_RANGES.map((item) => item.value).join('|')}#${current.range}`;
@@ -2127,6 +2235,7 @@ function renderInferPageControls() {
       button.addEventListener('click', () => {
         if (state.inferHistory.range === item.value) return;
         state.inferHistory.range = item.value;
+        state.inferHistory.page = 0;
         state.inferHistory.fetchedAt = 0;
         loadInferenceProbes();
         render();
@@ -2152,6 +2261,7 @@ function renderInferPageControls() {
       button.addEventListener('click', () => {
         if (state.inferHistory.service === option.id) return;
         state.inferHistory.service = option.id;
+        state.inferHistory.page = 0;
         state.inferHistory.fetchedAt = 0;
         state.inferHistory.cardSignature = '';
         loadInferenceProbes();
@@ -2160,6 +2270,57 @@ function renderInferPageControls() {
       refs.inferHistService.appendChild(button);
     }
     refs.inferHistService.dataset.signature = serviceSignature;
+  }
+
+  const resultOptions = [
+    { id: 'all', key: 'inferHist.result.all' },
+    { id: 'ok', key: 'inferHist.result.ok' },
+    { id: 'fail', key: 'inferHist.result.fail' },
+    { id: 'skipped', key: 'inferHist.result.skipped' },
+  ];
+  const resultSignature = `${getLang()}#${resultOptions.map((item) => item.id).join('|')}#${current.result}`;
+  if (refs.inferProbeResult.dataset.signature !== resultSignature) {
+    refs.inferProbeResult.replaceChildren();
+    for (const item of resultOptions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'chip';
+      button.textContent = t(item.key);
+      button.setAttribute('aria-pressed', item.id === current.result ? 'true' : 'false');
+      button.addEventListener('click', () => {
+        if (state.inferHistory.result === item.id) return;
+        state.inferHistory.result = item.id;
+        state.inferHistory.page = 0;
+        state.inferHistory.fetchedAt = 0;
+        loadInferenceProbes();
+        render();
+      });
+      refs.inferProbeResult.appendChild(button);
+    }
+    refs.inferProbeResult.dataset.signature = resultSignature;
+  }
+
+  const sizeOptions = [20, 50, 100];
+  const sizeSignature = `${getLang()}#${current.pageSize}`;
+  if (refs.inferProbeSize.dataset.signature !== sizeSignature) {
+    refs.inferProbeSize.replaceChildren();
+    for (const size of sizeOptions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'chip';
+      button.textContent = t('inferHist.size.option', { n: size });
+      button.setAttribute('aria-pressed', size === current.pageSize ? 'true' : 'false');
+      button.addEventListener('click', () => {
+        if (state.inferHistory.pageSize === size) return;
+        state.inferHistory.pageSize = size;
+        state.inferHistory.page = 0;
+        state.inferHistory.fetchedAt = 0;
+        loadInferenceProbes();
+        render();
+      });
+      refs.inferProbeSize.appendChild(button);
+    }
+    refs.inferProbeSize.dataset.signature = sizeSignature;
   }
 }
 
@@ -2194,16 +2355,25 @@ function renderInferencePage() {
   refs.inferProbeSub.textContent = t('inferHist.probeSub', {
     range: rangeLabelText,
     service: serviceLabel,
-    count: history.probes.length,
+    count: history.total,
   });
 
-  const signature = `${getLang()}#${history.range}#${history.service ?? ''}#${history.probes.length}#${history.probes[0]?.ts ?? 0}#${history.supported}`;
+  const signature = `${getLang()}#${history.range}#${history.service ?? ''}#${history.result}#${history.pageSize}#${history.page}#${history.total}#${history.probes.length}#${history.probes[0]?.ts ?? 0}#${history.supported}`;
   if (signature === history.signature) return;
   history.signature = signature;
 
-  const probes = history.probes.slice(0, 50);
+  const probes = history.probes;
   refs.inferProbeWrap.hidden = probes.length === 0;
   refs.inferHistEmpty.hidden = probes.length > 0;
+  refs.inferProbePager.hidden = history.total === 0;
+  const pages = Math.max(1, Math.ceil(history.total / history.pageSize));
+  refs.inferProbePageInfo.textContent = t('inferHist.pager.info', {
+    page: Math.min(history.page + 1, pages),
+    pages,
+    total: history.total,
+  });
+  refs.inferProbePrev.disabled = history.page <= 0;
+  refs.inferProbeNext.disabled = history.page + 1 >= pages;
   if (probes.length === 0) {
     refs.inferHistEmptyTitle.textContent = t('inferHist.empty.title');
     refs.inferHistEmptyText.textContent = backendText(history.notice) || t('inferHist.empty.text');
@@ -2241,14 +2411,29 @@ async function loadInferenceProbes() {
   if (history.loading || !state.meta?.inference?.loaded) return;
   history.loading = true;
   try {
-    const query = new URLSearchParams({ range: history.range, limit: '100' });
+    const query = new URLSearchParams({
+      range: history.range,
+      result: history.result,
+      limit: String(history.pageSize),
+      offset: String(history.page * history.pageSize),
+    });
     if (history.service) query.set('service', history.service);
     const data = await fetchJson(`/api/inference/probes?${query}`);
     history.probes = data.probes || [];
+    history.total = data.total ?? history.probes.length;
     history.supported = data.supported !== false;
     history.notice = history.supported ? null : (data.reason || '');
+    const pages = Math.max(1, Math.ceil(history.total / history.pageSize));
+    if (history.total > 0 && history.page >= pages) {
+      // 删到最后一页之外时，回退到有效的最后一页再取一次
+      history.page = pages - 1;
+      history.loading = false;
+      await loadInferenceProbes();
+      return;
+    }
   } catch (error) {
     history.probes = [];
+    history.total = 0;
     history.supported = false;
     history.notice = error.message;
   } finally {
@@ -3469,6 +3654,7 @@ function applyLanguage(lang) {
 
 onLangChange(applyLanguage);
 bindMetricTips();
+bindInferPager();
 
 refs.viewNav.addEventListener('click', (event) => {
   const tab = event.target.closest('.view-nav__tab');
