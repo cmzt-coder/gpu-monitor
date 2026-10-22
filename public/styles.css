@@ -571,6 +571,7 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 }
 .table thead th:first-child { border-radius: var(--jf-radius-sm) 0 0 var(--jf-radius-sm); }
 .table thead th:last-child { border-radius: 0 var(--jf-radius-sm) var(--jf-radius-sm) 0; }
+.table thead th.num { text-align: right; }
 .table tbody td {
   padding: 10px 12px;
   border-bottom: 1px solid var(--jf-color-border);
@@ -646,8 +647,105 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 }
 .infer-summary[data-state="warn"] { background: var(--jf-color-warning-surface); color: var(--jf-color-warning); }
 .infer-summary[data-state="down"] { background: var(--jf-color-danger-surface); color: var(--jf-color-danger); }
-#infer-hist-legend { margin-top: 10px; }
-#infer-probe-wrap { margin-top: 16px; }
+/* 推理页：每个服务一张卡片 */
+.infer-service-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+@media (max-width: 980px) {
+  .infer-service-grid { grid-template-columns: 1fr; }
+}
+.infer-svc {
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--jf-color-border);
+  border-radius: var(--jf-radius-md);
+  background: var(--jf-color-surface);
+}
+.infer-svc[data-state="degraded"] { border-color: var(--jf-color-warning-border); }
+.infer-svc[data-state="down"] { border-color: var(--jf-color-danger-border); }
+.infer-svc__head { display: flex; align-items: center; gap: 8px; }
+.infer-svc__dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--jf-color-ink-muted); flex: none;
+}
+.infer-svc[data-state="up"] .infer-svc__dot { background: var(--jf-color-success); }
+.infer-svc[data-state="degraded"] .infer-svc__dot { background: var(--jf-color-warning); }
+.infer-svc[data-state="down"] .infer-svc__dot { background: var(--jf-color-danger); }
+.infer-svc__title { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1; }
+.infer-svc__name {
+  font-size: 14.5px; font-weight: 600; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.infer-svc__kind {
+  flex: none; padding: 1px 7px; border-radius: 999px;
+  background: var(--jf-color-surface-muted); color: var(--jf-color-ink-muted);
+  font-size: 11.5px;
+}
+.infer-svc__state { flex: none; font-size: 12px; color: var(--jf-color-ink-muted); }
+.infer-svc[data-state="up"] .infer-svc__state { color: var(--jf-color-success); }
+.infer-svc[data-state="degraded"] .infer-svc__state { color: var(--jf-color-warning); }
+.infer-svc[data-state="down"] .infer-svc__state { color: var(--jf-color-danger); }
+.infer-svc__meta {
+  margin-top: 6px; font-size: 12px; color: var(--jf-color-ink-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.infer-svc__metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin-top: 14px;
+}
+.infer-svc__metric { min-width: 0; }
+.infer-svc__label {
+  width: fit-content;
+  color: var(--jf-color-ink-muted);
+  font-size: 11.5px;
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.infer-svc__label:focus-visible {
+  outline: 2px solid var(--jf-color-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+.infer-svc__value {
+  margin-top: 2px;
+  font-size: 16px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.infer-svc__note { margin-top: 12px; font-size: 12px; color: var(--jf-color-ink-muted); }
+.infer-svc__error { margin-top: 6px; font-size: 12px; color: var(--jf-color-danger); }
+.infer-service-empty {
+  grid-column: 1 / -1;
+  padding: 24px 8px;
+  text-align: center;
+  color: var(--jf-color-ink-muted);
+  font-size: 13px;
+}
+.infer-probe-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-top: 22px;
+}
+.infer-probe-title { font-size: 14px; font-weight: 600; }
+.infer-probe-sub { margin-top: 4px; font-size: 12px; color: var(--jf-color-ink-muted); }
+#infer-probe-wrap { margin-top: 12px; }
+.metric-tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 300px;
+  padding: 8px 10px;
+  border-radius: var(--jf-radius-sm);
+  background: var(--jf-color-ink);
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(17, 30, 53, 0.18);
+  font-size: 12.5px;
+  line-height: 1.5;
+  pointer-events: none;
+}
 
 /* ---------- 各卡当前占用 ---------- */
 .gpu-cards { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }

@@ -65,8 +65,8 @@ function normalizeProbe(raw, kind, warnings, id) {
     : ['pong'];
   return {
     enabled: raw.enabled === true,
-    // 探针是重操作：最短 1 分钟，默认 10 分钟
-    intervalMs: Math.max(60000, parseDurationMs(raw.interval, 600000)),
+    // 探针是重操作：最短 10 秒（低于这个值更容易干扰真实流量），默认 10 分钟
+    intervalMs: Math.max(10000, parseDurationMs(raw.interval, 600000)),
     timeoutMs: Math.max(1000, Number(raw.timeoutMs) || 60000),
     idleOnly: raw.idleOnly !== false,
     startupGraceMs: Math.max(0, parseDurationMs(raw.startupGrace, 300000)),

@@ -3185,6 +3185,10 @@ vllm:num_requests_running{engine="0",model_name="other"} 99.0
   assert.equal(normalizedInference.config.services[0].paths.health, '/health');
   assert.equal(normalizedInference.config.services[1].kind, 'chat', '不支持的 kind 回退成 chat');
   assert.ok(normalizedInference.warnings.length >= 4, '每条被跳过的配置都要留下 warning');
+  const probeInterval = normalizeInferenceConfig({
+    services: [{ id: 'p', baseUrl: 'http://127.0.0.1:8000', model: 'm', probe: { enabled: true, interval: '30s' } }],
+  });
+  assert.equal(probeInterval.config.services[0].probe.intervalMs, 30000, '探针允许 30 秒间隔');
 
   const missingConfig = await loadInferenceConfig(path.join(os.tmpdir(), `gpu-monitor-no-inference-${Date.now()}.json`));
   assert.equal(missingConfig.config, null);
@@ -3217,6 +3221,15 @@ vllm:num_requests_running{engine="0",model_name="other"} 99.0
   assert.equal(scraped.snapshot.running, 3);
   assert.ok(Math.abs(scraped.snapshot.ttftAvgMs - 200) < 1e-6, '首帧没有增量时用累计均值');
   assert.equal(scraped.snapshot.version, '0.31.0');
+
+  const scrapedIdle = await scrapeService(fakeInferService, scraped.cache, {
+    fetchImpl: fakeFetch, timeoutMs: 1000, env: { DEMO_KEY: 'secret' }, now: Date.now,
+  });
+  assert.equal(
+    scrapedIdle.snapshot.ttftAvgMs,
+    null,
+    '空闲时没有新的 TTFT 样本，必须给 null，不能把累计均值伪装成当前延迟',
+  );
 
   const missingAuth = await scrapeService(fakeInferService, null, {
     fetchImpl: fakeFetch, timeoutMs: 1000, env: {}, now: Date.now,

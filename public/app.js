@@ -55,6 +55,7 @@ const refs = {
   exportTimeHint: $('export-time-hint'),
   exportSummary: $('export-summary'),
   chartTip: $('chart-tip'),
+  metricTip: $('metric-tip'),
   kpiCount: $('kpi-count'),
   kpiCountFoot: $('kpi-count-foot'),
   kpiMem: $('kpi-mem'),
@@ -114,9 +115,8 @@ const refs = {
   inferHistSub: $('infer-hist-sub'),
   inferHistRange: $('infer-hist-range'),
   inferHistService: $('infer-hist-service'),
-  inferHistChartWrap: $('infer-hist-chart-wrap'),
-  inferHistCanvas: $('infer-hist-canvas'),
-  inferHistLegend: $('infer-hist-legend'),
+  inferServiceCards: $('infer-service-cards'),
+  inferProbeSub: $('infer-probe-sub'),
   inferHistEmpty: $('infer-hist-empty'),
   inferHistEmptyTitle: $('infer-hist-empty-title'),
   inferHistEmptyText: $('infer-hist-empty-text'),
@@ -147,13 +147,13 @@ const state = {
   inferHistory: {
     range: '24h',
     service: null,
-    rows: [],
     probes: [],
     supported: null,
     loading: false,
     notice: null,
     fetchedAt: 0,
     signature: '',
+    cardSignature: '',
   },
   lastSampleAt: null,
   fetchedAt: null,
@@ -1955,12 +1955,165 @@ function renderInference() {
   }
 }
 
-/* ---------- 渲染：推理历史与探针 ---------- */
-function inferHistoryCard() {
-  return refs.inferHistCanvas?.closest('.card') || null;
+/* ---------- 渲染：推理服务卡片与探针 ---------- */
+function inferPageCard() {
+  return refs.inferServiceCards?.closest('.card') || null;
 }
 
-function renderInferHistoryControls() {
+function inferServiceStateText(value) {
+  if (value === 'up') return t('infer.state.up');
+  if (value === 'degraded') return t('infer.state.degraded');
+  if (value === 'down') return t('infer.state.down');
+  return t('infer.state.unknown');
+}
+
+function probeSummary(service) {
+  const probe = service.probe;
+  if (!probe) return { text: '--', detail: '' };
+  const text = probe.skipped
+    ? t('infer.probe.skip')
+    : (probe.ok ? t('infer.probe.ok') : t('infer.probe.fail'));
+  const parts = [];
+  if (probe.coldTtftMs != null) parts.push(`${t('inferHist.cold')} ${fmtInferMs(probe.coldTtftMs)}`);
+  if (probe.warmTtftMs != null) parts.push(`${t('inferHist.warm')} ${fmtInferMs(probe.warmTtftMs)}`);
+  if (probe.error) parts.push(backendText(probe.error));
+  return { text, detail: parts.join(' · ') };
+}
+
+function inferMetricTile(label, tipKey, value) {
+  const item = document.createElement('div');
+  item.className = 'infer-svc__metric';
+  const term = document.createElement('dt');
+  term.className = 'infer-svc__label';
+  term.textContent = label;
+  term.dataset.metricTip = tipKey;
+  term.tabIndex = 0;
+  const valueNode = document.createElement('dd');
+  valueNode.className = 'infer-svc__value';
+  valueNode.textContent = value;
+  item.append(term, valueNode);
+  return item;
+}
+
+function renderInferServiceCards(info) {
+  const history = state.inferHistory;
+  const services = (info.services || []).filter((service) => !history.service || service.id === history.service);
+  const signature = `${getLang()}#${history.service ?? '*'}#${services.map((service) => [
+    service.id, service.state, service.model, service.version,
+    service.running, service.waiting, service.kvCachePct, service.ttftAvgMs,
+    service.tokensPerSec, service.probe?.at, service.probe?.ok, service.probe?.skipped,
+    service.probe?.coldTtftMs, service.probe?.warmTtftMs,
+  ].join('¦')).join('|')}`;
+  if (signature === history.cardSignature) return;
+  history.cardSignature = signature;
+
+  refs.inferServiceCards.replaceChildren();
+  if (services.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'infer-service-empty';
+    empty.textContent = t('infer.empty.text');
+    refs.inferServiceCards.appendChild(empty);
+    return;
+  }
+
+  for (const service of services) {
+    const card = document.createElement('article');
+    card.className = 'infer-svc';
+    card.dataset.state = service.state || 'unknown';
+
+    const head = document.createElement('div');
+    head.className = 'infer-svc__head';
+    const dot = document.createElement('span');
+    dot.className = 'infer-svc__dot';
+    const title = document.createElement('div');
+    title.className = 'infer-svc__title';
+    const name = document.createElement('span');
+    name.className = 'infer-svc__name';
+    name.textContent = service.name || service.id;
+    const kind = document.createElement('span');
+    kind.className = 'infer-svc__kind';
+    kind.textContent = service.kind || '';
+    title.append(name, kind);
+    const state = document.createElement('span');
+    state.className = 'infer-svc__state';
+    state.textContent = inferServiceStateText(service.state);
+    head.append(dot, title, state);
+
+    const meta = document.createElement('p');
+    meta.className = 'infer-svc__meta';
+    meta.textContent = `${service.model || '--'}${service.version ? ` · vLLM ${service.version}` : ''}`;
+
+    const probe = probeSummary(service);
+    const metrics = document.createElement('dl');
+    metrics.className = 'infer-svc__metrics';
+    metrics.append(
+      inferMetricTile(t('infer.metric.running'), 'infer.tip.running', fmtInferCount(service.running)),
+      inferMetricTile(t('infer.metric.waiting'), 'infer.tip.waiting', fmtInferCount(service.waiting)),
+      inferMetricTile(t('infer.metric.kv'), 'infer.tip.kv', service.kvCachePct == null ? '--' : fmtPct(service.kvCachePct, 1)),
+      inferMetricTile(t('infer.metric.ttft'), 'infer.tip.ttft', fmtInferMs(service.ttftAvgMs)),
+      inferMetricTile(t('infer.metric.tps'), 'infer.tip.tps', service.tokensPerSec == null ? '--' : `${Math.round(service.tokensPerSec)} tok/s`),
+      inferMetricTile(t('infer.metric.probe'), 'infer.tip.probe', probe.text),
+    );
+
+    card.append(head, meta, metrics);
+    if (probe.detail) {
+      const note = document.createElement('p');
+      note.className = 'infer-svc__note';
+      note.textContent = probe.detail;
+      card.appendChild(note);
+    }
+    if (service.error) {
+      const error = document.createElement('p');
+      error.className = 'infer-svc__error';
+      error.textContent = backendText(service.error);
+      card.appendChild(error);
+    }
+    refs.inferServiceCards.appendChild(card);
+  }
+}
+
+function showMetricTip(target, x, y) {
+  const tip = refs.metricTip;
+  const key = target?.dataset?.metricTip;
+  if (!tip || !key) return;
+  tip.textContent = t(key);
+  tip.hidden = false;
+  tip.style.left = '0px';
+  tip.style.top = '0px';
+  const rect = tip.getBoundingClientRect();
+  let left = x + 14;
+  let top = y + 14;
+  if (left + rect.width > window.innerWidth - 10) left = x - rect.width - 14;
+  if (top + rect.height > window.innerHeight - 10) top = y - rect.height - 14;
+  tip.style.left = `${Math.max(8, left)}px`;
+  tip.style.top = `${Math.max(8, top)}px`;
+}
+
+function hideMetricTip() {
+  if (refs.metricTip) refs.metricTip.hidden = true;
+}
+
+function bindMetricTips() {
+  document.addEventListener('pointerover', (event) => {
+    const target = event.target?.closest?.('[data-metric-tip]');
+    if (target) showMetricTip(target, event.clientX, event.clientY);
+  });
+  document.addEventListener('pointerout', (event) => {
+    if (event.target?.closest?.('[data-metric-tip]')) hideMetricTip();
+  });
+  document.addEventListener('focusin', (event) => {
+    const target = event.target?.closest?.('[data-metric-tip]');
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    showMetricTip(target, rect.left, rect.bottom);
+  });
+  document.addEventListener('focusout', (event) => {
+    if (event.target?.closest?.('[data-metric-tip]')) hideMetricTip();
+  });
+  window.addEventListener('scroll', hideMetricTip, true);
+}
+
+function renderInferPageControls() {
   const current = state.inferHistory;
   const rangeSignature = `${getLang()}#${INFER_RANGES.map((item) => item.value).join('|')}#${current.range}`;
   if (refs.inferHistRange.dataset.signature !== rangeSignature) {
@@ -1975,7 +2128,7 @@ function renderInferHistoryControls() {
         if (state.inferHistory.range === item.value) return;
         state.inferHistory.range = item.value;
         state.inferHistory.fetchedAt = 0;
-        loadInferenceHistory();
+        loadInferenceProbes();
         render();
       });
       refs.inferHistRange.appendChild(button);
@@ -2000,7 +2153,8 @@ function renderInferHistoryControls() {
         if (state.inferHistory.service === option.id) return;
         state.inferHistory.service = option.id;
         state.inferHistory.fetchedAt = 0;
-        loadInferenceHistory();
+        state.inferHistory.cardSignature = '';
+        loadInferenceProbes();
         render();
       });
       refs.inferHistService.appendChild(button);
@@ -2009,163 +2163,56 @@ function renderInferHistoryControls() {
   }
 }
 
-function inferPalette() {
-  return [
-    cssVar('--jf-color-primary', '#005bac'),
-    cssVar('--jf-color-signal', '#00a0e3'),
-    cssVar('--jf-color-success', '#23786e'),
-    cssVar('--jf-color-warning', '#a35f00'),
-    cssVar('--jf-color-danger', '#b8371f'),
-  ];
-}
-
-/** 首 token 延迟图：Y 轴按区间最大值自适应，单位 ms（drawLines 只支持 0~100，不复用） */
-function drawLatencyChart(canvas, seriesList, times) {
-  const { width, height } = canvasBox(canvas);
-  if (width < 40 || height < 40 || times.length === 0) return;
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-  }
-  const ctx = canvas.getContext('2d');
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, width, height);
-
-  const colors = themeColors();
-  const pad = { top: 10, right: 58, bottom: 18, left: 6 };
-  const plotW = Math.max(10, width - pad.left - pad.right);
-  const plotH = Math.max(10, height - pad.top - pad.bottom);
-  const values = seriesList.flatMap((line) => line.values.filter((value) => value != null));
-  const peak = values.length ? Math.max(...values) : 100;
-  // 取一个"好看"的上界：1 / 2 / 5 × 10^n
-  const magnitude = 10 ** Math.floor(Math.log10(Math.max(1, peak)));
-  const normalized = peak / magnitude;
-  const nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
-  const max = Math.max(100, nice * magnitude * 1.2);
-
-  ctx.font = '12px ' + cssVar('--jf-font-body', 'sans-serif');
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i += 1) {
-    const ratio = i / 4;
-    const y = pad.top + plotH * ratio;
-    ctx.strokeStyle = colors.border;
-    ctx.beginPath();
-    ctx.moveTo(pad.left, Math.round(y) + 0.5);
-    ctx.lineTo(pad.left + plotW, Math.round(y) + 0.5);
-    ctx.stroke();
-    ctx.fillStyle = colors.muted;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(`${Math.round(max * (1 - ratio))} ms`, pad.left + plotW + 8, y);
-  }
-
-  const count = times.length;
-  const xAt = (index) => pad.left + (count <= 1 ? plotW / 2 : (plotW * index) / (count - 1));
-  const yAt = (value) => pad.top + plotH * (1 - Math.min(max, Math.max(0, value)) / max);
-
-  for (const line of seriesList) {
-    if (!line.values.some((value) => value != null)) continue;
-    ctx.strokeStyle = line.color;
-    ctx.lineWidth = line.width || 1.8;
-    ctx.lineJoin = 'round';
-    ctx.beginPath();
-    let drawing = false;
-    for (let i = 0; i < count; i += 1) {
-      const value = line.values[i];
-      if (value == null) {
-        drawing = false;
-        continue;
-      }
-      const x = xAt(i);
-      const y = yAt(value);
-      if (!drawing) {
-        ctx.moveTo(x, y);
-        drawing = true;
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
-    ctx.stroke();
-  }
-}
-
-function renderInferHistory() {
-  const card = inferHistoryCard();
+function renderInferencePage() {
+  const card = inferPageCard();
   if (!card) return;
   const info = state.meta?.inference;
   if (!info?.loaded) {
     card.hidden = true;
     return;
   }
-  // 卡片归属由展示模式决定；这里和 applyView 用同一套规则
   card.hidden = state.view === 'nav' && state.page !== 'inference';
 
   const history = state.inferHistory;
-  renderInferHistoryControls();
+  renderInferPageControls();
+  const total = info.summary?.total ?? (info.services || []).length;
+  const up = info.summary?.up ?? 0;
+  refs.inferHistSub.textContent = t('inferHist.sub', {
+    total,
+    up,
+    interval: Math.max(1, Math.round((info.intervalMs || 15000) / 1000)),
+  });
+  renderInferServiceCards(info);
+
+  const visible = state.view !== 'nav' || state.page === 'inference';
+  if (visible && !history.loading && Date.now() - history.fetchedAt > 30000) loadInferenceProbes();
+
   const rangeLabelText = INFER_RANGES.find((item) => item.value === history.range)?.label || history.range;
   const serviceLabel = history.service
-    ? (info.services.find((service) => service.id === history.service)?.name || history.service)
+    ? ((info.services || []).find((service) => service.id === history.service)?.name || history.service)
     : t('inferHist.service.all');
-  refs.inferHistSub.textContent = t('inferHist.sub', {
+  refs.inferProbeSub.textContent = t('inferHist.probeSub', {
     range: rangeLabelText,
     service: serviceLabel,
-    points: history.rows.length,
+    count: history.probes.length,
   });
 
-  // 30 秒刷新一次，而且只在这张卡真正可见时拉：
-  // 探针本身 10 分钟一轮，没必要在别的页签上持续请求历史
-  const visible = state.view !== 'nav' || state.page === 'inference';
-  if (visible && !history.loading && Date.now() - history.fetchedAt > 30000) loadInferenceHistory();
-
-  const signature = `${getLang()}#${history.range}#${history.service ?? ''}#${history.rows.length}#${history.probes[0]?.ts ?? 0}`;
+  const signature = `${getLang()}#${history.range}#${history.service ?? ''}#${history.probes.length}#${history.probes[0]?.ts ?? 0}#${history.supported}`;
   if (signature === history.signature) return;
   history.signature = signature;
 
-  const drawable = history.rows.filter((row) => row.ttftAvgMs != null);
-  if (!history.supported) {
-    refs.inferHistChartWrap.hidden = true;
-    refs.inferHistLegend.replaceChildren();
-    refs.inferHistEmpty.hidden = false;
-    refs.inferHistEmptyTitle.textContent = t('inferHist.empty.title');
-    refs.inferHistEmptyText.textContent = backendText(history.notice) || t('inferHist.empty.text');
-  } else if (drawable.length === 0) {
-    refs.inferHistChartWrap.hidden = true;
-    refs.inferHistLegend.replaceChildren();
-    refs.inferHistEmpty.hidden = false;
-    refs.inferHistEmptyTitle.textContent = t('inferHist.noTtft.title');
-    refs.inferHistEmptyText.textContent = t('inferHist.noTtft.text');
-  } else {
-    refs.inferHistChartWrap.hidden = false;
-    refs.inferHistEmpty.hidden = true;
-    const times = [...new Set(history.rows.map((row) => row.ts))].sort((a, b) => a - b);
-    const byService = new Map();
-    for (const row of drawable) {
-      if (!byService.has(row.service)) byService.set(row.service, new Map());
-      byService.get(row.service).set(row.ts, row.ttftAvgMs);
-    }
-    const names = new Map((info.services || []).map((service) => [service.id, service.name || service.id]));
-    const palette = inferPalette();
-    const seriesList = [...byService.entries()].map(([id, points], index) => ({
-      name: id,
-      color: palette[index % palette.length],
-      width: 1.8,
-      values: times.map((ts) => points.get(ts) ?? null),
-      label: names.get(id) || id,
-    }));
-    drawLatencyChart(refs.inferHistCanvas, seriesList, times);
-    syncLegendItems(refs.inferHistLegend, seriesList.map((line) => ({
-      key: line.name,
-      color: line.color,
-      text: line.label,
-    })));
-  }
-
-  // 探针明细表
   const probes = history.probes.slice(0, 50);
   refs.inferProbeWrap.hidden = probes.length === 0;
+  refs.inferHistEmpty.hidden = probes.length > 0;
+  if (probes.length === 0) {
+    refs.inferHistEmptyTitle.textContent = t('inferHist.empty.title');
+    refs.inferHistEmptyText.textContent = backendText(history.notice) || t('inferHist.empty.text');
+    refs.inferProbeBody.replaceChildren();
+    return;
+  }
+
   refs.inferProbeBody.replaceChildren();
-  const nameOf = (id) => (info.services.find((service) => service.id === id)?.name || id);
+  const nameOf = (id) => ((info.services || []).find((service) => service.id === id)?.name || id);
   for (const probe of probes) {
     const row = document.createElement('tr');
     const cells = [
@@ -2189,23 +2236,18 @@ function renderInferHistory() {
   }
 }
 
-async function loadInferenceHistory() {
+async function loadInferenceProbes() {
   const history = state.inferHistory;
   if (history.loading || !state.meta?.inference?.loaded) return;
   history.loading = true;
   try {
-    const query = new URLSearchParams({ range: history.range });
+    const query = new URLSearchParams({ range: history.range, limit: '100' });
     if (history.service) query.set('service', history.service);
-    const [metrics, probes] = await Promise.all([
-      fetchJson(`/api/inference/history?${query}`),
-      fetchJson(`/api/inference/probes?${query}&limit=100`),
-    ]);
-    history.rows = metrics.rows || [];
-    history.supported = metrics.supported !== false;
-    history.notice = history.supported ? null : (metrics.reason || '');
-    history.probes = probes.probes || [];
+    const data = await fetchJson(`/api/inference/probes?${query}`);
+    history.probes = data.probes || [];
+    history.supported = data.supported !== false;
+    history.notice = history.supported ? null : (data.reason || '');
   } catch (error) {
-    history.rows = [];
     history.probes = [];
     history.supported = false;
     history.notice = error.message;
@@ -2213,6 +2255,7 @@ async function loadInferenceHistory() {
     history.loading = false;
     history.fetchedAt = Date.now();
     history.signature = '';
+    history.cardSignature = '';
     render();
   }
 }
@@ -2820,7 +2863,7 @@ function render() {
   renderServiceChart();
   renderSystemCard();
   renderInference();
-  renderInferHistory();
+  renderInferencePage();
   renderGpuCards();
   renderProcFilter();
   renderProcTable();
@@ -3071,7 +3114,7 @@ function applyView() {
   refs.work.dataset.cols = hasLeft && hasRight ? 'both' : (hasLeft ? 'left' : 'right');
 
   // 先作废尺寸缓存与推理历史的绘制签名，再 render：
-  // 否则从别的页签切到「推理」时，renderInferHistory 会因为签名没变直接返回，
+  // 否则从别的页签切到「推理」时，页面渲染会因为签名没变直接返回，
   // canvas 拿到的是隐藏时的 0 尺寸，图会空白到下一个 15 秒采样点。
   canvasSizeCache = new WeakMap();
   state.inferHistory.signature = '';
@@ -3396,6 +3439,7 @@ function resetTextSignatures() {
   state.processSignature = null;
   state.inferSignature = '';
   state.inferHistory.signature = '';
+  state.inferHistory.cardSignature = '';
   for (const node of [
     refs.rangePicker,
     refs.procFilter,
@@ -3424,6 +3468,7 @@ function applyLanguage(lang) {
 }
 
 onLangChange(applyLanguage);
+bindMetricTips();
 
 refs.viewNav.addEventListener('click', (event) => {
   const tab = event.target.closest('.view-nav__tab');

@@ -243,21 +243,18 @@
       <section class="card" data-page="inference" aria-labelledby="infer-hist-h">
         <div class="card__head card__head--stack">
           <div>
-            <h2 class="card__title" id="infer-hist-h" data-i18n="inferHist.title">推理服务历史</h2>
+            <h2 class="card__title" id="infer-hist-h" data-i18n="inferHist.title">推理服务状态</h2>
             <p class="card__sub" id="infer-hist-sub"></p>
           </div>
-          <div class="chart-head-actions">
-            <div class="range-picker" id="infer-hist-range" role="group" aria-label="选择推理历史的范围" data-i18n-attr="aria-label:inferHist.range.group"></div>
-            <div class="chips" id="infer-hist-service" role="group" aria-label="按推理服务过滤" data-i18n-attr="aria-label:inferHist.service.group"></div>
+          <div class="chips" id="infer-hist-service" role="group" aria-label="按推理服务过滤" data-i18n-attr="aria-label:inferHist.service.group"></div>
+        </div>
+        <div class="infer-service-grid" id="infer-service-cards"></div>
+        <div class="infer-probe-head">
+          <div>
+            <h3 class="infer-probe-title" data-i18n="inferHist.probeTitle">最近探针</h3>
+            <p class="infer-probe-sub" id="infer-probe-sub"></p>
           </div>
-        </div>
-        <div class="chart__canvas-wrap chart__canvas-wrap--tall" id="infer-hist-chart-wrap">
-          <canvas class="chart__canvas" id="infer-hist-canvas" role="img" aria-label="推理服务首 token 延迟趋势" data-i18n-attr="aria-label:inferHist.canvas.label"></canvas>
-        </div>
-        <div class="legend" id="infer-hist-legend"></div>
-        <div class="state-block" id="infer-hist-empty" hidden>
-          <p class="state-block__title" id="infer-hist-empty-title"></p>
-          <p class="state-block__text" id="infer-hist-empty-text"></p>
+          <div class="range-picker" id="infer-hist-range" role="group" aria-label="选择探针记录的范围" data-i18n-attr="aria-label:inferHist.range.group"></div>
         </div>
         <div class="table-wrap table-wrap--scroll" id="infer-probe-wrap" hidden>
           <table class="table" id="infer-probe-table">
@@ -274,6 +271,10 @@
             </thead>
             <tbody id="infer-probe-body"></tbody>
           </table>
+        </div>
+        <div class="state-block" id="infer-hist-empty" hidden>
+          <p class="state-block__title" id="infer-hist-empty-title"></p>
+          <p class="state-block__text" id="infer-hist-empty-text"></p>
         </div>
       </section>
 
@@ -429,6 +430,7 @@
      aria-hidden：它是鼠标专用的辅助视图，跟着鼠标每动一下就变；挂 role="status"
      反而会让读屏用户被持续刷屏。键盘/读屏用户看卡片头里的当前值即可。 -->
 <div class="chart-tip" id="chart-tip" aria-hidden="true" hidden></div>
+<div class="metric-tip" id="metric-tip" role="tooltip" hidden></div>
 
 <script type="module" src="./app.js"></script>
 </body>
