@@ -613,6 +613,42 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .table .service-tag[data-kind="session"] { background: var(--jf-color-warning-surface); color: var(--jf-color-warning); }
 .table .service-tag[data-kind="none"] { background: none; color: var(--jf-color-ink-muted); }
 
+/* ---------- 推理服务（vLLM） ---------- */
+.infer-list { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
+.infer-row { padding-top: 12px; border-top: 1px solid var(--jf-color-border); }
+.infer-row:first-child { border-top: none; padding-top: 0; }
+.infer-row__head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.infer-row__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--jf-color-ink-muted); flex: none; }
+.infer-row[data-state="up"] .infer-row__dot { background: var(--jf-color-success); }
+.infer-row[data-state="degraded"] .infer-row__dot { background: var(--jf-color-warning); }
+.infer-row[data-state="down"] .infer-row__dot { background: var(--jf-color-danger); }
+.infer-row__name {
+  font-size: 13.5px; font-weight: 500; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.infer-row__kind {
+  flex: none; padding: 1px 7px; border-radius: 999px;
+  background: var(--jf-color-surface-muted); color: var(--jf-color-ink-muted);
+  font-size: 11.5px;
+}
+.infer-row__metrics {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 7px;
+  font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+.infer-metric { display: inline-flex; align-items: baseline; gap: 5px; }
+.infer-metric__label { color: var(--jf-color-ink-muted); font-size: 11.5px; }
+.infer-metric__value { font-weight: 500; }
+.infer-row__error { margin-top: 6px; font-size: 12px; color: var(--jf-color-danger); }
+.infer-summary {
+  flex: none; padding: 2px 8px; border-radius: 999px;
+  background: var(--jf-color-success-surface); color: var(--jf-color-success);
+  font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.infer-summary[data-state="warn"] { background: var(--jf-color-warning-surface); color: var(--jf-color-warning); }
+.infer-summary[data-state="down"] { background: var(--jf-color-danger-surface); color: var(--jf-color-danger); }
+#infer-hist-legend { margin-top: 10px; }
+#infer-probe-wrap { margin-top: 16px; }
+
 /* ---------- 各卡当前占用 ---------- */
 .gpu-cards { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
 

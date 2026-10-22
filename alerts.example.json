@@ -9,6 +9,13 @@
     { "id": "host-mem-high", "metric": "hostMemUsedPct", "op": ">=", "threshold": 92, "for": "4m", "level": "warning" },
     { "id": "host-disk-high", "metric": "hostDiskUsedPct", "op": ">=", "threshold": 90, "for": "4m", "level": "warning" },
     { "id": "collect-down", "metric": "collectOk", "op": "==", "value": false, "for": "1m", "level": "critical" },
+    { "id": "infer-down", "metric": "inferenceUp", "op": "==", "value": false, "for": "1m", "level": "critical", "label": "推理服务不可用" },
+    { "id": "infer-models", "metric": "inferenceModelsOk", "op": "==", "value": false, "for": "2m", "level": "critical", "label": "模型未加载或名称不匹配" },
+    { "id": "infer-probe", "metric": "inferenceProbeOk", "op": "==", "value": false, "for": "5m", "level": "critical", "label": "主动探针连续失败" },
+    { "id": "infer-queue", "metric": "inferenceWaiting", "op": ">=", "threshold": 16, "for": "3m", "level": "warning", "label": "推理排队堆积" },
+    { "id": "infer-kv", "metric": "inferenceKvCachePct", "op": ">=", "threshold": 90, "for": "3m", "level": "warning", "label": "KV Cache 接近耗尽" },
+    { "id": "infer-ttft", "metric": "inferenceTtftAvgMs", "op": ">=", "threshold": 5000, "for": "5m", "level": "warning", "label": "首 token 延迟过高" },
+    { "id": "infer-error-rate", "metric": "inferenceErrorRatePct", "op": ">=", "threshold": 5, "for": "5m", "level": "warning", "label": "推理错误率超过 5%" },
     { "id": "ecc-uncorrected", "metric": "eccUncorrectedVolatile", "op": ">=", "threshold": 1, "for": "0s", "level": "critical", "label": "出现不可纠正的显存错误", "enabled": false },
     { "id": "remap-failure", "metric": "remapFailure", "op": "==", "value": true, "for": "0s", "level": "critical", "label": "行重映射失败（备用行不够用）", "enabled": false },
     { "id": "xid-any", "metric": "xidRecent", "op": ">=", "threshold": 1, "for": "0s", "level": "warning", "label": "出现 XID 错误", "enabled": false }

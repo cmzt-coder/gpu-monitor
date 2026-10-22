@@ -16,6 +16,8 @@ export function createAlertsRuntime({
   store,
   logger = console,
   now = Date.now,
+  // 推理服务快照的数据源（由服务层注入，和 GPU 采集解耦）
+  getInferenceSamples = null,
   // 单测里关掉文件监听，直接调 reload()
   watch = true,
 } = {}) {
@@ -39,6 +41,7 @@ export function createAlertsRuntime({
         ...config,
       },
       getSamples: () => collector.getSamples(options.windowSamples),
+      getInferenceSamples,
       // for 超过内存窗口的规则改用历史库判定
       history: store.supportsHistory
         ? ({ from, to }) => store.querySamples({ from, to, stepMs: 0, pointLimit: 3000 })

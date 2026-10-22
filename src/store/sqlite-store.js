@@ -105,6 +105,51 @@ const TABLES = [
       ['processes', 'INTEGER'],
     ],
   },
+  {
+    // 推理服务（vLLM）的被动采集快照：一行 = 某个实例在某个采样点的状态
+    name: 'inference_sample',
+    columns: [
+      ['ts', 'INTEGER NOT NULL'],
+      ['node_id', 'TEXT NOT NULL'],
+      ['service_id', 'TEXT NOT NULL'],
+      ['state', 'TEXT'],
+      ['up', 'INTEGER'],
+      ['models_ok', 'INTEGER'],
+      ['metrics_ok', 'INTEGER'],
+      ['health_ms', 'REAL'],
+      ['running', 'REAL'],
+      ['waiting', 'REAL'],
+      ['kv_cache_pct', 'REAL'],
+      ['preemptions_total', 'REAL'],
+      ['prompt_tokens_total', 'REAL'],
+      ['generation_tokens_total', 'REAL'],
+      ['request_success_total', 'REAL'],
+      ['request_error_total', 'REAL'],
+      ['tokens_per_sec', 'REAL'],
+      ['ttft_avg_ms', 'REAL'],
+      ['e2e_avg_ms', 'REAL'],
+      ['version', 'TEXT'],
+    ],
+  },
+  {
+    // 主动探针：一行 = 一次真实推理请求（冷启动与热态各一行）
+    name: 'inference_probe',
+    columns: [
+      ['ts', 'INTEGER NOT NULL'],
+      ['node_id', 'TEXT NOT NULL'],
+      ['service_id', 'TEXT NOT NULL'],
+      ['kind', 'TEXT'],
+      ['ok', 'INTEGER'],
+      ['skipped', 'INTEGER'],
+      ['status', 'INTEGER'],
+      ['cold', 'INTEGER'],
+      ['ttft_ms', 'REAL'],
+      ['e2e_ms', 'REAL'],
+      ['output_tokens', 'INTEGER'],
+      ['tokens_per_sec', 'REAL'],
+      ['error', 'TEXT'],
+    ],
+  },
 ];
 
 const INDEXES = [
@@ -113,6 +158,10 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS host_sample_ts_idx ON host_sample (ts)',
   'CREATE INDEX IF NOT EXISTS gpu_process_ts_idx ON gpu_process (ts)',
   'CREATE INDEX IF NOT EXISTS service_sample_ts_idx ON service_sample (ts)',
+  'CREATE INDEX IF NOT EXISTS inference_sample_ts_idx ON inference_sample (ts)',
+  'CREATE INDEX IF NOT EXISTS inference_sample_service_ts_idx ON inference_sample (service_id, ts)',
+  'CREATE INDEX IF NOT EXISTS inference_probe_ts_idx ON inference_probe (ts)',
+  'CREATE INDEX IF NOT EXISTS inference_probe_service_ts_idx ON inference_probe (service_id, ts)',
 ];
 
 const columnsOf = (table) => TABLES.find((item) => item.name === table).columns.map(([name]) => name);
@@ -120,6 +169,8 @@ const GPU_COLUMNS = columnsOf('gpu_sample');
 const HOST_COLUMNS = columnsOf('host_sample');
 const PROCESS_COLUMNS = columnsOf('gpu_process');
 const SERVICE_COLUMNS = columnsOf('service_sample');
+const INFERENCE_COLUMNS = columnsOf('inference_sample');
+const PROBE_COLUMNS = columnsOf('inference_probe');
 
 /**
  * 建表 + 补列迁移。
@@ -241,10 +292,13 @@ export async function createSqliteStore({
   const insertHost = db.prepare(insertSql('host_sample', HOST_COLUMNS));
   const insertProcess = db.prepare(insertSql('gpu_process', PROCESS_COLUMNS));
   const insertService = db.prepare(insertSql('service_sample', SERVICE_COLUMNS));
+  const insertInference = db.prepare(insertSql('inference_sample', INFERENCE_COLUMNS));
+  const insertProbe = db.prepare(insertSql('inference_probe', PROBE_COLUMNS));
 
-  const buffer = { gpu: [], host: [], process: [], service: [] };
-  const counters = { gpu: 0, host: 0, process: 0, service: 0 };
+  const buffer = { gpu: [], host: [], process: [], service: [], inference: [], probe: [] };
+  const counters = { gpu: 0, host: 0, process: 0, service: 0, inference: 0, probe: 0 };
   let lastStoreTs = 0;
+  let lastInferenceStoreTs = 0;
   let lastProcessSignature = null;
   let lastProcessAt = 0;
   let lastFlushAt = null;
@@ -259,7 +313,8 @@ export async function createSqliteStore({
   let closed = false;
 
   function flush() {
-    const count = buffer.gpu.length + buffer.host.length + buffer.process.length + buffer.service.length;
+    const count = buffer.gpu.length + buffer.host.length + buffer.process.length + buffer.service.length
+      + buffer.inference.length + buffer.probe.length;
     if (count === 0) return 0;
     db.exec('BEGIN');
     try {
@@ -267,6 +322,8 @@ export async function createSqliteStore({
       for (const row of buffer.host) insertHost.run(...rowValues(HOST_COLUMNS, row));
       for (const row of buffer.process) insertProcess.run(...rowValues(PROCESS_COLUMNS, row));
       for (const row of buffer.service) insertService.run(...rowValues(SERVICE_COLUMNS, row));
+      for (const row of buffer.inference) insertInference.run(...rowValues(INFERENCE_COLUMNS, row));
+      for (const row of buffer.probe) insertProbe.run(...rowValues(PROBE_COLUMNS, row));
       db.exec('COMMIT');
     } catch (error) {
       try {
@@ -280,10 +337,14 @@ export async function createSqliteStore({
     counters.host += buffer.host.length;
     counters.process += buffer.process.length;
     counters.service += buffer.service.length;
+    counters.inference += buffer.inference.length;
+    counters.probe += buffer.probe.length;
     buffer.gpu = [];
     buffer.host = [];
     buffer.process = [];
     buffer.service = [];
+    buffer.inference = [];
+    buffer.probe = [];
     lastFlushAt = now();
     boundsCachedAt = 0;
     return count;
@@ -322,6 +383,66 @@ export async function createSqliteStore({
     return 0;
   }
 
+  function inferenceRow(ts, service) {
+    return {
+      ts,
+      node_id: nodeId,
+      service_id: service.id,
+      state: service.state ?? null,
+      up: service.up == null ? null : (service.up ? 1 : 0),
+      models_ok: service.modelsOk == null ? null : (service.modelsOk ? 1 : 0),
+      metrics_ok: service.metricsOk == null ? null : (service.metricsOk ? 1 : 0),
+      health_ms: service.healthMs ?? null,
+      running: service.running ?? null,
+      waiting: service.waiting ?? null,
+      kv_cache_pct: service.kvCachePct ?? null,
+      preemptions_total: service.preemptionsTotal ?? null,
+      prompt_tokens_total: service.promptTokensTotal ?? null,
+      generation_tokens_total: service.generationTokensTotal ?? null,
+      request_success_total: service.requestSuccessTotal ?? null,
+      request_error_total: service.requestErrorTotal ?? null,
+      tokens_per_sec: service.tokensPerSec ?? null,
+      ttft_avg_ms: service.ttftAvgMs ?? null,
+      e2e_avg_ms: service.e2eAvgMs ?? null,
+      version: service.version ?? null,
+    };
+  }
+
+  function probeRow(row) {
+    return {
+      ts: row.ts,
+      node_id: nodeId,
+      service_id: row.serviceId,
+      kind: row.kind ?? null,
+      ok: row.ok ? 1 : 0,
+      skipped: row.skipped ? 1 : 0,
+      status: row.status ?? null,
+      cold: row.cold == null ? null : (row.cold ? 1 : 0),
+      ttft_ms: row.ttftMs ?? null,
+      e2e_ms: row.e2eMs ?? null,
+      output_tokens: row.outputTokens ?? null,
+      tokens_per_sec: row.tokensPerSec ?? null,
+      error: row.error ?? null,
+    };
+  }
+
+  /** 推理服务的被动快照：一轮抓取写一批，和 GPU 的抽样节奏互不影响 */
+  function appendInferenceSample(sample) {
+    if (closed || !sample || !sample.t || !Array.isArray(sample.services)) return 0;
+    if (lastInferenceStoreTs && sample.t - lastInferenceStoreTs < Math.max(1000, storeIntervalMs)) return 0;
+    lastInferenceStoreTs = sample.t;
+    for (const service of sample.services) buffer.inference.push(inferenceRow(sample.t, service));
+    if (buffer.inference.length + buffer.probe.length >= flushRows) return flush();
+    return 0;
+  }
+
+  function appendInferenceProbe(row) {
+    if (closed || !row || !row.ts || !row.serviceId) return 0;
+    buffer.probe.push(probeRow(row));
+    if (buffer.inference.length + buffer.probe.length >= flushRows) return flush();
+    return 0;
+  }
+
   function prune(at = now()) {
     lastPruneAt = at;
     if (!(retentionDays > 0)) {
@@ -332,7 +453,9 @@ export async function createSqliteStore({
     let dropped = 0;
     db.exec('BEGIN');
     try {
-      for (const table of ['gpu_sample', 'host_sample', 'gpu_process', 'service_sample']) {
+      for (const table of [
+        'gpu_sample', 'host_sample', 'gpu_process', 'service_sample', 'inference_sample', 'inference_probe',
+      ]) {
         const result = db.prepare(`DELETE FROM ${table} WHERE ts < ?`).run(cutoff);
         dropped += Number(result.changes ?? 0);
       }
@@ -693,6 +816,136 @@ export async function createSqliteStore({
    * 游标用 (ts, pid) 行值比较：同一次采样里多个进程共享 ts，
    * 只按 ts 翻页会在页边界丢行。
    */
+  function inferenceFromRow(row) {
+    return {
+      ts: row.ts,
+      service: row.service_id,
+      state: row.state ?? null,
+      up: row.up == null ? null : Boolean(row.up),
+      modelsOk: row.models_ok == null ? null : Boolean(row.models_ok),
+      metricsOk: row.metrics_ok == null ? null : Boolean(row.metrics_ok),
+      healthMs: row.health_ms ?? null,
+      running: row.running ?? null,
+      waiting: row.waiting ?? null,
+      kvCachePct: row.kv_cache_pct ?? null,
+      preemptionsTotal: row.preemptions_total ?? null,
+      promptTokensTotal: row.prompt_tokens_total ?? null,
+      generationTokensTotal: row.generation_tokens_total ?? null,
+      requestSuccessTotal: row.request_success_total ?? null,
+      requestErrorTotal: row.request_error_total ?? null,
+      tokensPerSec: row.tokens_per_sec ?? null,
+      ttftAvgMs: row.ttft_avg_ms ?? null,
+      e2eAvgMs: row.e2e_avg_ms ?? null,
+      version: row.version ?? null,
+    };
+  }
+
+  function probeFromRow(row) {
+    return {
+      ts: row.ts,
+      service: row.service_id,
+      kind: row.kind ?? null,
+      ok: Boolean(row.ok),
+      skipped: Boolean(row.skipped),
+      status: row.status ?? null,
+      cold: row.cold == null ? null : Boolean(row.cold),
+      ttftMs: row.ttft_ms ?? null,
+      e2eMs: row.e2e_ms ?? null,
+      outputTokens: row.output_tokens ?? null,
+      tokensPerSec: row.tokens_per_sec ?? null,
+      error: row.error ?? null,
+    };
+  }
+
+  /**
+   * 推理服务的历史序列。
+   * step>0 时按时间桶取平均（与 GPU 历史同样的口径）；serviceId 为空表示所有服务。
+   */
+  function queryInferenceSamples({ from, to, serviceId = null, stepMs = 0, pointLimit = maxPoints } = {}) {
+    const step = resolveStep(from, to, stepMs);
+    const cap = Math.max(1, Math.floor(pointLimit));
+    const filter = serviceId ? ' AND service_id = ?' : '';
+    const filterArgs = serviceId ? [serviceId] : [];
+    let rows;
+    if (step > 0) {
+      rows = db.prepare(`
+        SELECT CAST(ts / ? AS INTEGER) * ? AS bucket, service_id,
+          AVG(running) AS running, AVG(waiting) AS waiting,
+          AVG(kv_cache_pct) AS kv_cache_pct, AVG(tokens_per_sec) AS tokens_per_sec,
+          AVG(ttft_avg_ms) AS ttft_avg_ms, MIN(up) AS up, COUNT(*) AS points
+        FROM inference_sample
+        WHERE ts >= ? AND ts <= ?${filter}
+        GROUP BY bucket, service_id
+        ORDER BY bucket ASC
+        LIMIT ?
+      `).all(step, step, from, to, ...filterArgs, cap);
+    } else {
+      rows = db.prepare(`
+        SELECT ts, service_id, state, up, models_ok, metrics_ok, health_ms, running, waiting,
+          kv_cache_pct, preemptions_total, prompt_tokens_total, generation_tokens_total,
+          request_success_total, request_error_total, tokens_per_sec, ttft_avg_ms, e2e_avg_ms, version
+        FROM inference_sample
+        WHERE ts >= ? AND ts <= ?${filter}
+        ORDER BY ts ASC
+        LIMIT ?
+      `).all(from, to, ...filterArgs, cap);
+    }
+    return {
+      from,
+      to,
+      step,
+      service: serviceId || null,
+      rows: rows.map((row) => ({
+        ...inferenceFromRow({ ...row, ts: row.bucket ?? row.ts }),
+        points: row.points ?? 1,
+      })),
+      truncated: rows.length >= cap,
+    };
+  }
+
+  function queryInferenceProbes({ from, to, serviceId = null, limit = 200 } = {}) {
+    const cap = Math.max(1, Math.min(50000, Math.floor(limit)));
+    const filter = serviceId ? ' AND service_id = ?' : '';
+    const args = serviceId ? [from, to, serviceId, cap] : [from, to, cap];
+    return db.prepare(`
+      SELECT ts, service_id, kind, ok, skipped, status, cold, ttft_ms, e2e_ms, output_tokens, tokens_per_sec, error
+      FROM inference_probe
+      WHERE ts >= ? AND ts <= ?${filter}
+      ORDER BY ts DESC
+      LIMIT ?
+    `).all(...args).map(probeFromRow);
+  }
+
+  /** 流式导出推理采样：按 (ts, service_id) 翻页，避免 90 天整段读进内存 */
+  function* inferencePages({ from, to, serviceId = null, limit = Infinity } = {}) {
+    let emitted = 0;
+    let cursorTs = from - 1;
+    let cursorService = '';
+    const filter = serviceId ? ' AND service_id = ?' : '';
+    const filterArgs = serviceId ? [serviceId] : [];
+    for (;;) {
+      if (emitted >= limit) return;
+      const page = Math.min(5000, Math.max(1, limit - emitted));
+      const rows = db.prepare(`
+        SELECT ts, service_id, state, up, models_ok, metrics_ok, health_ms, running, waiting,
+          kv_cache_pct, preemptions_total, prompt_tokens_total, generation_tokens_total,
+          request_success_total, request_error_total, tokens_per_sec, ttft_avg_ms, e2e_avg_ms, version
+        FROM inference_sample
+        WHERE (ts > ? OR (ts = ? AND service_id > ?)) AND ts <= ?${filter}
+        ORDER BY ts ASC, service_id ASC
+        LIMIT ?
+      `).all(cursorTs, cursorTs, cursorService, to, ...filterArgs, page);
+      if (rows.length === 0) return;
+      for (const row of rows) {
+        cursorTs = row.ts;
+        cursorService = row.service_id;
+        emitted += 1;
+        yield inferenceFromRow(row);
+        if (emitted >= limit) return;
+      }
+    }
+  }
+
   function* processPages({ from, to, minMiB = 0, limit = Infinity } = {}) {
     let emitted = 0;
     let cursorTs = from - 1;
@@ -804,7 +1057,8 @@ export async function createSqliteStore({
       walBytes,
       freelistBytes,
       // 服务行也算缓冲里的一份：漏掉它会让"还有多少行没落盘"少报
-      buffered: buffer.gpu.length + buffer.host.length + buffer.process.length + buffer.service.length,
+      buffered: buffer.gpu.length + buffer.host.length + buffer.process.length + buffer.service.length
+        + buffer.inference.length + buffer.probe.length,
       written: { ...counters },
       oldestTs,
       newestTs,
@@ -839,11 +1093,16 @@ export async function createSqliteStore({
     supportsHistory: true,
     nodeId,
     appendSample,
+    appendInferenceSample,
+    appendInferenceProbe,
     flush,
     prune,
     maintain,
     querySamples,
     queryProcesses,
+    queryInferenceSamples,
+    queryInferenceProbes,
+    inferencePages,
     processPages,
     countProcesses,
     averageGpuUtil,

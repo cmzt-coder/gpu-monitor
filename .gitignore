@@ -9,6 +9,8 @@ data/
 *.db-shm
 # 本地告警配置（含 SMTP 密码），只提交 alerts.example.json
 alerts.json
+# 本机推理服务清单（内网地址 / 模型名 / API Key 变量名），只提交 inference.example.json
+inference.json
 # 各服务器的部署档案：含明文凭据与本机专有信息，只留本地、永不提交
 docs/deploy-*.md
 # 本机部署配置（时区 / SMTP 密码 / 端口…），只属于这台机器，只提交模板

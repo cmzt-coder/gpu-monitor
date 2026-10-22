@@ -80,6 +80,9 @@ import { createNotifier } from '../src/notify/notifier.js';
 import { sendTestNotice } from './notify-test.mjs';
 import { runPreflight } from './preflight.mjs';
 import { evaluateHealth } from '../src/health.js';
+import { loadInferenceConfig, normalizeInferenceConfig, parseDurationMs } from '../src/inference/config.js';
+import { counterDelta, extractVllmMetrics, parsePrometheus } from '../src/inference/metrics.js';
+import { runProbe, scrapeService } from '../src/inference/runtime.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
@@ -3127,6 +3130,235 @@ await assert.rejects(
   );
 }
 
+  /* ---------- 推理服务监控（阶段 1） ---------- */
+  const INFER_METRICS = `# HELP vllm running requests
+vllm:num_requests_running{engine="0",model_name="m"} 3.0
+vllm:num_requests_waiting{engine="0",model_name="m"} 2.0
+vllm:kv_cache_usage_perc{engine="0",model_name="m"} 0.42
+vllm:num_preemptions_total{engine="0",model_name="m"} 5.0
+vllm:prompt_tokens_total{engine="0",model_name="m"} 1000.0
+vllm:generation_tokens_total{engine="0",model_name="m"} 250.0
+vllm:request_success_total{engine="0",finished_reason="stop",model_name="m"} 10.0
+vllm:request_success_total{engine="0",finished_reason="error",model_name="m"} 2.0
+vllm:num_preemptions_created{engine="0",model_name="m"} 1.79e9
+vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
+vllm:time_to_first_token_seconds_sum{engine="0",model_name="m"} 2.4
+vllm:num_requests_running{engine="0",model_name="other"} 99.0
+`;
+
+  assert.equal(parsePrometheus(INFER_METRICS).length, 12, 'Prometheus 文本要能跳过注释并解析全部样本');
+  const extracted = extractVllmMetrics(INFER_METRICS, { model: 'm' });
+  assert.equal(extracted.running, 3, '按 model_name 过滤后取 running');
+  assert.equal(extracted.waiting, 2);
+  assert.equal(extracted.kvCachePct, 42, 'kv_cache_usage_perc 的 0~1 要换算成百分数');
+  assert.equal(extracted.preemptionsTotal, 5);
+  assert.equal(extracted.promptTokensTotal, 1000);
+  assert.equal(extracted.generationTokensTotal, 250);
+  assert.equal(extracted.requestSuccessTotal, 12, 'success 要把各 finished_reason 相加');
+  assert.equal(extracted.requestErrorTotal, 2, '错误数只统计 finished_reason=error');
+  assert.equal(extracted.ttftCount, 12);
+  assert.equal(extracted.ttftSum, 2.4);
+  assert.equal(extracted.sampleCount, 10, '_created 与其他模型的序列都要排除');
+  assert.ok(!extracted.metricNames.includes('vllm:num_preemptions_created'), '_created 不能进指标名列表');
+  assert.equal(counterDelta(5, 3), 2, '计数器增量正常');
+  assert.equal(counterDelta(3, 5), null, '计数器回绕/重置时返回 null');
+  assert.equal(parseDurationMs('15s'), 15000);
+  assert.equal(parseDurationMs('2m'), 120000);
+  assert.equal(parseDurationMs('bad', 7000), 7000);
+
+  const normalizedInference = normalizeInferenceConfig({
+    interval: '30s',
+    timeoutMs: 1500,
+    services: [
+      { id: 'a', baseUrl: 'http://127.0.0.1:8000/', model: 'm', kind: 'chat', apiKeyEnv: 'A_KEY' },
+      { id: 'a', baseUrl: 'http://127.0.0.1:8001', model: 'm' },
+      { id: 'bad id', baseUrl: 'http://127.0.0.1:8002', model: 'm' },
+      { id: 'b', baseUrl: 'ftp://127.0.0.1:8003', model: 'm' },
+      { id: 'c', baseUrl: 'http://127.0.0.1:8004', model: '' },
+      { id: 'd', baseUrl: 'http://127.0.0.1:8005', model: 'm', kind: 'nope' },
+    ],
+  });
+  assert.equal(normalizedInference.config.intervalMs, 30000);
+  assert.equal(normalizedInference.config.timeoutMs, 1500);
+  assert.deepEqual(normalizedInference.config.services.map((service) => service.id), ['a', 'd'], '坏配置只跳过自己，不拖垮整份文件');
+  assert.equal(normalizedInference.config.services[0].baseUrl, 'http://127.0.0.1:8000', 'baseUrl 末尾斜杠要去掉');
+  assert.equal(normalizedInference.config.services[0].paths.health, '/health');
+  assert.equal(normalizedInference.config.services[1].kind, 'chat', '不支持的 kind 回退成 chat');
+  assert.ok(normalizedInference.warnings.length >= 4, '每条被跳过的配置都要留下 warning');
+
+  const missingConfig = await loadInferenceConfig(path.join(os.tmpdir(), `gpu-monitor-no-inference-${Date.now()}.json`));
+  assert.equal(missingConfig.config, null);
+  assert.equal(missingConfig.missing, true, '配置文件不存在只是未启用，不是错误');
+
+  const fakeInferService = {
+    id: 'svc', name: 'S', kind: 'chat', model: 'm', baseUrl: 'http://demo',
+    apiKeyEnv: 'DEMO_KEY', headers: {},
+    paths: { health: '/health', models: '/v1/models', metrics: '/metrics' },
+  };
+  const fakeFetch = async (url, options = {}) => {
+    if (url.endsWith('/health')) return new Response('', { status: 200 });
+    if (url.endsWith('/version')) return new Response(JSON.stringify({ version: '0.31.0' }), { status: 200 });
+    if (url.endsWith('/v1/models')) {
+      if (options.headers?.Authorization !== 'Bearer secret') {
+        return new Response('{"error":"Unauthorized"}', { status: 401 });
+      }
+      return new Response(JSON.stringify({ data: [{ id: 'm' }] }), { status: 200 });
+    }
+    if (url.endsWith('/metrics')) return new Response(INFER_METRICS, { status: 200 });
+    return new Response('', { status: 404 });
+  };
+  const scraped = await scrapeService(fakeInferService, null, {
+    fetchImpl: fakeFetch, timeoutMs: 1000, env: { DEMO_KEY: 'secret' }, now: Date.now,
+  });
+  assert.equal(scraped.snapshot.state, 'up');
+  assert.equal(scraped.snapshot.up, true);
+  assert.equal(scraped.snapshot.modelsOk, true);
+  assert.equal(scraped.snapshot.metricsOk, true);
+  assert.equal(scraped.snapshot.running, 3);
+  assert.ok(Math.abs(scraped.snapshot.ttftAvgMs - 200) < 1e-6, '首帧没有增量时用累计均值');
+  assert.equal(scraped.snapshot.version, '0.31.0');
+
+  const missingAuth = await scrapeService(fakeInferService, null, {
+    fetchImpl: fakeFetch, timeoutMs: 1000, env: {}, now: Date.now,
+  });
+  assert.equal(missingAuth.snapshot.modelsOk, null);
+  assert.equal(missingAuth.snapshot.state, 'degraded', '缺 Key 不能把服务判成完全正常');
+  assert.match(missingAuth.snapshot.error, /DEMO_KEY/, '错误提示要指出缺哪个环境变量');
+
+  const inferHealthBase = {
+    status: 'ok', lastSampleAt: Date.now(), intervalMs: 1000, gpus: [], processes: [],
+  };
+  const healthAllDown = evaluateHealth({
+    state: inferHealthBase,
+    storage: { mode: 'memory' },
+    inference: { enabled: true, loaded: true, summary: { total: 2, up: 0, down: 2, degraded: 0, unknown: 0 } },
+    now: Date.now,
+  });
+  assert.equal(healthAllDown.statusCode, 503, '推理服务全部不可用时健康检查要返回 503');
+  assert.equal(healthAllDown.checks.find((check) => check.name === 'inference')?.level, 'fail');
+  const healthAllUp = evaluateHealth({
+    state: inferHealthBase,
+    storage: { mode: 'memory' },
+    inference: { enabled: true, loaded: true, summary: { total: 2, up: 2, down: 0, degraded: 0, unknown: 0 } },
+    now: Date.now,
+  });
+  assert.equal(healthAllUp.statusCode, 200);
+  assert.equal(healthAllUp.checks.find((check) => check.name === 'inference')?.level, 'ok');
+
+  // 探针：流式响应要能在第一个 content/reasoning token 处记 TTFT，并读出 usage
+  const streamBody = new ReadableStream({
+    start(controller) {
+      const encoder = new TextEncoder();
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'));
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"reasoning":"h"}}]}\n\n'));
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"i"},"finish_reason":"stop"}],"usage":{"completion_tokens":8}}\n\n'));
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+  let clock = 0;
+  const streamClock = () => (clock += 10);
+  const streamFetch = async () => new Response(streamBody, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const probeService = {
+    id: 'probe-chat', model: 'm', baseUrl: 'http://demo', kind: 'chat', apiKeyEnv: null, headers: {},
+    probe: { enabled: true, intervalMs: 600000, timeoutMs: 5000, maxTokens: 32, prompt: 'ping', stream: true, warmup: false, idleOnly: true },
+  };
+  const probeRows = await runProbe(probeService, { fetchImpl: streamFetch, env: {}, now: streamClock });
+  assert.equal(probeRows.length, 1);
+  assert.equal(probeRows[0].ok, true, '流式探针要识别 reasoning token');
+  assert.equal(probeRows[0].outputTokens, 8);
+  assert.ok(probeRows[0].ttftMs != null && probeRows[0].ttftMs > 0, '首 token 时间要记录');
+
+  const embeddingFetch = async () => new Response(JSON.stringify({ data: [{ embedding: [0.1, 0.2] }] }), { status: 200 });
+  const embeddingRows = await runProbe({
+    id: 'probe-embed', model: 'e', baseUrl: 'http://demo', kind: 'embeddings', apiKeyEnv: null, headers: {},
+    probe: { enabled: true, intervalMs: 600000, timeoutMs: 5000, input: 'ping', warmup: false },
+  }, { fetchImpl: embeddingFetch, env: {}, now: Date.now });
+  assert.equal(embeddingRows[0].ok, true, 'embedding 探针识别 data[].embedding');
+  assert.equal(embeddingRows[0].ttftMs, null, 'embedding 没有首 token');
+
+  // 历史库：推理采样与探针都要能落库、查询、流式导出
+  const inferStore = await createSqliteStore({ file: ':memory:', nodeId: 'test-host', storeIntervalMs: 1000 });
+  inferStore.appendInferenceSample({
+    t: 10_000,
+    services: [
+      { id: 'a', state: 'up', up: true, modelsOk: true, metricsOk: true, healthMs: 2, running: 3, waiting: 1, kvCachePct: 42, tokensPerSec: 12.5, ttftAvgMs: 200, version: '0.31.0' },
+      { id: 'b', state: 'degraded', up: true, modelsOk: false, metricsOk: true, healthMs: 4, running: 0, waiting: 0, kvCachePct: 0 },
+    ],
+  });
+  inferStore.appendInferenceSample({ t: 11_000, services: [{ id: 'a', state: 'up', up: true, running: 5, waiting: 2, kvCachePct: 50, ttftAvgMs: 250 }] });
+  inferStore.appendInferenceProbe({ ts: 11_500, serviceId: 'a', kind: 'chat', ok: true, skipped: false, status: 200, cold: false, ttftMs: 190, e2eMs: 400, outputTokens: 8, tokensPerSec: 38, error: null });
+  inferStore.flush();
+  const inferSamples = inferStore.queryInferenceSamples({ from: 0, to: 20_000, serviceId: 'a' });
+  assert.equal(inferSamples.rows.length, 2, '推理采样按服务查询');
+  assert.equal(inferSamples.rows[0].service, 'a');
+  assert.equal(inferSamples.rows[1].waiting, 2);
+  const inferProbes = inferStore.queryInferenceProbes({ from: 0, to: 20_000, serviceId: 'a' });
+  assert.equal(inferProbes.length, 1);
+  assert.equal(inferProbes[0].ttftMs, 190);
+  const exported = [...inferStore.inferencePages({ from: 0, to: 20_000 })];
+  assert.equal(exported.length, 3, '流式导出要覆盖两个服务与多个采样点');
+  inferStore.appendInferenceSample({ t: 125_000, services: [{ id: 'a', state: 'up', up: true, running: 1, waiting: 0 }] });
+  inferStore.flush();
+  const inferBucketed = inferStore.queryInferenceSamples({ from: 0, to: 200_000, serviceId: 'a', stepMs: 60_000 });
+  assert.ok(
+    inferBucketed.rows.some((row) => row.points >= 2),
+    '分桶查询要按 CAST(ts/step) 聚合，不能被 REAL 绑定退化成逐行返回',
+  );
+  inferStore.close();
+
+  // 推理告警：按实例判定持续时长、跳过 idleOnly 的探针、恢复正常时补发 resolved
+  let inferClock = 60_000;
+  const inferAlertSamples = [
+    { t: 0, services: [{ id: 'a', name: 'Service A', up: true, modelsOk: true, waiting: 20, kvCachePct: 95, running: 5, probe: { ok: true, skipped: false } }] },
+    { t: 60_000, services: [{ id: 'a', name: 'Service A', up: true, modelsOk: true, waiting: 20, kvCachePct: 95, running: 5, probe: { ok: true, skipped: false } }] },
+  ];
+  const alertNotifications = [];
+  const inferAlertEngine = createAlertEngine({
+    config: {
+      window: 300_000,
+      intervalMs: 1000,
+      cooldown: '10m',
+      rules: [
+        { id: 'inf-wait', metric: 'inferenceWaiting', op: '>=', threshold: 16, for: '1m', level: 'warning' },
+        { id: 'inf-down', metric: 'inferenceUp', op: '==', value: false, for: '1m', level: 'critical' },
+        { id: 'inf-probe', metric: 'inferenceProbeOk', op: '==', value: false, for: '0s', level: 'critical' },
+      ],
+    },
+    getSamples: () => [],
+    getInferenceSamples: () => inferAlertSamples,
+    notifier: { send: async (payload) => alertNotifications.push(payload) },
+    now: () => inferClock,
+  });
+  const inferAlertState = { status: 'ok', inference: { services: inferAlertSamples[1].services } };
+  const firstEval = inferAlertEngine.evaluate(inferAlertState);
+  assert.ok(firstEval.firing.some((entry) => entry.rule.id === 'inf-wait'), '排队持续 1 分钟后应触发');
+  assert.ok(!firstEval.firing.some((entry) => entry.rule.id === 'inf-down'), '服务正常时不应触发不可用');
+  assert.ok(!firstEval.firing.some((entry) => entry.rule.id === 'inf-probe'), '探针成功时不应触发探针失败');
+
+  inferClock = 120_000;
+  inferAlertSamples.push({
+    t: 120_000,
+    services: [{ id: 'a', name: 'Service A', up: true, modelsOk: true, waiting: 5, kvCachePct: 20, running: 1, probe: { ok: false, skipped: true } }],
+  });
+  const secondEval = inferAlertEngine.evaluate({
+    status: 'ok',
+    inference: { services: inferAlertSamples[2].services },
+  });
+  assert.ok(secondEval.resolved.some((entry) => entry.rule.id === 'inf-wait'), '排队下降后应恢复');
+  assert.ok(!secondEval.firing.some((entry) => entry.rule.id === 'inf-probe'), 'idleOnly 跳过的探针不能算失败');
+
+  inferAlertSamples.push({
+    t: 180_000,
+    services: [{ id: 'a', name: 'Service A', up: true, modelsOk: true, waiting: 5, probe: { ok: false, skipped: false } }],
+  });
+  inferClock = 180_000;
+  const thirdEval = inferAlertEngine.evaluate({
+    status: 'ok',
+    inference: { services: inferAlertSamples[3].services },
+  });
+  assert.ok(thirdEval.firing.some((entry) => entry.rule.id === 'inf-probe'), '真实探针失败应触发');
+
 process.stdout.write(
   '冒烟测试通过：GPU 解析（基础/扩展/逗号名/CRLF）/ 字段探测与降级 / 宿主指标（Linux + Windows）/ '
   + '空闲调度 / 环形缓冲 / CSV 导出 / 模拟数据源 / 平台探测 / 采集器端到端 / '
@@ -3134,6 +3366,7 @@ process.stdout.write(
   + '告警（规则规范化·持续判定·抑制·恢复·采集中断）/ SMTP 协议与通知分发 / '
   + '历史库维护（增量回收·整库重写）/ 部署前自检 / 健康检查 / systemd 模板校验 / '
   + '告警长周期查历史库·覆盖不足标注·抗抖动·短 for 自适应 / '
+  + '推理监控（配置校验·容错·Prometheus 解析·_created 排除·抓取与鉴权提示）/ '
   + '平均利用率的跨时间口径与覆盖不足标注 / 各卡节流·健康·指标标签的行内判定 / 导出宽表布局 / '
   + '曲线悬停（位置→索引·浮窗内容·空数据区） / '
   + '文档相对链接 / '

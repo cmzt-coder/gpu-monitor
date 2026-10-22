@@ -105,6 +105,23 @@ const refs = {
   procHistEmptyTitle: $('proc-hist-empty-title'),
   procHistEmptyText: $('proc-hist-empty-text'),
   gpuCards: $('gpu-cards'),
+  inferCard: $('infer-card'),
+  inferSub: $('infer-sub'),
+  inferSummary: $('infer-summary'),
+  inferList: $('infer-list'),
+  inferEmpty: $('infer-empty'),
+  inferEmptyText: $('infer-empty-text'),
+  inferHistSub: $('infer-hist-sub'),
+  inferHistRange: $('infer-hist-range'),
+  inferHistService: $('infer-hist-service'),
+  inferHistChartWrap: $('infer-hist-chart-wrap'),
+  inferHistCanvas: $('infer-hist-canvas'),
+  inferHistLegend: $('infer-hist-legend'),
+  inferHistEmpty: $('infer-hist-empty'),
+  inferHistEmptyTitle: $('infer-hist-empty-title'),
+  inferHistEmptyText: $('infer-hist-empty-text'),
+  inferProbeWrap: $('infer-probe-wrap'),
+  inferProbeBody: $('infer-probe-body'),
   metaList: $('meta-list'),
   footerText: $('footer-text'),
 };
@@ -125,6 +142,19 @@ const state = {
   chartSignature: '',
   cardNodes: new Map(),
   cardSignature: '',
+  inferSignature: '',
+  // 推理历史：与实时卡片的抓取节奏解耦，前端按需拉取
+  inferHistory: {
+    range: '24h',
+    service: null,
+    rows: [],
+    probes: [],
+    supported: null,
+    loading: false,
+    notice: null,
+    fetchedAt: 0,
+    signature: '',
+  },
   lastSampleAt: null,
   fetchedAt: null,
   consecutiveErrors: 0,
@@ -170,6 +200,16 @@ const RANGES = [
   { value: '7d', get label() { return tn('range.days', 7); } },
   { value: '30d', get label() { return tn('range.days', 30); } },
   { value: '60d', get label() { return tn('range.days', 60); } },
+  { value: '90d', get label() { return tn('range.days', 90); } },
+  { value: 'all', get label() { return t('range.all'); } },
+];
+
+// 推理历史只看最近一段时间：1 小时排查抖动，24 小时看日常，30/90 天看趋势
+const INFER_RANGES = [
+  { value: '1h', get label() { return tn('range.hours', 1); } },
+  { value: '24h', get label() { return tn('range.hours', 24); } },
+  { value: '7d', get label() { return tn('range.days', 7); } },
+  { value: '30d', get label() { return tn('range.days', 30); } },
   { value: '90d', get label() { return tn('range.days', 90); } },
   { value: 'all', get label() { return t('range.all'); } },
 ];
@@ -1798,6 +1838,385 @@ function stateChip(text, tone) {
   return chip;
 }
 
+/* ---------- 渲染：推理服务 ---------- */
+function fmtInferCount(value) {
+  return value == null ? '--' : String(Math.round(value));
+}
+
+function fmtInferMs(value) {
+  if (value == null) return '--';
+  return value >= 1000 ? `${(value / 1000).toFixed(1)}s` : `${Math.round(value)} ms`;
+}
+
+function renderInference() {
+  const info = state.meta?.inference;
+  // 没配置 inference.json 时整张卡不出现，页面和以前完全一样
+  if (!info || !info.loaded) {
+    refs.inferCard.hidden = true;
+    return;
+  }
+  // 归「总览」页：导航模式下切到推理历史页时它要让位，否则整列会只剩这张卡
+  refs.inferCard.hidden = state.view === 'nav' && state.page !== 'overview';
+
+  const summary = info.summary || {};
+  refs.inferSub.textContent = t('infer.sub', {
+    total: summary.total ?? 0,
+    up: summary.up ?? 0,
+    interval: Math.max(1, Math.round((info.intervalMs || 15000) / 1000)),
+  });
+  refs.inferSummary.hidden = !summary.total;
+  refs.inferSummary.textContent = summary.total
+    ? t('infer.badge', { up: summary.up ?? 0, total: summary.total })
+    : '';
+  refs.inferSummary.dataset.state = summary.down > 0 ? 'down' : (summary.degraded > 0 ? 'warn' : 'up');
+
+  const services = info.services || [];
+  if (!services.length) {
+    refs.inferList.replaceChildren();
+    refs.inferEmpty.hidden = false;
+    refs.inferEmptyText.textContent = backendText(info.lastReloadError)
+      || info.warnings?.[0]?.message
+      || t('infer.empty.text');
+    state.inferSignature = '';
+    return;
+  }
+  refs.inferEmpty.hidden = true;
+
+  // 每秒都会被调用一次，内容没变就不重建 DOM
+  const signature = `${getLang()}#${services.map((service) => [
+    service.id, service.state, service.running, service.waiting,
+    service.kvCachePct, service.ttftAvgMs, service.tokensPerSec, service.error,
+    service.probe?.at, service.probe?.ok, service.probe?.skipped, service.probe?.ttftMs,
+  ].join('¦')).join('|')}`;
+  if (signature === state.inferSignature) return;
+  state.inferSignature = signature;
+
+  refs.inferList.replaceChildren();
+  for (const service of services) {
+    const row = document.createElement('article');
+    row.className = 'infer-row';
+    row.dataset.state = service.state || 'unknown';
+
+    const head = document.createElement('div');
+    head.className = 'infer-row__head';
+    const dot = document.createElement('span');
+    dot.className = 'infer-row__dot';
+    const name = document.createElement('span');
+    name.className = 'infer-row__name';
+    name.textContent = service.name || service.id;
+    const kind = document.createElement('span');
+    kind.className = 'infer-row__kind';
+    kind.textContent = service.kind || '';
+    head.append(dot, name, kind);
+
+    const metrics = document.createElement('div');
+    metrics.className = 'infer-row__metrics';
+    const item = (label, value, title) => {
+      const node = document.createElement('span');
+      node.className = 'infer-metric';
+      const labelNode = document.createElement('span');
+      labelNode.className = 'infer-metric__label';
+      labelNode.textContent = label;
+      const valueNode = document.createElement('span');
+      valueNode.className = 'infer-metric__value';
+      valueNode.textContent = value;
+      if (title) node.title = title;
+      node.append(labelNode, valueNode);
+      return node;
+    };
+    const probe = service.probe;
+    let probeText = '--';
+    const probeParts = [];
+    if (probe) {
+      probeText = probe.skipped
+        ? t('infer.probe.skip')
+        : (probe.ok ? t('infer.probe.ok') : t('infer.probe.fail'));
+      if (probe.coldTtftMs != null) probeParts.push(`${t('inferHist.cold')} ${fmtInferMs(probe.coldTtftMs)}`);
+      if (probe.warmTtftMs != null) probeParts.push(`${t('inferHist.warm')} ${fmtInferMs(probe.warmTtftMs)}`);
+      if (probe.error) probeParts.push(backendText(probe.error));
+    }
+    metrics.append(
+      item(t('infer.metric.running'), fmtInferCount(service.running)),
+      item(t('infer.metric.waiting'), fmtInferCount(service.waiting)),
+      item(t('infer.metric.kv'), service.kvCachePct == null ? '--' : fmtPct(service.kvCachePct, 0)),
+      item(t('infer.metric.ttft'), service.ttftAvgMs == null ? '--' : `${Math.round(service.ttftAvgMs)} ms`),
+      item(t('infer.metric.tps'), service.tokensPerSec == null ? '--' : `${Math.round(service.tokensPerSec)} tok/s`),
+      item(t('infer.metric.probe'), probeText, probeParts.join(' · ')),
+    );
+
+    row.append(head, metrics);
+    if (service.error) {
+      const error = document.createElement('p');
+      error.className = 'infer-row__error';
+      error.textContent = backendText(service.error);
+      row.appendChild(error);
+    }
+    refs.inferList.appendChild(row);
+  }
+}
+
+/* ---------- 渲染：推理历史与探针 ---------- */
+function inferHistoryCard() {
+  return refs.inferHistCanvas?.closest('.card') || null;
+}
+
+function renderInferHistoryControls() {
+  const current = state.inferHistory;
+  const rangeSignature = `${getLang()}#${INFER_RANGES.map((item) => item.value).join('|')}#${current.range}`;
+  if (refs.inferHistRange.dataset.signature !== rangeSignature) {
+    refs.inferHistRange.replaceChildren();
+    for (const item of INFER_RANGES) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'chip';
+      button.textContent = item.label;
+      button.setAttribute('aria-pressed', item.value === current.range ? 'true' : 'false');
+      button.addEventListener('click', () => {
+        if (state.inferHistory.range === item.value) return;
+        state.inferHistory.range = item.value;
+        state.inferHistory.fetchedAt = 0;
+        loadInferenceHistory();
+        render();
+      });
+      refs.inferHistRange.appendChild(button);
+    }
+    refs.inferHistRange.dataset.signature = rangeSignature;
+  }
+
+  const options = [
+    { id: null, name: t('inferHist.service.all') },
+    ...(state.meta?.inference?.services || []).map((service) => ({ id: service.id, name: service.name || service.id })),
+  ];
+  const serviceSignature = `${getLang()}#${options.map((item) => item.id ?? '*').join('|')}#${current.service ?? ''}`;
+  if (refs.inferHistService.dataset.signature !== serviceSignature) {
+    refs.inferHistService.replaceChildren();
+    for (const option of options) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'chip';
+      button.textContent = option.name;
+      button.setAttribute('aria-pressed', option.id === current.service ? 'true' : 'false');
+      button.addEventListener('click', () => {
+        if (state.inferHistory.service === option.id) return;
+        state.inferHistory.service = option.id;
+        state.inferHistory.fetchedAt = 0;
+        loadInferenceHistory();
+        render();
+      });
+      refs.inferHistService.appendChild(button);
+    }
+    refs.inferHistService.dataset.signature = serviceSignature;
+  }
+}
+
+function inferPalette() {
+  return [
+    cssVar('--jf-color-primary', '#005bac'),
+    cssVar('--jf-color-signal', '#00a0e3'),
+    cssVar('--jf-color-success', '#23786e'),
+    cssVar('--jf-color-warning', '#a35f00'),
+    cssVar('--jf-color-danger', '#b8371f'),
+  ];
+}
+
+/** 首 token 延迟图：Y 轴按区间最大值自适应，单位 ms（drawLines 只支持 0~100，不复用） */
+function drawLatencyChart(canvas, seriesList, times) {
+  const { width, height } = canvasBox(canvas);
+  if (width < 40 || height < 40 || times.length === 0) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const colors = themeColors();
+  const pad = { top: 10, right: 58, bottom: 18, left: 6 };
+  const plotW = Math.max(10, width - pad.left - pad.right);
+  const plotH = Math.max(10, height - pad.top - pad.bottom);
+  const values = seriesList.flatMap((line) => line.values.filter((value) => value != null));
+  const peak = values.length ? Math.max(...values) : 100;
+  // 取一个"好看"的上界：1 / 2 / 5 × 10^n
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(1, peak)));
+  const normalized = peak / magnitude;
+  const nice = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  const max = Math.max(100, nice * magnitude * 1.2);
+
+  ctx.font = '12px ' + cssVar('--jf-font-body', 'sans-serif');
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const ratio = i / 4;
+    const y = pad.top + plotH * ratio;
+    ctx.strokeStyle = colors.border;
+    ctx.beginPath();
+    ctx.moveTo(pad.left, Math.round(y) + 0.5);
+    ctx.lineTo(pad.left + plotW, Math.round(y) + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = colors.muted;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${Math.round(max * (1 - ratio))} ms`, pad.left + plotW + 8, y);
+  }
+
+  const count = times.length;
+  const xAt = (index) => pad.left + (count <= 1 ? plotW / 2 : (plotW * index) / (count - 1));
+  const yAt = (value) => pad.top + plotH * (1 - Math.min(max, Math.max(0, value)) / max);
+
+  for (const line of seriesList) {
+    if (!line.values.some((value) => value != null)) continue;
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = line.width || 1.8;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let drawing = false;
+    for (let i = 0; i < count; i += 1) {
+      const value = line.values[i];
+      if (value == null) {
+        drawing = false;
+        continue;
+      }
+      const x = xAt(i);
+      const y = yAt(value);
+      if (!drawing) {
+        ctx.moveTo(x, y);
+        drawing = true;
+      } else {
+        ctx.lineTo(x, y);
+      }
+    }
+    ctx.stroke();
+  }
+}
+
+function renderInferHistory() {
+  const card = inferHistoryCard();
+  if (!card) return;
+  const info = state.meta?.inference;
+  if (!info?.loaded) {
+    card.hidden = true;
+    return;
+  }
+  // 卡片归属由展示模式决定；这里和 applyView 用同一套规则
+  card.hidden = state.view === 'nav' && state.page !== 'inference';
+
+  const history = state.inferHistory;
+  renderInferHistoryControls();
+  const rangeLabelText = INFER_RANGES.find((item) => item.value === history.range)?.label || history.range;
+  const serviceLabel = history.service
+    ? (info.services.find((service) => service.id === history.service)?.name || history.service)
+    : t('inferHist.service.all');
+  refs.inferHistSub.textContent = t('inferHist.sub', {
+    range: rangeLabelText,
+    service: serviceLabel,
+    points: history.rows.length,
+  });
+
+  // 30 秒刷新一次，而且只在这张卡真正可见时拉：
+  // 探针本身 10 分钟一轮，没必要在别的页签上持续请求历史
+  const visible = state.view !== 'nav' || state.page === 'inference';
+  if (visible && !history.loading && Date.now() - history.fetchedAt > 30000) loadInferenceHistory();
+
+  const signature = `${getLang()}#${history.range}#${history.service ?? ''}#${history.rows.length}#${history.probes[0]?.ts ?? 0}`;
+  if (signature === history.signature) return;
+  history.signature = signature;
+
+  const drawable = history.rows.filter((row) => row.ttftAvgMs != null);
+  if (!history.supported) {
+    refs.inferHistChartWrap.hidden = true;
+    refs.inferHistLegend.replaceChildren();
+    refs.inferHistEmpty.hidden = false;
+    refs.inferHistEmptyTitle.textContent = t('inferHist.empty.title');
+    refs.inferHistEmptyText.textContent = backendText(history.notice) || t('inferHist.empty.text');
+  } else if (drawable.length === 0) {
+    refs.inferHistChartWrap.hidden = true;
+    refs.inferHistLegend.replaceChildren();
+    refs.inferHistEmpty.hidden = false;
+    refs.inferHistEmptyTitle.textContent = t('inferHist.noTtft.title');
+    refs.inferHistEmptyText.textContent = t('inferHist.noTtft.text');
+  } else {
+    refs.inferHistChartWrap.hidden = false;
+    refs.inferHistEmpty.hidden = true;
+    const times = [...new Set(history.rows.map((row) => row.ts))].sort((a, b) => a - b);
+    const byService = new Map();
+    for (const row of drawable) {
+      if (!byService.has(row.service)) byService.set(row.service, new Map());
+      byService.get(row.service).set(row.ts, row.ttftAvgMs);
+    }
+    const names = new Map((info.services || []).map((service) => [service.id, service.name || service.id]));
+    const palette = inferPalette();
+    const seriesList = [...byService.entries()].map(([id, points], index) => ({
+      name: id,
+      color: palette[index % palette.length],
+      width: 1.8,
+      values: times.map((ts) => points.get(ts) ?? null),
+      label: names.get(id) || id,
+    }));
+    drawLatencyChart(refs.inferHistCanvas, seriesList, times);
+    syncLegendItems(refs.inferHistLegend, seriesList.map((line) => ({
+      key: line.name,
+      color: line.color,
+      text: line.label,
+    })));
+  }
+
+  // 探针明细表
+  const probes = history.probes.slice(0, 50);
+  refs.inferProbeWrap.hidden = probes.length === 0;
+  refs.inferProbeBody.replaceChildren();
+  const nameOf = (id) => (info.services.find((service) => service.id === id)?.name || id);
+  for (const probe of probes) {
+    const row = document.createElement('tr');
+    const cells = [
+      fmtRelative(probe.ts),
+      nameOf(probe.service),
+      probe.skipped
+        ? t('inferHist.result.skipped')
+        : `${probe.ok ? t('inferHist.result.ok') : t('inferHist.result.fail')}${probe.cold == null ? '' : ` · ${probe.cold ? t('inferHist.cold') : t('inferHist.warm')}`}`,
+      probe.ttftMs == null ? '--' : `${Math.round(probe.ttftMs)} ms`,
+      probe.e2eMs == null ? '--' : `${Math.round(probe.e2eMs)} ms`,
+      probe.tokensPerSec == null ? '--' : `${Math.round(probe.tokensPerSec)} tok/s`,
+    ];
+    for (const [index, text] of cells.entries()) {
+      const cell = document.createElement('td');
+      if (index >= 3) cell.className = 'num';
+      cell.textContent = text;
+      row.appendChild(cell);
+    }
+    if (probe.error) row.title = backendText(probe.error);
+    refs.inferProbeBody.appendChild(row);
+  }
+}
+
+async function loadInferenceHistory() {
+  const history = state.inferHistory;
+  if (history.loading || !state.meta?.inference?.loaded) return;
+  history.loading = true;
+  try {
+    const query = new URLSearchParams({ range: history.range });
+    if (history.service) query.set('service', history.service);
+    const [metrics, probes] = await Promise.all([
+      fetchJson(`/api/inference/history?${query}`),
+      fetchJson(`/api/inference/probes?${query}&limit=100`),
+    ]);
+    history.rows = metrics.rows || [];
+    history.supported = metrics.supported !== false;
+    history.notice = history.supported ? null : (metrics.reason || '');
+    history.probes = probes.probes || [];
+  } catch (error) {
+    history.rows = [];
+    history.probes = [];
+    history.supported = false;
+    history.notice = error.message;
+  } finally {
+    history.loading = false;
+    history.fetchedAt = Date.now();
+    history.signature = '';
+    render();
+  }
+}
+
 function renderGpuCards() {
   const gpus = state.gpus;
   const signature = gpus.map(gpuKey).join('|');
@@ -2400,6 +2819,8 @@ function render() {
   renderCharts();
   renderServiceChart();
   renderSystemCard();
+  renderInference();
+  renderInferHistory();
   renderGpuCards();
   renderProcFilter();
   renderProcTable();
@@ -2435,6 +2856,7 @@ function render() {
 
   const sources = [state.meta?.mock ? t('app.source.mock') : 'nvidia-smi'];
   if (state.meta?.systemEnabled !== false) sources.push(t('app.source.host'));
+  if (state.meta?.inference?.loaded) sources.push('vLLM');
   const storage = state.meta?.storage;
   if (storage?.mode === 'sqlite') {
     const keep = storage.retentionDays > 0
@@ -2587,7 +3009,7 @@ function triggerDownload(path, params = new URLSearchParams()) {
 // URL 里（能分享、刷新保持）和 localStorage 里（下次打开还是上次那个）。
 // 告警面板和整机概览 KPI 不参与分页——它们在任何一页都得看得见。
 const VIEW_KEY = 'gpu-monitor-view';
-const VIEW_PAGES = ['overview', 'curve', 'processes', 'system'];
+const VIEW_PAGES = ['overview', 'curve', 'processes', 'system', 'inference'];
 
 /** 当前模式从哪来：URL 优先（可分享），其次上次的选择，最后默认单页 */
 function readViewChoice() {
@@ -2699,6 +3121,24 @@ const EXPORT_ITEMS = [
     get label() { return t('export.item.processes.label'); },
     get desc() { return t('export.item.processes.desc'); },
     path: '/api/export.processes.csv',
+    format: 'CSV',
+    range: true,
+    needsHistory: true,
+  },
+  {
+    id: 'inference',
+    get label() { return t('export.item.inference.label'); },
+    get desc() { return t('export.item.inference.desc'); },
+    path: '/api/export.inference.csv',
+    format: 'CSV',
+    range: true,
+    needsHistory: true,
+  },
+  {
+    id: 'inferenceProbes',
+    get label() { return t('export.item.probes.label'); },
+    get desc() { return t('export.item.probes.desc'); },
+    path: '/api/export.inference-probes.csv',
     format: 'CSV',
     range: true,
     needsHistory: true,
@@ -2952,11 +3392,15 @@ function resetTextSignatures() {
   state.ruleSignature = null;
   state.firingSignature = null;
   state.processSignature = null;
+  state.inferSignature = '';
+  state.inferHistory.signature = '';
   for (const node of [
     refs.rangePicker,
     refs.procFilter,
     refs.procHistRange,
     refs.procHistMin,
+    refs.inferHistRange,
+    refs.inferHistService,
   ]) {
     if (node?.dataset) node.dataset.signature = '';
   }

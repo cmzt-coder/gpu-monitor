@@ -13,12 +13,14 @@ import { fileURLToPath } from 'node:url';
 import { createCollector } from './src/collector.js';
 import { createAlertsRuntime } from './src/alerts/runtime.js';
 import { evaluateHealth } from './src/health.js';
+import { createInferenceRuntime } from './src/inference/runtime.js';
 import {
   GPU_CSV_HEADER,
   GPU_CSV_HEADER_FULL,
   PROCESS_CSV_HEADER,
   SYSTEM_CSV_HEADER,
   applyTimeZone,
+  formatTimestamp,
   gpuRowToCsv,
   processRowToCsv,
   samplesToCsv,
@@ -70,6 +72,11 @@ const HELP = `GPU 显存负载监控服务
       --alerts-dry-run    只打印"本来要发什么"，不真正发信
       --no-alerts-reload  关掉告警配置的热加载（默认改了 alerts.json 会自动重新加载）
 
+推理服务（vLLM 等，服务清单写在配置文件里）：
+      --inference <路径>  推理监控配置（默认 inference.json，不存在则不启用）
+      --no-inference      不启用推理服务监控
+      --no-inference-reload  关掉推理配置热加载（默认改了 inference.json 会自动重新加载）
+
 历史库（SQLite，Node 22.13+ 内置）：
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
       --no-db             不落库，只保留内存窗口
@@ -113,6 +120,10 @@ function parseArgs(argv) {
     alertsPath: process.env.GPU_MONITOR_ALERTS || 'alerts.json',
     alertsDryRun: false,
     alertsReload: true,
+    // 推理服务监控（vLLM /metrics）：配置文件不存在时自动不启用
+    inference: true,
+    inferencePath: process.env.GPU_MONITOR_INFERENCE || 'inference.json',
+    inferenceReload: true,
     diskTargets: [],
     db: true,
     dbPath: process.env.GPU_MONITOR_DB || path.join('data', 'gpu-monitor.db'),
@@ -186,6 +197,15 @@ function parseArgs(argv) {
         break;
       case '--no-alerts-reload':
         options.alertsReload = false;
+        break;
+      case '--inference':
+        options.inferencePath = next() || options.inferencePath;
+        break;
+      case '--no-inference':
+        options.inference = false;
+        break;
+      case '--no-inference-reload':
+        options.inferenceReload = false;
         break;
       case '--db':
         options.dbPath = next() || options.dbPath;
@@ -281,6 +301,10 @@ function utilAverageState() {
   return utilAverageCache.value;
 }
 
+// 推理监控的运行时在 collector 之后才装配，但状态要通过 extraState 并进 /api/state。
+// 用 let 先占位，避免 extraState 在第一帧被调用时踩到 TDZ。
+let inferenceRuntime = null;
+
 // --mock 下连宿主指标也用模拟数据，这样在没有 GPU、也没有可读 /proc 的机器上也能看完整界面
 const collector = createCollector({
   options,
@@ -302,6 +326,8 @@ const collector = createCollector({
     // 页面把它写进导出说明，并在这台机器和看页面的人不是同一个时区时直接提醒
     timeZone: activeTimeZone,
     timeZoneFixed,
+    // 推理服务（vLLM）的实时状态；未配置时为 null，页面据此隐藏卡片
+    inference: inferenceRuntime ? inferenceRuntime.snapshot() : null,
   }),
 });
 
@@ -313,9 +339,24 @@ const alertsRuntime = createAlertsRuntime({
   options: { ...options, alertsReload: options.alertsReload },
   collector,
   store,
+  // 推理快照在 alerts 之后装配，闭包里按调用时取值；未启用时就是空数组
+  getInferenceSamples: () => inferenceRuntime?.getSamples?.() ?? [],
   watch: options.alertsReload,
 });
 await alertsRuntime.start();
+
+/* ---------- 推理服务监控 ---------- */
+
+// 独立定时器抓 /health、/v1/models、/metrics，不阻塞 GPU 的 1 秒采集循环。
+// 配置文件缺失时 loaded=false，页面不显示推理卡片，其他功能不受影响。
+inferenceRuntime = createInferenceRuntime({
+  options,
+  store,
+  logger: console,
+  watch: options.inferenceReload,
+  mock: options.mock,
+});
+await inferenceRuntime.start();
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -398,6 +439,53 @@ function resolveRange(url) {
   if (from == null) return null;
   const requestedStep = Number(url.searchParams.get('step')) || 0;
   return from > to ? { from: to, to: from, requestedStep } : { from, to, requestedStep };
+}
+
+function csvCell(value) {
+  if (value == null) return '';
+  const text = String(value);
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function roundCell(value) {
+  return value == null || !Number.isFinite(Number(value)) ? '' : Math.round(Number(value) * 100) / 100;
+}
+
+const INFERENCE_CSV_HEADER = [
+  'time_local', 'timestamp_iso', 'timestamp_ms', 'service_id', 'state', 'up',
+  'models_ok', 'metrics_ok', 'health_ms', 'running', 'waiting', 'kv_cache_pct',
+  'tokens_per_sec', 'ttft_avg_ms', 'e2e_avg_ms', 'prompt_tokens_total',
+  'generation_tokens_total', 'request_success_total', 'request_error_total', 'version',
+].join(',');
+
+function inferenceCsvLine(row) {
+  const { local, iso } = formatTimestamp(row.ts);
+  return [
+    local, iso, row.ts, csvCell(row.service), row.state ?? '',
+    row.up == null ? '' : (row.up ? 1 : 0),
+    row.modelsOk == null ? '' : (row.modelsOk ? 1 : 0),
+    row.metricsOk == null ? '' : (row.metricsOk ? 1 : 0),
+    roundCell(row.healthMs),
+    row.running ?? '', row.waiting ?? '', roundCell(row.kvCachePct),
+    roundCell(row.tokensPerSec), roundCell(row.ttftAvgMs), roundCell(row.e2eAvgMs),
+    row.promptTokensTotal ?? '', row.generationTokensTotal ?? '',
+    row.requestSuccessTotal ?? '', row.requestErrorTotal ?? '', csvCell(row.version),
+  ].join(',');
+}
+
+const PROBE_CSV_HEADER = [
+  'time_local', 'timestamp_iso', 'timestamp_ms', 'service_id', 'kind', 'ok', 'skipped',
+  'cold', 'status', 'ttft_ms', 'e2e_ms', 'output_tokens', 'tokens_per_sec', 'error',
+].join(',');
+
+function probeCsvLine(row) {
+  const { local, iso } = formatTimestamp(row.ts);
+  return [
+    local, iso, row.ts, csvCell(row.service), csvCell(row.kind), row.ok ? 1 : 0,
+    row.skipped ? 1 : 0, row.cold == null ? '' : (row.cold ? 1 : 0),
+    row.status ?? '', row.ttftMs ?? '', row.e2eMs ?? '', row.outputTokens ?? '',
+    row.tokensPerSec ?? '', csvCell(row.error),
+  ].join(',');
 }
 
 function* gpuCsvLines({ from, to }, step, { full = false } = {}) {
@@ -504,6 +592,17 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 推理服务快照单独开一个接口：调试配置时不用把整份 GPU 状态都拉下来
+  if (pathname === '/api/inference') {
+    sendJson(res, 200, inferenceRuntime ? inferenceRuntime.snapshot() : {
+      enabled: false,
+      loaded: false,
+      services: [],
+      reason: '未启用推理服务监控',
+    });
+    return;
+  }
+
   // 健康检查：给外部探针 / systemd watchdog 用。200 = 健康或仅有提醒，503 = 有致命项。
   // 注意这里不调 noteClient()，否则每次探活都会把服务从空闲降频里"唤醒"。
   if (pathname === '/api/health') {
@@ -511,6 +610,7 @@ const server = http.createServer(async (req, res) => {
       state: collector.getState(),
       storage: store.stats(),
       alerts: alertsRuntime.snapshot(),
+      inference: inferenceRuntime ? inferenceRuntime.snapshot() : null,
       version: VERSION,
       probePath: options.db === false ? null : path.dirname(path.resolve(options.dbPath)),
     });
@@ -588,6 +688,44 @@ const server = http.createServer(async (req, res) => {
       limited: Boolean(range),
       reason: range ? (store.reason || '未启用历史库') : null,
     });
+    return;
+  }
+
+  if (pathname === '/api/inference/history') {
+    const resolved = range ?? { from: Date.now() - 86400000, to: Date.now(), requestedStep: 0 };
+    const service = (url.searchParams.get('service') || '').trim() || null;
+    if (!store.supportsHistory) {
+      sendJson(res, 200, {
+        ...resolved,
+        step: 0,
+        service,
+        rows: [],
+        supported: false,
+        reason: store.reason || '未启用历史库',
+      });
+      return;
+    }
+    const result = store.queryInferenceSamples({
+      from: resolved.from,
+      to: resolved.to,
+      serviceId: service,
+      stepMs: resolved.requestedStep || 0,
+      pointLimit: 2000,
+    });
+    sendJson(res, 200, { ...result, supported: true, source: 'db' });
+    return;
+  }
+
+  if (pathname === '/api/inference/probes') {
+    const resolved = range ?? { from: Date.now() - 86400000, to: Date.now() };
+    const service = (url.searchParams.get('service') || '').trim() || null;
+    const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit')) || 200));
+    if (!store.supportsHistory) {
+      sendJson(res, 200, { ...resolved, limit, service, probes: [], supported: false, reason: store.reason || '未启用历史库' });
+      return;
+    }
+    const probes = store.queryInferenceProbes({ from: resolved.from, to: resolved.to, serviceId: service, limit });
+    sendJson(res, 200, { ...resolved, limit, service, probes, supported: true, source: 'db' });
     return;
   }
 
@@ -720,6 +858,53 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === '/api/export.inference.csv' || pathname === '/api/export.inference-probes.csv') {
+    if (!range) {
+      sendJson(res, 400, {
+        error: 'range_required',
+        message: '推理服务导出需要指定时间范围：加 ?range=24h，或用 from/to',
+      });
+      return;
+    }
+    if (!store.supportsHistory) {
+      sendJson(res, 400, {
+        error: 'history_unavailable',
+        message: '推理服务历史只存在库里：请启用历史库后重试',
+      });
+      return;
+    }
+    const service = (url.searchParams.get('service') || '').trim() || null;
+    if (pathname === '/api/export.inference.csv') {
+      async function* lines() {
+        for (const row of store.inferencePages({ from: range.from, to: range.to, serviceId: service })) {
+          yield inferenceCsvLine(row);
+        }
+      }
+      await streamCsv(
+        res,
+        `gpu-monitor-inference-${nodeId}-${stamp()}.csv`,
+        INFERENCE_CSV_HEADER,
+        lines(),
+      );
+    } else {
+      const rows = store.queryInferenceProbes({
+        from: range.from,
+        to: range.to,
+        serviceId: service,
+        limit: 50000,
+      });
+      await streamCsv(
+        res,
+        `gpu-monitor-inference-probes-${nodeId}-${stamp()}.csv`,
+        PROBE_CSV_HEADER,
+        (function* lines() {
+          for (const row of rows) yield probeCsvLine(row);
+        })(),
+      );
+    }
+    return;
+  }
+
   if (pathname === '/api/export.json') {
     const state = collector.getState();
     sendDownload(
@@ -756,6 +941,13 @@ server.listen(options.port, options.host, () => {
       + `${alertsSnapshot.problems?.length ? `，${alertsSnapshot.problems.length} 条被跳过` : ''}`
       + `${alertsSnapshot.autoReload ? '，改动后自动重载' : ''}）`
     : (alertsSnapshot.reason || '未启用');
+  const inferenceSnapshot = inferenceRuntime.snapshot();
+  const inferenceLine = inferenceSnapshot.loaded
+    ? `${inferenceSnapshot.configPath}（${inferenceSnapshot.services.length} 个服务`
+      + `${inferenceSnapshot.mock ? '，模拟数据' : `，每 ${Math.round(inferenceSnapshot.intervalMs / 1000)} 秒刷新`}`
+      + `${inferenceSnapshot.warnings?.length ? `，${inferenceSnapshot.warnings.length} 条被跳过` : ''}`
+      + `${inferenceSnapshot.autoReload ? '，改动后自动重载' : ''}）`
+    : (inferenceSnapshot.reason || inferenceSnapshot.error || '未启用');
   process.stdout.write(
     'GPU 显存负载监控已启动\n'
     + `  页面：   http://${shown}:${options.port}/\n`
@@ -767,7 +959,8 @@ server.listen(options.port, options.host, () => {
     + `　扩展 GPU 指标：${options.extended ? '开启（自动探测驱动支持）' : '已关闭'}\n`
     + `  导出时区：${activeTimeZone}${timeZoneFixed ? '' : '（跟随系统时区）'}\n`
     + `  历史库： ${storageLine}\n`
-    + `  告警：   ${alertsLine}\n`,
+    + `  告警：   ${alertsLine}\n`
+    + `  推理：   ${inferenceLine}\n`,
   );
 
   // 云主机的系统时区默认常是 UTC，而人都在东八区：这时导出的 time_local 会和
@@ -813,6 +1006,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     if (shuttingDown) return;
     shuttingDown = true;
     alertsRuntime.close();
+    inferenceRuntime?.close();
 
     // 兜底：采集卡在 nvidia-smi 上时也要能退出，别把关闭流程吊在这儿
     const forceExit = setTimeout(() => process.exit(0), 3000);

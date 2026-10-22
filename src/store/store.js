@@ -40,6 +40,12 @@ export function createMemoryStore(reason = null) {
     appendSample() {
       return 0;
     },
+    appendInferenceSample() {
+      return 0;
+    },
+    appendInferenceProbe() {
+      return 0;
+    },
     flush() {
       return 0;
     },
@@ -55,6 +61,12 @@ export function createMemoryStore(reason = null) {
     queryProcesses() {
       return [];
     },
+    queryInferenceSamples() {
+      return { rows: [], step: 0, truncated: false, unsupported: true };
+    },
+    queryInferenceProbes() {
+      return [];
+    },
     countProcesses() {
       return 0;
     },
@@ -65,6 +77,7 @@ export function createMemoryStore(reason = null) {
     gpuPages: emptyPages,
     hostPages: emptyPages,
     processPages: emptyPages,
+    inferencePages: emptyPages,
     resolveStep() {
       return 0;
     },
@@ -74,7 +87,7 @@ export function createMemoryStore(reason = null) {
         supportsHistory: false,
         reason,
         buffered: 0,
-        written: { gpu: 0, host: 0, process: 0 },
+        written: { gpu: 0, host: 0, process: 0, service: 0, inference: 0, probe: 0 },
         oldestTs: null,
         newestTs: null,
         freelistBytes: 0,

@@ -169,6 +169,7 @@
       <button type="button" class="view-nav__tab" data-page="curve" data-i18n="nav.tab.curve">曲线</button>
       <button type="button" class="view-nav__tab" data-page="processes" data-i18n="nav.tab.processes">进程</button>
       <button type="button" class="view-nav__tab" data-page="system" data-i18n="nav.tab.system">系统</button>
+      <button type="button" class="view-nav__tab" data-page="inference" data-i18n="nav.tab.inference">推理</button>
     </nav>
   </div>
 
@@ -236,6 +237,43 @@
           <svg class="icon state-block__icon" aria-hidden="true"><use href="#icon-stack"></use></svg>
           <p class="state-block__title" id="sys-empty-title">宿主指标不可用</p>
           <p class="state-block__text" id="sys-empty-text"></p>
+        </div>
+      </section>
+
+      <section class="card" data-page="inference" aria-labelledby="infer-hist-h">
+        <div class="card__head card__head--stack">
+          <div>
+            <h2 class="card__title" id="infer-hist-h" data-i18n="inferHist.title">推理服务历史</h2>
+            <p class="card__sub" id="infer-hist-sub"></p>
+          </div>
+          <div class="chart-head-actions">
+            <div class="range-picker" id="infer-hist-range" role="group" aria-label="选择推理历史的范围" data-i18n-attr="aria-label:inferHist.range.group"></div>
+            <div class="chips" id="infer-hist-service" role="group" aria-label="按推理服务过滤" data-i18n-attr="aria-label:inferHist.service.group"></div>
+          </div>
+        </div>
+        <div class="chart__canvas-wrap chart__canvas-wrap--tall" id="infer-hist-chart-wrap">
+          <canvas class="chart__canvas" id="infer-hist-canvas" role="img" aria-label="推理服务首 token 延迟趋势" data-i18n-attr="aria-label:inferHist.canvas.label"></canvas>
+        </div>
+        <div class="legend" id="infer-hist-legend"></div>
+        <div class="state-block" id="infer-hist-empty" hidden>
+          <p class="state-block__title" id="infer-hist-empty-title"></p>
+          <p class="state-block__text" id="infer-hist-empty-text"></p>
+        </div>
+        <div class="table-wrap table-wrap--scroll" id="infer-probe-wrap" hidden>
+          <table class="table" id="infer-probe-table">
+            <caption class="visually-hidden" data-i18n="inferHist.table.caption">最近的推理探针记录</caption>
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="inferHist.th.time">时间</th>
+                <th scope="col" data-i18n="inferHist.th.service">服务</th>
+                <th scope="col" data-i18n="inferHist.th.result">结果</th>
+                <th scope="col" class="num" data-i18n="inferHist.th.ttft">首 token</th>
+                <th scope="col" class="num" data-i18n="inferHist.th.e2e">总耗时</th>
+                <th scope="col" class="num" data-i18n="inferHist.th.tps">输出</th>
+              </tr>
+            </thead>
+            <tbody id="infer-probe-body"></tbody>
+          </table>
         </div>
       </section>
 
@@ -308,6 +346,21 @@
     </main>
 
     <aside class="evidence-col" aria-label="当前占用与采集信息" data-i18n-attr="aria-label:aside.group">
+      <section class="card" id="infer-card" data-page="overview" aria-labelledby="infer-h" hidden>
+        <div class="card__head">
+          <div>
+            <h2 class="card__title" id="infer-h" data-i18n="infer.title">推理服务</h2>
+            <p class="card__sub" id="infer-sub"></p>
+          </div>
+          <span class="infer-summary" id="infer-summary" hidden></span>
+        </div>
+        <div class="infer-list" id="infer-list"></div>
+        <div class="state-block" id="infer-empty" hidden>
+          <p class="state-block__title" data-i18n="infer.empty.title">已启用推理监控，但还没有数据</p>
+          <p class="state-block__text" id="infer-empty-text"></p>
+        </div>
+      </section>
+
       <section class="card" data-page="overview" aria-labelledby="cards-h">
         <div class="card__head">
           <h2 class="card__title" id="cards-h" data-i18n="cards.title">各卡当前占用</h2>

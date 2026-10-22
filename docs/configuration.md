@@ -26,6 +26,9 @@
 | `--no-alerts` | 关闭 | 不启用告警 |
 | `--alerts-dry-run` | 关闭 | 只打印将要发送的通知，不真正发信 |
 | `--no-alerts-reload` | 关闭 | 关掉告警配置热加载（默认改了 `alerts.json` 会自动重新加载） |
+| `--inference` | `inference.json` | 推理服务监控配置（vLLM 等）；文件不存在则不启用 |
+| `--no-inference` | 关闭 | 不启用推理服务监控 |
+| `--no-inference-reload` | 关闭 | 关掉推理配置热加载（默认改了 `inference.json` 会自动重新加载） |
 | `--idle-after` | `30` | 多久（秒）没有页面访问就转入空闲降频，`0` 表示不降频 |
 | `--idle-interval` | `10000` | 空闲期间的采集间隔（毫秒） |
 | `--tz` | 跟随系统时区 | 把**本服务**的时区固定成这个 IANA 名字（如 `Asia/Shanghai`）。影响导出里的 `time_local` 列、CSV 文件名、日志时间；也认 `TZ` 环境变量。**只对这个进程生效，不改系统时区，不影响这台机器上的其他服务**——详见 [deployment.md](deployment.md) 的「时区」一节 |
@@ -39,6 +42,9 @@
 | 路径 | 说明 |
 | --- | --- |
 | `GET /api/state` | 当前状态：每张卡的显存/利用率/温度/功耗、进程列表、采集元信息 |
+| `GET /api/inference` | 推理服务快照：每个 vLLM 实例的可用性、运行/等待队列、KV Cache、TTFT 与吞吐 |
+| `GET /api/inference/history?range=24h&service=ID` | 推理服务历史序列（按时间桶平均）；`service` 可选 |
+| `GET /api/inference/probes?range=24h&service=ID&limit=200` | 最近的主动探针记录（冷/热 TTFT、总耗时、错误） |
 | `GET /api/health` | 健康检查：`200` 健康或仅有提醒、`503` 有致命项；探活不会打断空闲降频 |
 | `GET /api/stream` | SSE 推送：每采集一帧推一条，内容与 `/api/state` 同构；`--no-push` 时返回 404 |
 | `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
@@ -47,6 +53,8 @@
 | `GET /api/export.csv` | 下载曲线原始数据（每行 = 一个采样点 × 一张卡）；加 `&fields=full` 会带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流等扩展列（需要历史库）。加 `&layout=wide` 换成宽表：一行一个采样点，每张卡各占一组列（`gpu0_mem_used_mib`、`gpu1_mem_used_mib`…），那一刻没有数据的卡该组留空。宽表只带基础指标，所以和 `fields=full` 互斥（同时给会返回 400） |
 | `GET /api/export.system.csv` | 下载宿主指标（每行 = 一个采样点；磁盘只导出第一个挂载点，完整明细在 JSON 里） |
 | `GET /api/export.processes.csv?range=24h` | 下载进程占用事件（每行 = 一次事件：时间 / 卡 / PID / 进程名 / 占用 / 服务 / 用户）。**必须带时间范围**，不带会返回 400；区间内的事件全部导出，不设条数上限 |
+| `GET /api/export.inference.csv?range=24h&service=ID` | 下载推理服务采样（每行 = 一个实例在一个采样点的状态与指标） |
+| `GET /api/export.inference-probes.csv?range=24h&service=ID` | 下载主动探针记录（每次冷/热请求一行） |
 | `GET /api/export.json` | 下载当前完整状态 + 采样窗口 |
 
 `/api/state` 里几个值得单独说明的字段：
@@ -56,6 +64,7 @@
 - `storage`：历史库状态（`mode` / `path` / `written` / `oldestTs` / `retentionDays` / `procMinMiB` …）
 - `utilAverage`：近 1 小时的 GPU 利用率均值（`avg` / `samples` / `cards` / `oldestTs` / `newestTs` / `windowMs`），就是概览里「平均 GPU 利用率」那张卡片的数。`avg` 为 `null` 表示算不出来（没有历史库或区间内没有数据），**不是 0%**；`oldestTs` 用来判断这一小时有没有攒满——服务刚部署时 `oldestTs` 距今不足一小时，页面据此标注"实为最近 N 分钟"。服务端每 60 秒重算一次并缓存，不会让每个打开的页面各自拉一小时原始数据回来自己平均
 - `alerts`：告警状态（`enabled` / `ruleCount` / `rules[]` / `firing[]` / `warnings[]` / `notifiedCount` …）
+- `inference`：推理服务状态（`enabled` / `loaded` / `services[]` / `summary` / `warnings` …）。`loaded=false` 表示没配置 `inference.json`，页面不会显示推理卡片
 - `remapStatus` / `xidStatus`：这两项的**采集状态**（是否读到、从哪读的、失败原因），对应页面「采集信息」里那两行
 - `system`：宿主指标快照（`cpu` / `mem` / `swap` / `load` / `disk[]` / `net` / `uptimeSec` / `unsupported[]`）
 - `fields`：扩展指标探测结果（`enabled`、`extended`、`count`、`unsupported[]`）
@@ -71,4 +80,66 @@
 默认 CSV 的列是固定的（本地时间、UTC 时间、卡号、名称、显存、利用率、温度、功耗）；加 `?fields=full` 会再追加 `clock_sm_mhz / clock_mem_mhz / pstate / fan_pct / pcie_gen / pcie_width / enc_util_pct / dec_util_pct / throttled / ecc_mode / ecc_corrected_volatile / ecc_uncorrected_volatile / ecc_corrected_aggregate / ecc_uncorrected_aggregate` 共十四列（`throttled` 用 0/1 表示，空值代表这次采集没拿到节流信息）。这些扩展字段只存在历史库里，所以没有启用历史库时会返回 400 并说明原因；页面的导出弹窗里勾「包含扩展指标」就是它，没有历史库时这个勾选项会自动置灰并说明原因。
 
 **导出与时间范围的关系**：导出的时间范围由导出弹窗里那一组单独决定，默认「跟随曲线」——也就是曲线上方选的是什么（实时 → 内存窗口；3 天/90 天/全部 → 查库）就导什么。只有**「当前完整快照」不含时间范围**（它导的是"此刻"，选中时那一组会自动置灰），其余三项都跟着走。
+
+## 推理服务监控（vLLM）
+
+推理服务的清单写在仓库根目录的 `inference.json` 里。它和 `alerts.json` 一样属于**本机配置**，已经进 `.gitignore`；仓库里只有 [`inference.example.json`](../inference.example.json) 模板。
+
+```json
+{
+  "enabled": true,
+  "interval": "15s",
+  "timeoutMs": 3000,
+  "services": [
+    {
+      "id": "vllm-chat",
+      "name": "Chat 模型",
+      "baseUrl": "http://127.0.0.1:8000",
+      "apiKeyEnv": "VLLM_CHAT_API_KEY",
+      "model": "your-model-id",
+      "kind": "chat",
+      "paths": { "health": "/health", "models": "/v1/models", "metrics": "/metrics" }
+    }
+  ]
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `enabled` | 否 | `false` 表示整份配置关闭；默认开启 |
+| `interval` | 否 | 抓取间隔，支持 `5s` / `1m`；默认 `15s`，最小 1 秒 |
+| `timeoutMs` | 否 | 单个请求的超时，默认 3000 |
+| `services[].id` | 是 | 稳定标识，只允许字母、数字、点、下划线和短横线；上线后不要改，否则历史会断档 |
+| `services[].name` | 否 | 页面显示名，默认取 `id` |
+| `services[].baseUrl` | 是 | 写到端口即可，不要带 `/v1`；末尾斜杠会自动去掉 |
+| `services[].apiKeyEnv` | 视部署 | **环境变量名**，不是密钥本身。vLLM 启用了 `--api-key` 时必填 |
+| `services[].model` | 是 | 必须与 `/v1/models` 返回的 `id` 完全一致，用来发现配置漂移 |
+| `services[].kind` | 否 | `chat` / `completions` / `embeddings` / `rerank`，默认 `chat` |
+| `services[].paths` | 否 | 覆盖默认路径，反向代理改过路由时用 |
+| `services[].headers` | 否 | 额外请求头，适合反向代理鉴权；同样只写 `${ENV_VAR}` 占位 |
+
+### 主动探针
+
+`services[].probe` 控制是否真的发一次推理请求。默认关闭；打开后按 `interval` 定时执行：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `false` | 打开后才执行探针 |
+| `interval` | `10m` | 探针间隔，最短 1 分钟 |
+| `timeoutMs` | `60000` | 单次请求超时；长上下文模型别用 3 秒 |
+| `idleOnly` | `true` | 只在 `running + waiting == 0` 时探，避免叠加真实流量 |
+| `startupGrace` | `5m` | 启动宽限期，加载模型/换入权重期间失败不告警 |
+| `warmup` | `true` | chat/completions 先发一次冷启动请求，再发一次热态请求；两条都会落库 |
+| `stream` | `true` | 流式请求，才能测出真正的首 token 时间 |
+| `maxTokens` | `32` | 生成上限。推理模型别设太小，否则 token 全被 reasoning 吃掉 |
+| `prompt` / `input` / `query` / `documents` | `ping` / `pong` | chat/embeddings/rerank 各自的探针输入 |
+
+探针结果会在推理卡片上显示"冷 / 热"两个 TTFT（鼠标悬停可见），完整记录在「推理」页签的探针表里。`idleOnly` 跳过时会写一条 `skipped=1` 的记录，说明是忙碌跳过，而不是服务失败。
+
+使用要点：
+
+- **密钥只放环境变量**。每个服务各自独立 key 时，`apiKeyEnv` 必须指向不同的变量名；Docker 部署时把变量写进 `.env`，compose 会整份注入容器。
+- `/health` 与 `/metrics` 在 vLLM 里通常不需要 API Key；`/v1/models` 在启用 `--api-key` 后需要。抓不到模型列表时页面会把该服务标成「降级」并指出缺哪个环境变量，而不是直接判死。
+- 配置文件改完会自动重载；JSON 写坏或某一条不合法时**沿用上一次可用的配置**，问题记在 `warnings` 里，不会把整页监控弄没。
+- 怎么快速验证一台 vLLM 能不能接：`curl -sS http://<host>:<port>/health`、`curl -sS http://<host>:<port>/metrics | grep vllm:num_requests_running`、带 Bearer 请求一次 `/v1/models`。
 

@@ -24,6 +24,7 @@ export function evaluateHealth({
   state = {},
   storage = null,
   alerts = null,
+  inference = null,
   version = null,
   probePath = null,
   now = Date.now,
@@ -120,6 +121,30 @@ export function evaluateHealth({
         alerts.lastError || null,
       ].filter(Boolean).join(' · '),
     });
+  }
+
+  /* ---------- 推理服务 ---------- */
+  // 这里只判"推理服务整体是不是全挂了"：
+  // 单个实例抖动交给告警规则，不能因为它把监控服务本身判成不健康。
+  // 没有配置推理监控时不追加这一项，健康检查的返回结构和以前保持一致
+  if (inference && inference.enabled !== false && !inference.loaded && inference.error) {
+    checks.push({
+      name: 'inference',
+      level: 'warn',
+      detail: `推理监控配置有问题：${inference.error}`,
+    });
+  } else if (inference && inference.enabled !== false && inference.loaded) {
+    const summary = inference.summary || { total: 0, up: 0, down: 0, degraded: 0, unknown: 0 };
+    const parts = [
+      `${summary.up}/${summary.total} 可用`,
+      summary.degraded ? `${summary.degraded} 个降级` : null,
+      summary.unknown ? `${summary.unknown} 个待采集` : null,
+      inference.error || null,
+    ].filter(Boolean);
+    const level = summary.total > 0 && summary.down === summary.total
+      ? 'fail'
+      : (summary.down > 0 || summary.degraded > 0 || inference.error ? 'warn' : 'ok');
+    checks.push({ name: 'inference', level, detail: parts.join(' · ') });
   }
 
   const failed = checks.filter((check) => check.level === 'fail');

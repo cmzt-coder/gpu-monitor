@@ -36,6 +36,11 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 | `hostCpuPct` / `hostMemUsedPct` / `hostSwapUsedPct` / `hostDiskUsedPct` | 整机 | 宿主指标，磁盘取所有挂载点里最满的那个 |
 | `serviceMemMiB` | 每个服务 | 该服务占用的显存合计（服务 = 容器 / systemd 单元 / 用户会话，见 [features.md](features.md) 的「进程的服务归属」一节） |
 | `serviceSharePct` | 每个服务 | 该服务占用占整机显存总量的比例（多张卡时按各卡总量之和算） |
+| `inferenceUp` / `inferenceModelsOk` / `inferenceProbeOk` | 每个推理服务 | 布尔值：`/health` 是否通过、模型名是否匹配、最近一次主动探针是否成功 |
+| `inferenceRunning` / `inferenceWaiting` | 每个推理服务 | 运行中请求数 / 排队请求数 |
+| `inferenceKvCachePct` | 每个推理服务 | KV Cache 使用率（vLLM 的 `1` 已换算成 `100%`） |
+| `inferenceTtftAvgMs` / `inferenceProbeTtftMs` | 每个推理服务 | `/metrics` 直方图算出的首 token 平均延迟 / 探针的热态 TTFT |
+| `inferenceTokensPerSec` / `inferenceErrorRatePct` / `inferencePreemptionsDelta` | 每个推理服务 | 生成吞吐、两次抓取之间的错误率与抢占次数 |
 | `eccCorrectedAggregate` / `eccUncorrectedAggregate` | 每张卡 | 显存纠错计数（终身累计）；看趋势，不看单点 |
 | `eccUncorrectedVolatile` | 每张卡 | 本次驱动加载以来的不可纠正错误数，适合配"出现就告警" |
 | `xidRecent` / `xidCount` | 每张卡 | XID 错误数：最近 30 分钟 / 累计。**规则用 `xidRecent`**——累计值只涨，一旦触发就永远恢复不了 |
@@ -70,6 +75,27 @@ ${EDITOR:-vi} alerts.json     # 改 SMTP 地址与收件人
 - 判定"是哪个服务"依赖 `/proc`（也就是上面「服务归属」那一节说的容器 / systemd / 会话），所以这一维度和「服务」列一样有 `–` 的情况——归到「未识别」的那个桶里，也能对它设规则。
 
 服务维度的值会跟着每个采样点落库，所以 `for` 一样能配到几分钟甚至更长（没有历史库时受内存窗口限制，与其它指标一致）。
+
+### 推理服务告警
+
+推理规则和普通规则写法完全一样，`service` 会按**实例 id 或显示名**做子串匹配：
+
+```json
+{ "id": "infer-down", "metric": "inferenceUp", "op": "==", "value": false,
+  "for": "1m", "level": "critical", "label": "推理服务不可用" }
+{ "id": "deepseek-queue", "metric": "inferenceWaiting", "service": "deepseek",
+  "op": ">=", "threshold": 16, "for": "3m", "level": "warning", "label": "DeepSeek 排队堆积" }
+{ "id": "infer-kv", "metric": "inferenceKvCachePct", "op": ">=", "threshold": 90,
+  "for": "3m", "level": "warning", "label": "KV Cache 接近耗尽" }
+{ "id": "infer-probe", "metric": "inferenceProbeOk", "op": "==", "value": false,
+  "for": "5m", "level": "critical", "label": "主动探针连续失败" }
+```
+
+- **不写 `service`** 会对每个推理实例各判一次，适合"任何一个实例不可用都要提醒我"。
+- `inferenceProbeOk` 只在 `probe.enabled=true` 时有值；因为 `idleOnly` 忙碌跳过的记录**不算失败**（没有数据就不判定），不会因为业务繁忙误报探针故障。
+- `inferenceTtftAvgMs` 来自真实请求的直方图；`inferenceProbeTtftMs` 取探针的**热态**值。冷启动秒级抖动不要用来配告警阈值，除非你确实想监控冷启动。
+- 推理快照默认在内存里保留 600 条（15 秒一轮约 2.5 小时），`for` 超过这段覆盖时告警文案会标「覆盖不足」；需要更长周期请把 `for` 控制在覆盖范围内，或后续扩展历史判定。
+- 阈值必须按模型实测基线定：DeepSeek 这类模型热态 TTFT 可能只有 200ms，而冷启动 3~6 秒；通用模板里的 5000ms 只是兜底值。
 
 几个使用要点：
 

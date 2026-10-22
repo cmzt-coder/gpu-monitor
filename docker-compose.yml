@@ -51,6 +51,11 @@ services:
       # alerts.json 里写的是 ${SMTP_PASS} 占位，少了它邮件发不出去，所以这里直接报错提醒
       SMTP_PASS: ${SMTP_PASS:?请在 .env 里填 SMTP_PASS}
 
+    # 推理服务的 API Key 变量名由 inference.json 的 apiKeyEnv 决定，名字不固定，
+    # 所以把整份 .env 注入容器（缺 .env 时 compose 本来就会因为上面的 SMTP_PASS 报错）
+    env_file:
+      - .env
+
     working_dir: /app
     command:
       - node

@@ -17,6 +17,19 @@ export const METRICS = {
   // 服务维度：一张卡被多个服务共享时，只看"整卡用了多少"没有意义
   serviceMemMiB: { scope: 'service', label: '服务显存', unit: 'MiB' },
   serviceSharePct: { scope: 'service', label: '服务显存占比', unit: '%' },
+  // 推理服务（vLLM）维度：一条规则不带 service 时会对每个已配置实例各判一次
+  inferenceUp: { scope: 'inference', label: '推理服务可用', unit: '' },
+  inferenceModelsOk: { scope: 'inference', label: '模型加载正常', unit: '' },
+  inferenceProbeOk: { scope: 'inference', label: '主动探针通过', unit: '' },
+  inferenceHealthMs: { scope: 'inference', label: '健康检查耗时', unit: 'ms' },
+  inferenceRunning: { scope: 'inference', label: '运行中请求', unit: '' },
+  inferenceWaiting: { scope: 'inference', label: '等待请求', unit: '' },
+  inferenceKvCachePct: { scope: 'inference', label: 'KV Cache 使用率', unit: '%' },
+  inferenceTtftAvgMs: { scope: 'inference', label: '首 token 平均延迟', unit: 'ms' },
+  inferenceProbeTtftMs: { scope: 'inference', label: '探针首 token 延迟', unit: 'ms' },
+  inferenceTokensPerSec: { scope: 'inference', label: '生成吞吐', unit: 'tok/s' },
+  inferenceErrorRatePct: { scope: 'inference', label: '推理错误率', unit: '%' },
+  inferencePreemptionsDelta: { scope: 'inference', label: '请求抢占数', unit: '' },
   // 硬件健康：这几个不是"性能"指标，而是"这张卡是不是在变坏"
   eccCorrectedAggregate: { scope: 'gpu', label: '显存可纠正错误（终身累计）', unit: '' },
   eccUncorrectedAggregate: { scope: 'gpu', label: '显存不可纠正错误（终身累计）', unit: '' },
@@ -158,6 +171,39 @@ export function readServiceMetric(sample, serviceName, metric) {
   if (metric === 'serviceMemMiB') return entry.memMiB ?? null;
   if (metric === 'serviceSharePct') return entry.sharePct ?? null;
   return undefined;
+}
+
+/**
+ * 取某个推理服务在某次快照里的指标。
+ * 服务从窗口里消失时：可用性按 false（服务没了就是不可用），其余指标返回 undefined，
+ * 不能拿 0 顶替——"没有排队"和"服务不见了"是两回事。
+ */
+export function readInferenceMetric(sample, serviceId, metric) {
+  const service = (sample.services || []).find((item) => item && item.id === serviceId);
+  if (!service) return metric === 'inferenceUp' ? false : undefined;
+  switch (metric) {
+    case 'inferenceUp': return service.up == null ? undefined : Boolean(service.up);
+    case 'inferenceModelsOk': return service.modelsOk == null ? undefined : Boolean(service.modelsOk);
+    case 'inferenceProbeOk': {
+      const probe = service.probe;
+      if (!probe || probe.skipped) return undefined;
+      return Boolean(probe.ok);
+    }
+    case 'inferenceHealthMs': return service.healthMs ?? undefined;
+    case 'inferenceRunning': return service.running ?? undefined;
+    case 'inferenceWaiting': return service.waiting ?? undefined;
+    case 'inferenceKvCachePct': return service.kvCachePct ?? undefined;
+    case 'inferenceTtftAvgMs': return service.ttftAvgMs ?? undefined;
+    case 'inferenceProbeTtftMs': {
+      const probe = service.probe;
+      if (!probe || probe.skipped) return undefined;
+      return probe.warmTtftMs ?? probe.ttftMs ?? undefined;
+    }
+    case 'inferenceTokensPerSec': return service.tokensPerSec ?? undefined;
+    case 'inferenceErrorRatePct': return service.errorRatePct ?? undefined;
+    case 'inferencePreemptionsDelta': return service.preemptionsDelta ?? undefined;
+    default: return undefined;
+  }
 }
 
 /**

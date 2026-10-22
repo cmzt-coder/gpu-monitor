@@ -1,0 +1,63 @@
+{
+  "enabled": true,
+  "interval": "15s",
+  "timeoutMs": 3000,
+  "services": [
+    {
+      "id": "vllm-chat",
+      "name": "Chat 模型",
+      "baseUrl": "http://127.0.0.1:8000",
+      "apiKeyEnv": "VLLM_CHAT_API_KEY",
+      "model": "your-model-id",
+      "kind": "chat",
+      "paths": {
+        "health": "/health",
+        "models": "/v1/models",
+        "metrics": "/metrics"
+      },
+      "probe": {
+        "enabled": false,
+        "interval": "10m",
+        "timeoutMs": 60000,
+        "idleOnly": true,
+        "startupGrace": "5m",
+        "warmup": true,
+        "maxTokens": 32,
+        "prompt": "ping"
+      }
+    },
+    {
+      "id": "vllm-embedding",
+      "name": "向量化服务",
+      "baseUrl": "http://127.0.0.1:8001",
+      "apiKeyEnv": "VLLM_EMBED_API_KEY",
+      "model": "your-embedding-model-id",
+      "kind": "embeddings",
+      "probe": {
+        "enabled": false,
+        "interval": "10m",
+        "timeoutMs": 30000,
+        "idleOnly": true,
+        "startupGrace": "5m",
+        "input": "ping"
+      }
+    },
+    {
+      "id": "vllm-rerank",
+      "name": "重排服务",
+      "baseUrl": "http://127.0.0.1:8002",
+      "apiKeyEnv": "VLLM_RERANK_API_KEY",
+      "model": "your-rerank-model-id",
+      "kind": "rerank",
+      "probe": {
+        "enabled": false,
+        "interval": "10m",
+        "timeoutMs": 30000,
+        "idleOnly": true,
+        "startupGrace": "5m",
+        "query": "ping",
+        "documents": ["pong"]
+      }
+    }
+  ]
+}

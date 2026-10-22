@@ -9,7 +9,7 @@
 // 没有历史库时，长周期规则的 for 会被夹到窗口长度，并在启动日志里提示。
 import {
   METRICS, compare, findThresholdConflicts, normalizeRules, parseDuration,
-  readGpuMetric, readHostMetric, readServiceMetric,
+  readGpuMetric, readHostMetric, readInferenceMetric, readServiceMetric,
 } from './rules.js';
 
 function formatValue(value, rule) {
@@ -35,6 +35,8 @@ export function createAlertEngine({
   // 长周期判定的数据来源：{ from, to } → 采样点数组（与 /api/history 的 samples 结构一致）。
   // 不传或返回 null 时会退回"只用内存窗口"的老行为。
   history = null,
+  // 推理服务的快照环形缓冲：与 GPU 采样节奏不同（15s vs 1s），单独给一条数据源
+  getInferenceSamples = null,
   notifier = null,
   now = Date.now,
   logger = console,
@@ -70,6 +72,8 @@ export function createAlertEngine({
    * 这个差异必须让页面看得见，否则用户会以为规则按自己写的时长在跑。
    */
   function effectiveForMs(rule) {
+    // 推理快照有自己的环形缓冲，不受 GPU 内存窗口长度限制
+    if (rule.scope === 'inference') return rule.forMs;
     if (!(windowMs > 0) || rule.forMs <= windowMs) return rule.forMs;
     return historyEnabled ? rule.forMs : windowMs;
   }
@@ -81,7 +85,7 @@ export function createAlertEngine({
     logger.warn?.(`[gpu-monitor] 告警阈值可疑：${item.message}`);
   }
   for (const rule of rules) {
-    if (windowMs > 0 && rule.forMs > windowMs && !history) {
+    if (rule.scope !== 'inference' && windowMs > 0 && rule.forMs > windowMs && !history) {
       logger.warn?.(`[gpu-monitor] 告警规则 ${rule.id} 的 for 超过采样窗口，且没有历史库可用，已按窗口长度判定（可调大 --window）`);
     }
   }
@@ -163,6 +167,38 @@ export function createAlertEngine({
       }];
     }
     // 服务维度：按"占卡的服务"（容器 / systemd 单元 / 用户会话）分别判定
+    if (rule.scope === 'inference') {
+      const filter = rule.service ? rule.service.toLowerCase() : null;
+      const known = new Map();
+      for (const sample of samples) {
+        for (const service of sample.services || []) {
+          if (!service?.id) continue;
+          if (filter && !`${service.id} ${service.name || ''}`.toLowerCase().includes(filter)) continue;
+          known.set(service.id, service.name || service.id);
+        }
+      }
+      // 当前快照里刚出现的实例也要纳入（比如刚配置好还没攒到第二个采样点）
+      for (const service of state?.inference?.services || []) {
+        if (!service?.id) continue;
+        if (filter && !`${service.id} ${service.name || ''}`.toLowerCase().includes(filter)) continue;
+        if (!known.has(service.id)) known.set(service.id, service.name || service.id);
+      }
+      const targets = [];
+      for (const [id, label] of known) {
+        const values = samples
+          .map((sample) => readInferenceMetric(sample, id, rule.metric))
+          .filter((value) => value !== undefined && value !== null);
+        if (values.length === 0) continue;
+        targets.push({
+          key: id,
+          label,
+          values,
+          current: values[values.length - 1],
+          firstTs: samples[0]?.t ?? now(),
+        });
+      }
+      return targets;
+    }
     if (rule.scope === 'service') {
       const filter = rule.service ? rule.service.toLowerCase() : null;
       const names = new Set();
@@ -282,10 +318,12 @@ export function createAlertEngine({
     if (rules.length === 0) return { firing: [], resolved: [] };
     const evaluatedAt = now();
     lastCheckAt = evaluatedAt;
-    const samples = mergedSamples();
+    const gpuSamples = mergedSamples();
+    const inferenceSamples = getInferenceSamples?.() || [];
     const firingNow = new Map();
 
     for (const rule of rules) {
+      const samples = rule.scope === 'inference' ? inferenceSamples : gpuSamples;
       // 需要看多久：有 for 就只看最近 for 这一段；
       // for=0 表示"当下满足就报"，那就只取最新一个点——否则会退化成"整个内存窗口都要满足"
       const source = rule.forMs > 0
