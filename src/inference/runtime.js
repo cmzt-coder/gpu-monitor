@@ -416,13 +416,17 @@ export async function scrapeService(service, previous, { fetchImpl, timeoutMs, e
   // 优先用"两次抓取之间"的增量，首帧没有增量时退回累计均值
   const ttftCountDelta = counterDelta(metricsData?.ttftCount, previous?.metrics?.ttftCount);
   const ttftSumDelta = counterDelta(metricsData?.ttftSum, previous?.metrics?.ttftSum);
-  const ttftAvgMs = ttftCountDelta > 0 && ttftSumDelta != null
-    ? (ttftSumDelta / ttftCountDelta) * 1000
+  // 首帧没有上一份快照时才用累计均值兜底；之后本轮没有新请求就返回 null。
+  // 否则空闲时会把"历史累计平均"当成"当前延迟"，TTFT 告警会在没流量时误报。
+  const hasPreviousTtft = previous?.metrics?.ttftCount != null;
+  const ttftAvgMs = hasPreviousTtft
+    ? (ttftCountDelta > 0 && ttftSumDelta != null ? (ttftSumDelta / ttftCountDelta) * 1000 : null)
     : averageFrom(metricsData?.ttftCount, metricsData?.ttftSum);
   const e2eCountDelta = counterDelta(metricsData?.e2eCount, previous?.metrics?.e2eCount);
   const e2eSumDelta = counterDelta(metricsData?.e2eSum, previous?.metrics?.e2eSum);
-  const e2eAvgMs = e2eCountDelta > 0 && e2eSumDelta != null
-    ? (e2eSumDelta / e2eCountDelta) * 1000
+  const hasPreviousE2e = previous?.metrics?.e2eCount != null;
+  const e2eAvgMs = hasPreviousE2e
+    ? (e2eCountDelta > 0 && e2eSumDelta != null ? (e2eSumDelta / e2eCountDelta) * 1000 : null)
     : averageFrom(metricsData?.e2eCount, metricsData?.e2eSum);
 
   let state = 'unknown';
@@ -673,9 +677,12 @@ export function createInferenceRuntime({
         continue;
       }
 
-      // 启动宽限期：模型加载/换入权重期间探针失败不算故障
-      if (probe.startupGraceMs > 0 && now() - state.firstSeenAt < probe.startupGraceMs) {
-        state.lastAt = now();
+      // 启动宽限期：模型加载/换入权重期间探针失败不算故障。
+      // 下一次到期时间要放到宽限期结束，而不是"跳过一次 + 再等一个完整 interval"——
+      // 否则 grace 5m、interval 10m 时，第一次真实探针会拖到启动后 10 分钟才发生。
+      const graceRemainingMs = probe.startupGraceMs - (now() - state.firstSeenAt);
+      if (probe.startupGraceMs > 0 && graceRemainingMs > 0) {
+        state.lastAt = now() - probe.intervalMs + graceRemainingMs;
         skipProbe(service, '启动宽限期内跳过');
         continue;
       }
