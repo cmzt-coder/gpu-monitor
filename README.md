@@ -65,6 +65,7 @@ node server.js --mock --port 8090       # 没有显卡的机器上先看效果
 | [启动参数与 HTTP 接口](docs/configuration.md) | 全部命令行参数与 `GET` 接口 |
 | [告警与硬件健康](docs/alerts.md) | 告警指标全表、规则写法与示例、阈值建议；ECC / 行重映射 / XID |
 | [平台支持与功能详解](docs/features.md) | 能读到什么、宿主指标的可用范围、服务归属怎么来的、历史库与长期维护 |
+| [历史库数据量增长](docs/storage-growth.md) | SQLite 增长来源、体积估算、已知限制与后续优化方向 |
 | [常见问题](docs/faq.md) | 页面或数据看起来不对时，先翻这里 |
 | [开发与实现说明](docs/development.md) | 目录结构、实现口径、本地跑 mock、冒烟测试 |
 

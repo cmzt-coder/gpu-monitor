@@ -66,6 +66,7 @@ The detailed documentation is currently **in Chinese**:
 | [Options and HTTP API](docs/configuration.md) | Every command-line flag and `GET` endpoint |
 | [Alerting and hardware health](docs/alerts.md) | Full metric table, rule syntax and examples, threshold advice; ECC / row remapping / XID |
 | [Platform support and feature details](docs/features.md) | What can be read, host-metric coverage, how service attribution works, history database and maintenance |
+| [History database growth](docs/storage-growth.md) | SQLite growth sources, size estimates, known limits and future optimization options |
 | [FAQ](docs/faq.md) | Start here when the page or the numbers look wrong |
 | [Development notes](docs/development.md) | Layout, implementation choices, running the mock, the smoke test |
 
