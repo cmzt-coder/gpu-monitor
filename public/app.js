@@ -3070,12 +3070,14 @@ function applyView() {
   const hasRight = visibleIn('.evidence-col');
   refs.work.dataset.cols = hasLeft && hasRight ? 'both' : (hasLeft ? 'left' : 'right');
 
-  // canvas 在隐藏时尺寸为 0、什么都画不出来，所以每次切换都要重画一遍
+  // 先作废尺寸缓存与推理历史的绘制签名，再 render：
+  // 否则从别的页签切到「推理」时，renderInferHistory 会因为签名没变直接返回，
+  // canvas 拿到的是隐藏时的 0 尺寸，图会空白到下一个 15 秒采样点。
+  canvasSizeCache = new WeakMap();
+  state.inferHistory.signature = '';
   render();
   // 切页签会重建/改变 canvas，旧的悬停索引（和浮窗）作废
   resetChartHover();
-  // 列宽变了（比如某一列从 8 格变成 12 格），canvas 尺寸缓存也要作废
-  canvasSizeCache = new WeakMap();
   // 顶栏厚薄变了，右列"能不能粘"的判定也要跟着重算
   syncEvidenceSticky();
 }
