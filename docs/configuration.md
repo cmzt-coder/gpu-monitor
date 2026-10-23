@@ -138,7 +138,7 @@
 | `interval` | `10m` | 探针间隔，最短 10 秒；30 秒属于允许的高频配置，但会相应增加探测请求 |
 | `timeoutMs` | `60000` | 单次请求超时；长上下文模型别用 3 秒 |
 | `idleOnly` | `true` | 只在 `running + waiting == 0` 时探，避免叠加真实流量 |
-| `startupGrace` | `5m` | 启动宽限期，加载模型/换入权重期间失败不告警 |
+| `startupGrace` | `5m` | 服务工作状态从 down 恢复为 up 后，开始跳过错峰探针；监控自身启动或配置重载时若服务已健康，不进入宽限期 |
 | `warmup` | `true` | chat/completions 先发一次冷启动请求，再发一次热态请求；两条都会落库 |
 | `stream` | `true` | 流式请求，才能测出真正的首 token 时间 |
 | `maxTokens` | `32` | 生成上限。推理模型别设太小，否则 token 全被 reasoning 吃掉 |

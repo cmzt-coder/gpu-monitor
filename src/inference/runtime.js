@@ -343,6 +343,38 @@ function round2(value) {
   return value == null || !Number.isFinite(value) ? value : Math.round(value * 100) / 100;
 }
 
+/**
+ * 根据服务健康状态推进探针生命周期。
+ *
+ * 宽限期只跟在“服务从 down 恢复为 up”之后：
+ * - 监控第一次看到服务时已经 up：直接开始探针
+ * - 第一次看到时仍 down：等恢复后再进入宽限期
+ * - 运行过程中 up -> down -> up：按模型服务发生一次重启处理
+ * - 配置热重载、监控自身重启不会人为制造宽限期
+ */
+export function advanceProbeAvailability(state, snapshot, startupGraceMs, at = Date.now()) {
+  const up = snapshot?.up === true;
+  const previous = state.lastUp ?? null;
+  if (previous == null) {
+    state.lastUp = up;
+    state.downSince = up ? null : at;
+    state.graceUntil = 0;
+  } else if (previous !== up) {
+    state.lastUp = up;
+    if (up) {
+      state.graceUntil = state.downSince != null && startupGraceMs > 0 ? at + startupGraceMs : 0;
+      state.downSince = null;
+    } else {
+      state.downSince = at;
+      state.graceUntil = 0;
+    }
+  }
+  return {
+    up,
+    graceRemainingMs: Math.max(0, (state.graceUntil || 0) - at),
+  };
+}
+
 export async function scrapeService(service, previous, { fetchImpl, timeoutMs, env, now }) {
   const { headers, authMissing } = authHeaders(service, env);
   const urlOf = (key) => `${service.baseUrl}${service.paths[key]}`;
@@ -657,7 +689,15 @@ export function createInferenceRuntime({
   function probeStateFor(serviceId) {
     let state = runtime.probeStates.get(serviceId);
     if (!state) {
-      state = { firstSeenAt: 0, lastAt: 0, inFlight: false, lastResult: null, history: [] };
+      state = {
+        lastUp: null,
+        downSince: null,
+        graceUntil: 0,
+        lastAt: 0,
+        inFlight: false,
+        lastResult: null,
+        history: [],
+      };
       runtime.probeStates.set(serviceId, state);
     }
     return state;
@@ -747,12 +787,12 @@ export function createInferenceRuntime({
       if (!snapshot || snapshot.state === 'unknown') continue;
 
       const state = probeStateFor(service.id);
-      if (!state.firstSeenAt) state.firstSeenAt = now();
+      const availability = advanceProbeAvailability(state, snapshot, probe.startupGraceMs, now());
       if (state.inFlight) continue;
       if (state.lastAt && now() - state.lastAt < probe.intervalMs) continue;
 
       // 服务已经判死时不再发探针：等一个 60 秒超时没有任何收益
-      if (snapshot.up === false) {
+      if (!availability.up) {
         state.lastAt = now();
         skipProbe(service, '服务不可用，跳过探针');
         continue;
@@ -761,9 +801,8 @@ export function createInferenceRuntime({
       // 启动宽限期：模型加载/换入权重期间探针失败不算故障。
       // 下一次到期时间要放到宽限期结束，而不是"跳过一次 + 再等一个完整 interval"——
       // 否则 grace 5m、interval 10m 时，第一次真实探针会拖到启动后 10 分钟才发生。
-      const graceRemainingMs = probe.startupGraceMs - (now() - state.firstSeenAt);
-      if (probe.startupGraceMs > 0 && graceRemainingMs > 0) {
-        state.lastAt = now() - probe.intervalMs + graceRemainingMs;
+      if (availability.graceRemainingMs > 0) {
+        state.lastAt = now() - probe.intervalMs + availability.graceRemainingMs;
         skipProbe(service, '启动宽限期内跳过');
         continue;
       }

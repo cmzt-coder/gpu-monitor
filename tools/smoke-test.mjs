@@ -89,7 +89,12 @@ import {
 import {
   counterDelta, extractVllmMetrics, histogramQuantile, parsePrometheus, subtractHistograms,
 } from '../src/inference/metrics.js';
-import { createInferenceRuntime, runProbe, scrapeService } from '../src/inference/runtime.js';
+import {
+  advanceProbeAvailability,
+  createInferenceRuntime,
+  runProbe,
+  scrapeService,
+} from '../src/inference/runtime.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
@@ -3412,6 +3417,33 @@ vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
   assert.equal(disableRuntime.snapshot().services.length, 0, '显式关闭后不能继续沿用旧服务');
   disableRuntime.close();
   fs.rmSync(configDir, { recursive: true, force: true });
+
+  // 启动宽限期跟随被监控服务恢复，而不是监控进程第一次看到服务的时间。
+  const probeHealthState = {};
+  let availability = advanceProbeAvailability(probeHealthState, { up: true }, 120000, 1000);
+  assert.equal(availability.graceRemainingMs, 0, '监控启动时服务已健康，不应进入宽限期');
+  availability = advanceProbeAvailability(probeHealthState, { up: false }, 120000, 2000);
+  assert.equal(availability.graceRemainingMs, 0, '服务刚开始故障时不应执行探针');
+  assert.equal(probeHealthState.downSince, 2000);
+  availability = advanceProbeAvailability(probeHealthState, { up: true }, 120000, 5000);
+  assert.equal(availability.graceRemainingMs, 120000, '服务恢复时开始新的启动宽限期');
+  availability = advanceProbeAvailability(probeHealthState, { up: true }, 120000, 10000);
+  assert.equal(availability.graceRemainingMs, 115000, '监控配置重载或重复抓取不能重置宽限期');
+  assert.equal(advanceProbeAvailability(probeHealthState, { up: true }, 120000, 125000).graceRemainingMs, 0);
+
+  const initiallyDownState = {};
+  assert.equal(advanceProbeAvailability(initiallyDownState, { up: false }, 120000, 3000).graceRemainingMs, 0);
+  assert.equal(
+    advanceProbeAvailability(initiallyDownState, { up: true }, 120000, 8000).graceRemainingMs,
+    120000,
+    '监控启动时模型仍在加载，恢复后仍应进入宽限期',
+  );
+  const monitorRestartState = {};
+  assert.equal(
+    advanceProbeAvailability(monitorRestartState, { up: true }, 120000, 9000).graceRemainingMs,
+    0,
+    '监控自身重启且模型已健康时不应制造宽限期',
+  );
 
   const inferHealthBase = {
     status: 'ok', lastSampleAt: Date.now(), intervalMs: 1000, gpus: [], processes: [],
