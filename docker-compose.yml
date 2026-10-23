@@ -79,6 +79,9 @@ services:
     volumes:
       # 代码只读挂载：容器不碰代码，升级就是 git pull + restart
       - .:/app:ro
+      # 页面里的推理配置需要写回 inference.json；只把这一份配置单独放开写权限。
+      # 首次部署请先把 inference.example.json 复制成 inference.json，避免 Docker 创建同名目录。
+      - ./inference.json:/app/inference.json:rw
       # 历史库单独可写（注意：容器以 root 写，宿主上这个目录的属主会变成 root）
       - ./data:/app/data
       # 占用进程的 PID → 用户名

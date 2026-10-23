@@ -7,6 +7,7 @@ import { getLang, hasKey, initI18n, onLangChange, setLang, t, tn } from './i18n/
 import { applyStaticI18n } from './i18n/dom.js';
 import { enhanceDropdown } from './dropdown.js';
 import { backendText } from './backend-text.js';
+import { createInferenceConfigController } from './inference-config.js';
 
 // GPU 显存负载监控前端：轮询 /api/state，自行维护内存中的实时窗口并画曲线
 const $ = (id) => document.getElementById(id);
@@ -116,6 +117,7 @@ const refs = {
   inferEmpty: $('infer-empty'),
   inferEmptyText: $('infer-empty-text'),
   inferHistSub: $('infer-hist-sub'),
+  btnInferConfig: $('btn-infer-config'),
   inferHistRange: $('infer-hist-range'),
   inferHistService: $('infer-hist-service'),
   inferServiceCards: $('infer-service-cards'),
@@ -208,6 +210,8 @@ const state = {
   },
   stopped: false,
 };
+
+let inferConfigController = null;
 
 // label 用 getter 而不是普通字段：这些表是模块加载时建的，
 // 写成固定字符串会把"模块加载那一刻的语言"冻住，切语言后按钮文字就不动了。
@@ -2082,7 +2086,7 @@ function inferGroupTiles(service, group) {
 
 function renderInferServiceCards(info) {
   const history = state.inferHistory;
-  const services = (info.services || []).filter((service) => !history.service || service.id === history.service);
+  const services = (info?.services || []).filter((service) => !history.service || service.id === history.service);
   const groups = services.map((service) => state.inferCardGroups[service.id] || 'load');
   const signature = `${getLang()}#${history.service ?? '*'}#${services.map((service, index) => `${groups[index]}¦${[
     service.id, service.state, service.model, service.version,
@@ -2103,7 +2107,7 @@ function renderInferServiceCards(info) {
   if (services.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'infer-service-empty';
-    empty.textContent = t('infer.empty.text');
+    empty.textContent = t('inferConfig.noServices');
     refs.inferServiceCards.appendChild(empty);
     return;
   }
@@ -2346,13 +2350,26 @@ function renderInferencePage() {
   const card = inferPageCard();
   if (!card) return;
   const info = state.meta?.inference;
+  card.hidden = state.view === 'nav' && state.page !== 'inference';
   if (!info?.loaded) {
-    card.hidden = true;
+    refs.inferHistSub.textContent = t('inferConfig.notLoaded');
+    renderInferPageControls();
+    renderInferServiceCards(null);
+    refs.inferProbeSub.textContent = '';
+    refs.inferProbeWrap.hidden = true;
+    refs.inferHistEmpty.hidden = false;
+    refs.inferHistEmptyTitle.textContent = t('inferConfig.notLoadedTitle');
+    refs.inferHistEmptyText.textContent = t('inferConfig.notLoadedText');
     return;
   }
-  card.hidden = state.view === 'nav' && state.page !== 'inference';
 
   const history = state.inferHistory;
+  if (history.service && !(info.services || []).some((service) => service.id === history.service)) {
+    history.service = null;
+    history.page = 0;
+    history.fetchedAt = 0;
+    history.cardSignature = '';
+  }
   renderInferPageControls();
   const total = info.summary?.total ?? (info.services || []).length;
   const up = info.summary?.up ?? 0;
@@ -3662,6 +3679,12 @@ function closeExportPanel() {
 }
 
 refs.btnExport.addEventListener('click', openExportPanel);
+inferConfigController = createInferenceConfigController({
+  onSaved() {
+    poll();
+  },
+});
+refs.btnInferConfig?.addEventListener('click', () => inferConfigController.open());
 
 /* 顶栏两个自绘下拉：展示模式与界面语言。
    组件只管开合、键盘、ARIA；选中之后做什么由这里决定。 */
@@ -3711,6 +3734,7 @@ function resetTextSignatures() {
 /** 语言变化的统一入口：静态文案 → 开关状态 → 作废签名 → 用内存里的状态整帧重渲染 */
 function applyLanguage(lang) {
   applyStaticI18n(document);
+  inferConfigController?.refresh();
   langDropdown.setValue(lang);
   // 展示模式那两个选项的文字也被翻译了，按钮上那行要跟着变（选项本身不重写）
   viewDropdown.refresh();

@@ -261,10 +261,13 @@ curl -s -o /dev/null -w 'health %{http_code}\n' http://127.0.0.1:8090/api/health
 
 ```bash
 cp .env.example .env        # 填 SMTP_PASS；8 卡机器再加 INTERVAL=3000
+cp inference.example.json inference.json   # 页面配置会写这个文件；先复制，避免 Docker 创建同名目录
 docker compose up -d --build
 docker compose logs -f
 docker compose exec gpu-monitor node tools/notify-test.mjs     # 验邮件通道
 ```
+
+需要在页面里编辑推理服务时，在 `.env` 设置随机长字符串 `GPU_MONITOR_ADMIN_TOKEN` 后重建容器。`inference.json` 是唯一单独放开读写权限的文件，代码目录仍然只读挂载。
 
 难点只有一个：**这个看板的工作是"看透宿主"，所以容器拿到的权限比一般容器多**，`docker-compose.yml` 里逐条写了各自为了什么：
 

@@ -41,7 +41,7 @@ print_usage() {
   PID：.run/gpu-monitor.pid    日志：gpu-monitor.log
 
 本机部署配置：gpu-monitor.conf（模板 gpu-monitor.conf.example，不进版本库）
-  可放 TZ / SMTP_PASS / PORT / INTERVAL / NODE_BIN 这些"只属于这台机器"的值，
+  可放 TZ / SMTP_PASS / GPU_MONITOR_ADMIN_TOKEN / PORT / INTERVAL / NODE_BIN 这些"只属于这台机器"的值，
   放进去之后启动就不用每次带参数。优先级：命令行 > 本文件 > 内置默认。
 
 示例：

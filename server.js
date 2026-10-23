@@ -3,6 +3,7 @@
 // 用法：node server.js --port 8090 [--host 0.0.0.0] [--interval 1000] [--window 300] [--mock]
 // 采集与调度在 src/collector.js，历史库在 src/store/，这里只做参数解析、路由与静态文件。
 import http from 'node:http';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -15,6 +16,11 @@ import { createCollector } from './src/collector.js';
 import { createAlertsRuntime } from './src/alerts/runtime.js';
 import { evaluateHealth } from './src/health.js';
 import { createInferenceRuntime } from './src/inference/runtime.js';
+import {
+  InferenceConfigFileError,
+  readInferenceConfigForEdit,
+  saveInferenceConfig,
+} from './src/inference/config-store.js';
 import {
   GPU_CSV_HEADER,
   GPU_CSV_HEADER_FULL,
@@ -78,6 +84,7 @@ const HELP = `GPU 显存负载监控服务
       --inference <路径>  推理监控配置（默认 inference.json，不存在则不启用）
       --no-inference      不启用推理服务监控
       --no-inference-reload  关掉推理配置热加载（默认改了 inference.json 会自动重新加载）
+  GPU_MONITOR_ADMIN_TOKEN 环境变量：启用页面里的推理配置编辑；未设置时配置接口保持关闭
 
 历史库（SQLite，Node 22.13+ 内置）：
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
@@ -601,6 +608,116 @@ function limitFrom(url) {
   return Math.min(options.windowSamples, requested);
 }
 
+const ADMIN_TOKEN_ENV = 'GPU_MONITOR_ADMIN_TOKEN';
+const CONFIG_BODY_LIMIT = 1024 * 1024;
+
+function adminToken() {
+  return String(process.env[ADMIN_TOKEN_ENV] || '').trim();
+}
+
+function tokenMatches(actual, expected) {
+  const left = Buffer.from(String(actual || ''), 'utf8');
+  const right = Buffer.from(String(expected || ''), 'utf8');
+  if (!left.length || left.length !== right.length) return false;
+  return crypto.timingSafeEqual(left, right);
+}
+
+function authorizeInferenceConfig(req, res) {
+  const expected = adminToken();
+  if (!expected) {
+    sendJson(res, 503, {
+      ok: false,
+      code: 'admin_token_not_configured',
+      error: `配置编辑未启用：请在启动环境中设置 ${ADMIN_TOKEN_ENV}`,
+    });
+    return false;
+  }
+  const match = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || '').trim());
+  if (!match || !tokenMatches(match[1], expected)) {
+    sendJson(res, 401, { ok: false, code: 'unauthorized', error: '管理员令牌无效' });
+    return false;
+  }
+  return true;
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > CONFIG_BODY_LIMIT) {
+      throw new InferenceConfigFileError('body_too_large', '请求内容超过 1 MiB 上限', { status: 413 });
+    }
+    chunks.push(chunk);
+  }
+  const text = Buffer.concat(chunks).toString('utf8');
+  try {
+    return JSON.parse(text || '{}');
+  } catch (error) {
+    throw new InferenceConfigFileError('invalid_json', `请求内容不是合法 JSON：${error.message}`, { status: 400 });
+  }
+}
+
+async function handleInferenceConfigRoute(req, res) {
+  if (!authorizeInferenceConfig(req, res)) return;
+  const runtimeSnapshot = inferenceRuntime?.snapshot();
+  if (!runtimeSnapshot?.enabled) {
+    sendJson(res, 409, { ok: false, code: 'inference_disabled', error: '服务启动时带了 --no-inference' });
+    return;
+  }
+
+  const file = path.resolve(runtimeSnapshot.configPath);
+  try {
+    if (req.method === 'GET') {
+      const editable = await readInferenceConfigForEdit(file);
+      const runtime = inferenceRuntime.snapshot();
+      sendJson(res, 200, {
+        ok: true,
+        ...editable,
+        path: file,
+        runtime: {
+          loaded: runtime.loaded,
+          autoReload: runtime.autoReload,
+          reloadedAt: runtime.reloadedAt,
+          lastReloadError: runtime.lastReloadError,
+        },
+      });
+      return;
+    }
+
+    if (req.method === 'PUT') {
+      const body = await readJsonBody(req);
+      const saved = await saveInferenceConfig(file, {
+        config: body.config,
+        revision: body.revision,
+      });
+      const reload = await inferenceRuntime.reload();
+      // 显式 enabled=false 是合法保存：reload 会清空服务并返回 loaded=false，不算失败。
+      const reloadOk = reload.reloaded || body.config?.enabled === false;
+      sendJson(res, reloadOk ? 200 : 422, {
+        ok: reloadOk,
+        ...saved,
+        reload,
+        runtime: inferenceRuntime.snapshot(),
+      });
+      return;
+    }
+
+    sendJson(res, 405, { ok: false, code: 'method_not_allowed', error: '配置接口只支持 GET / PUT' });
+  } catch (error) {
+    if (error instanceof InferenceConfigFileError) {
+      sendJson(res, error.status || 400, {
+        ok: false,
+        code: error.code,
+        error: error.message,
+        warnings: error.warnings,
+      });
+      return;
+    }
+    sendJson(res, 500, { ok: false, code: 'config_io_error', error: error?.message || String(error) });
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
@@ -608,6 +725,12 @@ const server = http.createServer(async (req, res) => {
   // 页面请求都算"有人在看"，采集调度据此决定满速还是空闲降频。
   // /api/health 是探针在定时打，不能算：否则探活越勤，空闲降频越永远不会生效。
   if (pathname !== '/api/health') collector.noteClient();
+
+  // 推理配置写操作必须在通用 GET/HEAD 检查之前分流；接口本身受独立管理员令牌保护。
+  if (pathname === '/api/inference/config') {
+    await handleInferenceConfigRoute(req, res);
+    return;
+  }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     sendJson(res, 405, { error: 'method_not_allowed' });

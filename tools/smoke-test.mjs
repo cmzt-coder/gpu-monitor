@@ -82,9 +82,14 @@ import { runPreflight } from './preflight.mjs';
 import { evaluateHealth } from '../src/health.js';
 import { loadInferenceConfig, normalizeInferenceConfig, parseDurationMs } from '../src/inference/config.js';
 import {
+  InferenceConfigFileError,
+  readInferenceConfigForEdit,
+  saveInferenceConfig,
+} from '../src/inference/config-store.js';
+import {
   counterDelta, extractVllmMetrics, histogramQuantile, parsePrometheus, subtractHistograms,
 } from '../src/inference/metrics.js';
-import { runProbe, scrapeService } from '../src/inference/runtime.js';
+import { createInferenceRuntime, runProbe, scrapeService } from '../src/inference/runtime.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
@@ -1107,6 +1112,10 @@ assert.ok(appJs.includes('refs.appEl.dataset.dense'), 'app.js 要按展示模式
 assert.ok(appJs.includes('utilView.footShort'), 'KPI 脚注在紧凑模式下要用短文案');
 assert.ok(appJs.includes('syncEvidenceSticky'), '右列 sticky 的判定要跟着顶栏厚薄重算');
 assert.ok(appJs.includes("from './gpu-card-parts.js'"), '各卡的两行判定要用抽出来的纯函数，别再各写一份');
+assert.ok(indexHtml.includes('id="infer-config-dialog"'), '推理页要提供配置弹窗');
+assert.ok(indexHtml.includes('id="btn-infer-config"'), '推理页卡头要有配置入口');
+assert.ok(appJs.includes("from './inference-config.js'"), '配置弹窗逻辑应独立成模块，避免继续膨胀 app.js');
+assert.ok(stylesCss.includes('.infer-config__layout'), '配置弹窗要保留服务列表与编辑区两栏布局');
 
 /* ---------- 前端：导出弹窗的时间口径说明（静态结构） ---------- */
 // 导出的时间列有两列（本地时间 + UTC），说明文字必须跟着列名走：
@@ -3261,7 +3270,7 @@ vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
     if (url.endsWith('/health')) return new Response('', { status: 200 });
     if (url.endsWith('/version')) return new Response(JSON.stringify({ version: '0.31.0' }), { status: 200 });
     if (url.endsWith('/v1/models')) {
-      if (options.headers?.Authorization !== 'Bearer secret') {
+      if (!['Bearer secret', 'Bearer direct-secret'].includes(options.headers?.Authorization)) {
         return new Response('{"error":"Unauthorized"}', { status: 401 });
       }
       return new Response(JSON.stringify({ data: [{ id: 'm' }] }), { status: 200 });
@@ -3295,6 +3304,113 @@ vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
   assert.equal(missingAuth.snapshot.modelsOk, null);
   assert.equal(missingAuth.snapshot.state, 'degraded', '缺 Key 不能把服务判成完全正常');
   assert.match(missingAuth.snapshot.error, /DEMO_KEY/, '错误提示要指出缺哪个环境变量');
+
+  // 直接密钥：运行时可用，但页面读取必须脱敏；留空保存时沿用旧密钥。
+  const directKeyConfig = normalizeInferenceConfig({
+    services: [{
+      id: 'direct', baseUrl: 'http://127.0.0.1:8000', model: 'm', apiKey: 'direct-secret',
+    }],
+  });
+  assert.equal(directKeyConfig.config.services[0].apiKey, 'direct-secret');
+  const directAuthScrape = await scrapeService(directKeyConfig.config.services[0], null, {
+    fetchImpl: fakeFetch,
+    timeoutMs: 1000,
+    env: {},
+    now: Date.now,
+  });
+  assert.equal(directAuthScrape.snapshot.modelsOk, true, '直接密钥应该用于 /v1/models 鉴权');
+
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gpu-monitor-infer-config-'));
+  const configFile = path.join(configDir, 'inference.json');
+  fs.writeFileSync(configFile, `${JSON.stringify({
+    enabled: true,
+    interval: '15s',
+    timeoutMs: 3000,
+    services: [{
+      id: 'editable',
+      name: 'Editable',
+      baseUrl: 'http://127.0.0.1:8000',
+      model: 'm',
+      kind: 'chat',
+      apiKey: 'keep-me',
+      probe: { enabled: false },
+    }],
+  }, null, 2)}\n`);
+  const editable = await readInferenceConfigForEdit(configFile, { env: {} });
+  assert.equal(editable.config.services[0].authType, 'direct');
+  assert.equal(editable.config.services[0].apiKeySet, true);
+  assert.equal(Object.hasOwn(editable.config.services[0], 'apiKey'), false, '读取接口绝不能回显直接密钥');
+  assert.equal(Object.hasOwn(editable.config.services[0], 'sourceId'), false, '读取接口不能提供可复制密钥的隐式引用');
+  editable.config.services[0].name = 'Renamed';
+  const savedEdit = await saveInferenceConfig(configFile, {
+    config: editable.config,
+    revision: editable.revision,
+    env: {},
+    now: () => Date.parse('2026-10-23T07:00:00.000Z'),
+  });
+  const savedRaw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.equal(savedRaw.services[0].apiKey, 'keep-me', '直接密钥留空保存时必须沿用原值');
+  assert.equal(savedRaw.services[0].name, 'Renamed');
+  assert.ok(savedEdit.backup && fs.existsSync(savedEdit.backup), '覆盖配置前必须留备份');
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(configFile).mode & 0o777, 0o600, '含密钥的配置文件应写成 600');
+    assert.equal(fs.statSync(savedEdit.backup).mode & 0o777, 0o600, '含密钥的备份文件也应写成 600');
+  }
+  await assert.rejects(
+    saveInferenceConfig(configFile, { config: editable.config, revision: editable.revision, env: {} }),
+    (error) => error instanceof InferenceConfigFileError && error.code === 'revision_conflict',
+    '旧版本号保存必须被拒绝，避免覆盖其他窗口的修改',
+  );
+
+  const afterEdit = await readInferenceConfigForEdit(configFile, { env: {} });
+  afterEdit.config.services[0].authType = 'env';
+  afterEdit.config.services[0].apiKeyEnv = 'EDITABLE_KEY';
+  const savedEnv = await saveInferenceConfig(configFile, {
+    config: afterEdit.config,
+    revision: afterEdit.revision,
+    env: {},
+  });
+  const envRaw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  assert.equal(envRaw.services[0].apiKey, undefined, '切到环境变量模式后必须清除直接密钥');
+  assert.equal(envRaw.services[0].apiKeyEnv, 'EDITABLE_KEY');
+  assert.equal(savedEnv.config.services[0].authType, 'env');
+  assert.equal(savedEnv.config.services[0].apiKeyEnvConfigured, false);
+
+  const concurrentBase = await readInferenceConfigForEdit(configFile, { env: {} });
+  const concurrentResults = await Promise.allSettled([1, 2].map((n) => saveInferenceConfig(configFile, {
+    config: { ...concurrentBase.config, timeoutMs: 3000 + n },
+    revision: concurrentBase.revision,
+    env: {},
+  })));
+  assert.equal(concurrentResults.filter((item) => item.status === 'fulfilled').length, 1, '同时保存只能有一个成功');
+  assert.equal(
+    concurrentResults.filter((item) => item.status === 'rejected' && item.reason?.code === 'revision_conflict').length,
+    1,
+    '并发写入的另一个请求必须得到版本冲突',
+  );
+
+  fs.writeFileSync(configFile, `${JSON.stringify({
+    enabled: true,
+    interval: '15s',
+    services: [{ id: 'disable-test', baseUrl: 'http://demo', model: 'm', apiKeyEnv: 'DEMO_KEY' }],
+  }, null, 2)}\n`);
+  const disableRuntime = createInferenceRuntime({
+    options: { inferencePath: configFile },
+    watch: false,
+    fetchImpl: fakeFetch,
+    env: { DEMO_KEY: 'secret' },
+    now: Date.now,
+  });
+  await disableRuntime.start();
+  assert.equal(disableRuntime.snapshot().loaded, true);
+  assert.equal(disableRuntime.snapshot().services.length, 1);
+  fs.writeFileSync(configFile, `${JSON.stringify({ enabled: false, services: [] }, null, 2)}\n`);
+  const disabledReload = await disableRuntime.reload();
+  assert.equal(disabledReload.disabled, true, '显式 enabled=false 要作为正常关闭处理');
+  assert.equal(disableRuntime.snapshot().loaded, false);
+  assert.equal(disableRuntime.snapshot().services.length, 0, '显式关闭后不能继续沿用旧服务');
+  disableRuntime.close();
+  fs.rmSync(configDir, { recursive: true, force: true });
 
   const inferHealthBase = {
     status: 'ok', lastSampleAt: Date.now(), intervalMs: 1000, gpus: [], processes: [],

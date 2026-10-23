@@ -274,7 +274,13 @@
             <h2 class="card__title" id="infer-hist-h" data-i18n="inferHist.title">推理服务状态</h2>
             <p class="card__sub" id="infer-hist-sub"></p>
           </div>
-          <div class="chips" id="infer-hist-service" role="group" aria-label="按推理服务过滤" data-i18n-attr="aria-label:inferHist.service.group"></div>
+          <div class="infer-head-actions">
+            <button type="button" class="btn btn--ghost btn--sm" id="btn-infer-config">
+              <svg class="icon" aria-hidden="true"><use href="#icon-braces"></use></svg>
+              <span data-i18n="inferConfig.open">配置</span>
+            </button>
+            <div class="chips" id="infer-hist-service" role="group" aria-label="按推理服务过滤" data-i18n-attr="aria-label:inferHist.service.group"></div>
+          </div>
         </div>
         <div class="infer-service-grid" id="infer-service-cards"></div>
         <div class="infer-probe-head">
@@ -459,6 +465,57 @@
     <div class="export__actions">
       <button type="button" class="btn btn--ghost" id="export-cancel" data-i18n="export.cancel">取消</button>
       <button type="button" class="btn btn--primary" id="export-confirm" data-i18n="export.confirm">下载</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog class="infer-config" id="infer-config-dialog" aria-labelledby="infer-config-title">
+  <div class="infer-config__head">
+    <div>
+      <h2 class="infer-config__title" id="infer-config-title" data-i18n="inferConfig.title">推理服务配置</h2>
+      <p class="infer-config__sub" data-i18n="inferConfig.sub">保存后会写入 inference.json，并立即重新加载监控配置。</p>
+    </div>
+    <button type="button" class="export__close" id="infer-config-close" aria-label="关闭" data-i18n-attr="aria-label:common.close">✕</button>
+  </div>
+
+  <section class="infer-config__auth" id="infer-config-auth">
+    <div class="infer-config__auth-icon" aria-hidden="true">§</div>
+    <div class="infer-config__auth-copy">
+      <h3 data-i18n="inferConfig.auth.title">输入管理员令牌</h3>
+      <p data-i18n="inferConfig.auth.text">配置接口与普通监控页面分离。令牌只保存在当前浏览器标签页，不会写入配置。</p>
+    </div>
+    <form class="infer-config__auth-form" id="infer-config-auth-form">
+      <label class="visually-hidden" for="infer-config-token" data-i18n="inferConfig.auth.label">管理员令牌</label>
+      <input class="input" id="infer-config-token" type="password" autocomplete="off" spellcheck="false" placeholder="GPU_MONITOR_ADMIN_TOKEN">
+      <button type="submit" class="btn btn--primary" id="infer-config-unlock" data-i18n="inferConfig.auth.unlock">解锁配置</button>
+    </form>
+    <p class="infer-config__message" id="infer-config-auth-message" role="status" aria-live="polite"></p>
+  </section>
+
+  <div class="infer-config__main" id="infer-config-main" hidden>
+    <div class="infer-config__meta">
+      <span id="infer-config-path"></span>
+      <span id="infer-config-reload"></span>
+    </div>
+    <div class="infer-config__general" id="infer-config-general"></div>
+    <div class="infer-config__layout">
+      <aside class="infer-config__sidebar">
+        <div class="infer-config__sidebar-head">
+          <strong data-i18n="inferConfig.services">服务列表</strong>
+          <button type="button" class="btn btn--ghost btn--sm" id="infer-config-add" data-i18n="inferConfig.add">新增服务</button>
+        </div>
+        <div class="infer-config__list" id="infer-config-list" role="list"></div>
+      </aside>
+      <section class="infer-config__editor" id="infer-config-editor"></section>
+    </div>
+    <p class="infer-config__message" id="infer-config-message" role="status" aria-live="polite"></p>
+  </div>
+
+  <div class="infer-config__foot" id="infer-config-foot" hidden>
+    <span class="infer-config__dirty" id="infer-config-dirty"></span>
+    <div class="infer-config__actions">
+      <button type="button" class="btn btn--ghost" id="infer-config-cancel" data-i18n="common.cancel">取消</button>
+      <button type="button" class="btn btn--primary" id="infer-config-save" data-i18n="inferConfig.save">保存配置</button>
     </div>
   </div>
 </dialog>

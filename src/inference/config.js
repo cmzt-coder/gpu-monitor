@@ -126,6 +126,15 @@ function normalizeService(raw, index, warnings, seen) {
     }
   }
 
+  // 页面保存的直接密钥只存在于本机 inference.json；读取接口会统一脱敏。
+  // 两种方式同时存在时直接密钥优先，避免同一个服务携带两套互相矛盾的凭据。
+  const apiKey = raw?.apiKey != null && String(raw.apiKey).trim()
+    ? String(raw.apiKey).trim()
+    : null;
+  if (apiKey && apiKeyEnv) {
+    warnings.push({ index, id, message: 'apiKey 与 apiKeyEnv 同时配置，将优先使用 apiKey' });
+  }
+
   seen.add(id.toLowerCase());
   return {
     id,
@@ -136,6 +145,7 @@ function normalizeService(raw, index, warnings, seen) {
     // 可选：vLLM 的 --max-num-seqs，用来显示并发余量；不填就只显示运行数
     maxConcurrency: Number(raw?.maxConcurrency) > 0 ? Math.floor(Number(raw.maxConcurrency)) : null,
     apiKeyEnv,
+    apiKey,
     headers: normalizeHeaders(raw?.headers, warnings, id),
     paths: {
       health: normalizePath(raw?.paths?.health, DEFAULT_PATHS.health),

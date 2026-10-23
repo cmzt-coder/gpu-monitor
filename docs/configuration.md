@@ -87,6 +87,10 @@
 
 推理服务的清单写在仓库根目录的 `inference.json` 里。它和 `alerts.json` 一样属于**本机配置**，已经进 `.gitignore`；仓库里只有 [`inference.example.json`](../inference.example.json) 模板。
 
+只要启动进程设置了环境变量 `GPU_MONITOR_ADMIN_TOKEN`，页面「推理」页签右上角就会出现「配置」按钮。弹窗支持查看、新增、修改和删除服务；浏览器只会在当前标签页的 `sessionStorage` 中记住管理员令牌。未设置这个变量时，配置写接口保持关闭，普通监控页面不受影响。
+
+保存流程会先校验完整配置，再原子写入 `inference.json`，覆盖前生成 `inference.json.bak.<时间>` 备份，并把配置文件和备份权限设为 `600`。配置接口使用版本哈希检查并发修改，另一个窗口已经保存过时会返回冲突，避免静默覆盖。
+
 ```json
 {
   "enabled": true,
@@ -114,7 +118,8 @@
 | `services[].id` | 是 | 稳定标识，只允许字母、数字、点、下划线和短横线；上线后不要改，否则历史会断档 |
 | `services[].name` | 否 | 页面显示名，默认取 `id` |
 | `services[].baseUrl` | 是 | 写到端口即可，不要带 `/v1`；末尾斜杠会自动去掉 |
-| `services[].apiKeyEnv` | 视部署 | **环境变量名**，不是密钥本身。vLLM 启用了 `--api-key` 时必填 |
+| `services[].apiKeyEnv` | 二选一 | **环境变量名**，不是密钥本身。适合 Docker、systemd 和需要把密钥与配置分离的部署 |
+| `services[].apiKey` | 二选一 | 直接密钥。页面里可以直接填写；只保存在本机 `inference.json`（权限 600），读取接口不会回显。同时存在时优先使用 `apiKey` |
 | `services[].model` | 是 | 必须与 `/v1/models` 返回的 `id` 完全一致，用来发现配置漂移 |
 | `services[].kind` | 否 | `chat` / `completions` / `embeddings` / `rerank`，默认 `chat` |
 | `services[].maxConcurrency` | 否 | vLLM 的 `--max-num-seqs`；填了以后卡片会显示“运行中 / 并发上限”的占用比例 |
@@ -154,7 +159,7 @@
 
 使用要点：
 
-- **密钥只放环境变量**。每个服务各自独立 key 时，`apiKeyEnv` 必须指向不同的变量名；Docker 部署时把变量写进 `.env`，compose 会整份注入容器。
+- **环境变量模式优先推荐**：每个服务各自独立 key 时，`apiKeyEnv` 指向不同变量名；Docker 部署时把变量写进 `.env`，compose 会整份注入容器。也可以在配置弹窗中选「直接密钥」，此时密钥写入本机 `inference.json`，文件不会进入 Git，且读取接口只返回“是否已设置”。修改环境变量本身仍需要重启进程；只修改 `inference.json` 会热重载。
 - `/health` 与 `/metrics` 在 vLLM 里通常不需要 API Key；`/v1/models` 在启用 `--api-key` 后需要。抓不到模型列表时页面会把该服务标成「降级」并指出缺哪个环境变量，而不是直接判死。
 - 配置文件改完会自动重载；JSON 写坏或某一条不合法时**沿用上一次可用的配置**，问题记在 `warnings` 里，不会把整页监控弄没。
 - 怎么快速验证一台 vLLM 能不能接：`curl -sS http://<host>:<port>/health`、`curl -sS http://<host>:<port>/metrics | grep vllm:num_requests_running`、带 Bearer 请求一次 `/v1/models`。

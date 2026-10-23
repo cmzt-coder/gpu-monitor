@@ -17,7 +17,9 @@ const VERSION_TTL_MS = 300000;
 function authHeaders(service, env) {
   const headers = { ...(service.headers || {}) };
   let authMissing = false;
-  if (service.apiKeyEnv) {
+  if (service.apiKey) {
+    headers.Authorization = `Bearer ${service.apiKey}`;
+  } else if (service.apiKeyEnv) {
     const key = env?.[service.apiKeyEnv];
     if (key) headers.Authorization = `Bearer ${key}`;
     else authMissing = true;
@@ -615,6 +617,14 @@ export function createInferenceRuntime({
       const reason = loaded.error
         || (loaded.disabled ? '配置里 enabled=false'
           : loaded.missing ? `未找到 ${runtime.configPath}` : '未启用');
+      if (loaded.disabled) {
+        runtime.loaded = false;
+        runtime.config = null;
+        runtime.services = [];
+        runtime.reason = reason;
+        runtime.lastReloadError = null;
+        return { reloaded: false, disabled: true, reason };
+      }
       if (!initial && runtime.loaded) {
         // 已经跑起来的监控不因为一次改错而失效
         runtime.lastReloadError = reason;
