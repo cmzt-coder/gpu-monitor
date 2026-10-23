@@ -1132,7 +1132,7 @@ const docFiles = [
   'README.md', 'README.en.md', 'LICENSE',
   'docs/features.md', 'docs/alerts.md', 'docs/deployment.md',
   'docs/configuration.md', 'docs/faq.md', 'docs/development.md',
-  'docs/add-inference-service.md', 'docs/推理服务监控指标数据获取逻辑.md',
+  'docs/新增推理服务配置流程.md', 'docs/推理服务监控指标数据获取逻辑.md',
 ];
 for (const file of docFiles) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8');

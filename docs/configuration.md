@@ -87,7 +87,7 @@
 
 推理服务的清单写在仓库根目录的 `inference.json` 里。它和 `alerts.json` 一样属于**本机配置**，已经进 `.gitignore`；仓库里只有 [`inference.example.json`](../inference.example.json) 模板。
 
-从接口验证、页面新增服务到探针和故障排查的完整步骤，见 [新增推理服务配置流程](add-inference-service.md)。
+从接口验证、页面新增服务到探针和故障排查的完整步骤，见 [新增推理服务配置流程](新增推理服务配置流程.md)。
 
 只要启动进程设置了环境变量 `GPU_MONITOR_ADMIN_TOKEN`，页面「推理」页签右上角就会出现「配置」按钮。弹窗支持查看、新增、修改和删除服务；浏览器只会在当前标签页的 `sessionStorage` 中记住管理员令牌。未设置这个变量时，配置写接口保持关闭，普通监控页面不受影响。
 
