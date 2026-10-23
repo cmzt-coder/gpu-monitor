@@ -460,6 +460,15 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 }
 .card__head { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; }
 .card__head--stack { align-items: flex-start; }
+/* 曲线卡头固定为两列：历史说明再长也只在左列换行，不能把右侧范围控件挤到下一行。 */
+.card__head--chart {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px 18px;
+}
+.card__head--chart > :first-child { min-width: 0; }
+.card__head--chart > .chart-head-actions { justify-self: end; align-self: start; }
 .card__title { font-family: var(--jf-font-display); font-size: 18px; font-weight: 600; }
 .card__sub { margin-top: 4px; font-size: 12.5px; color: var(--jf-color-ink-muted); }
 
@@ -972,6 +981,8 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 
 @media (max-width: 720px) {
   .app { padding: 18px 16px 36px; }
+  .card__head--chart { grid-template-columns: 1fr; }
+  .card__head--chart > .chart-head-actions { justify-self: start; }
   .orient { align-items: flex-start; }
   /* 手机宽度下按钮要占满整行，紧凑模式也得让页头回到上对齐 */
   .app[data-dense="1"] .orient { align-items: flex-start; }
