@@ -171,7 +171,9 @@ async function probeStream(fetchImpl, url, payload, { headers, timeoutMs, now })
         if (!choice) continue;
         if (choice.finish_reason) finishReason = choice.finish_reason;
         const delta = choice.delta || {};
-        if (delta.content || delta.reasoning) {
+        // llama.cpp 的 reasoning 模型使用 reasoning_content；vLLM 常见 reasoning/content。
+        // 三者都代表模型已经产生首个可见 token，不能因为字段名不同把有效探针判失败。
+        if (delta.content || delta.reasoning || delta.reasoning_content) {
           chunks += 1;
           if (ttftMs == null) ttftMs = now() - started;
         }

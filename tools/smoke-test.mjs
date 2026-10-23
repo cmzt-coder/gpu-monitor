@@ -3433,12 +3433,13 @@ vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
   assert.equal(healthAllUp.statusCode, 200);
   assert.equal(healthAllUp.checks.find((check) => check.name === 'inference')?.level, 'ok');
 
-  // 探针：流式响应要能在第一个 content/reasoning token 处记 TTFT，并读出 usage
+  // 探针：流式响应要能在第一个 content/reasoning/reasoning_content token 处记 TTFT，并读出 usage
   const streamBody = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
       controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'));
-      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"reasoning":"h"}}]}\n\n'));
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"reasoning_content":"h"}}]}\n\n'));
+      controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"reasoning":"e"}}]}\n\n'));
       controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"i"},"finish_reason":"stop"}],"usage":{"completion_tokens":8}}\n\n'));
       controller.enqueue(encoder.encode('data: [DONE]\n\n'));
       controller.close();
@@ -3453,7 +3454,7 @@ vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
   };
   const probeRows = await runProbe(probeService, { fetchImpl: streamFetch, env: {}, now: streamClock });
   assert.equal(probeRows.length, 1);
-  assert.equal(probeRows[0].ok, true, '流式探针要识别 reasoning token');
+  assert.equal(probeRows[0].ok, true, '流式探针要识别 reasoning_content / reasoning / content token');
   assert.equal(probeRows[0].outputTokens, 8);
   assert.ok(probeRows[0].ttftMs != null && probeRows[0].ttftMs > 0, '首 token 时间要记录');
 
