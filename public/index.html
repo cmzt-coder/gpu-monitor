@@ -182,7 +182,35 @@
             <p class="card__sub" id="charts-sub">最近 5 分钟的实时窗口</p>
           </div>
           <div class="chart-head-actions">
-            <div class="range-picker" id="range-picker" role="group" aria-label="选择曲线时间范围" data-i18n-attr="aria-label:chart.group.range"></div>
+            <div class="range-picker range-picker--history" id="range-picker" role="group" aria-label="选择曲线时间范围" data-i18n-attr="aria-label:chart.group.range">
+              <button type="button" class="chip chip--range" id="range-live" data-value="live" aria-pressed="true" data-i18n="range.live">实时</button>
+              <div class="dropdown dropdown--range" id="range-hours" data-placeholder="小时">
+                <button type="button" class="dropdown__button" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="visually-hidden" data-i18n="range.group.hours">小时</span>
+                  <span class="dropdown__value">小时</span>
+                  <span class="dropdown__caret" aria-hidden="true"></span>
+                </button>
+                <ul class="dropdown__list" role="listbox" aria-label="小时范围" data-i18n-attr="aria-label:range.group.hours" hidden>
+                  <li class="dropdown__option" role="option" data-value="1h" aria-selected="false"><span data-i18n="range.option.1h">1 小时</span></li>
+                  <li class="dropdown__option" role="option" data-value="3h" aria-selected="false"><span data-i18n="range.option.3h">3 小时</span></li>
+                  <li class="dropdown__option" role="option" data-value="8h" aria-selected="false"><span data-i18n="range.option.8h">8 小时</span></li>
+                  <li class="dropdown__option" role="option" data-value="12h" aria-selected="false"><span data-i18n="range.option.12h">12 小时</span></li>
+                </ul>
+              </div>
+              <div class="dropdown dropdown--range" id="range-days" data-placeholder="天">
+                <button type="button" class="dropdown__button" aria-haspopup="listbox" aria-expanded="false">
+                  <span class="visually-hidden" data-i18n="range.group.days">天</span>
+                  <span class="dropdown__value">天</span>
+                  <span class="dropdown__caret" aria-hidden="true"></span>
+                </button>
+                <ul class="dropdown__list" role="listbox" aria-label="天范围" data-i18n-attr="aria-label:range.group.days" hidden>
+                  <li class="dropdown__option" role="option" data-value="1d" aria-selected="false"><span data-i18n="range.option.1d">1 天</span></li>
+                  <li class="dropdown__option" role="option" data-value="3d" aria-selected="false"><span data-i18n="range.option.3d">3 天</span></li>
+                  <li class="dropdown__option" role="option" data-value="5d" aria-selected="false"><span data-i18n="range.option.5d">5 天</span></li>
+                  <li class="dropdown__option" role="option" data-value="7d" aria-selected="false"><span data-i18n="range.option.7d">7 天</span></li>
+                </ul>
+              </div>
+            </div>
             <div class="legend" aria-hidden="true">
               <span class="legend__item"><span class="legend__swatch legend__swatch--mem"></span><span data-i18n="chart.legend.mem">显存占用</span></span>
               <span class="legend__item"><span class="legend__swatch legend__swatch--util"></span><span data-i18n="chart.legend.util">GPU 利用率</span></span>

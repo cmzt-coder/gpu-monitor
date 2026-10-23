@@ -78,6 +78,9 @@ const refs = {
   svcEmptyTitle: $('svc-empty-title'),
   svcEmptyText: $('svc-empty-text'),
   rangePicker: $('range-picker'),
+  rangeLive: $('range-live'),
+  rangeHours: $('range-hours'),
+  rangeDays: $('range-days'),
   emptyTitle: $('empty-title'),
   emptyText: $('empty-text'),
   sysSub: $('sys-sub'),
@@ -190,6 +193,8 @@ const state = {
   historyStep: null,
   historyTruncated: false,
   historyNotice: null,
+  historyLoading: false,
+  historyCache: new Map(),
   // 进程占用历史：与曲线的时间范围互相独立（曲线可能停在实时，这里仍想看一天）
   processHistory: {
     range: '24h',
@@ -206,24 +211,27 @@ const state = {
 
 // label 用 getter 而不是普通字段：这些表是模块加载时建的，
 // 写成固定字符串会把"模块加载那一刻的语言"冻住，切语言后按钮文字就不动了。
+const HOUR_RANGES = [1, 3, 8, 12].map((hours) => ({
+  value: `${hours}h`,
+  get label() { return tn('range.hours', hours); },
+}));
+const DAY_RANGES = [1, 3, 5, 7].map((days) => ({
+  value: `${days}d`,
+  get label() { return tn('range.days', days); },
+}));
 const RANGES = [
   { value: 'live', get label() { return t('range.live'); } },
-  { value: '3d', get label() { return tn('range.days', 3); } },
-  { value: '7d', get label() { return tn('range.days', 7); } },
-  { value: '30d', get label() { return tn('range.days', 30); } },
-  { value: '60d', get label() { return tn('range.days', 60); } },
-  { value: '90d', get label() { return tn('range.days', 90); } },
-  { value: 'all', get label() { return t('range.all'); } },
+  ...HOUR_RANGES,
+  ...DAY_RANGES,
 ];
 
-// 推理历史只看最近一段时间：1 小时排查抖动，24 小时看日常，30/90 天看趋势
+// 推理历史只看最近一段时间：1 小时排查抖动，24 小时看日常，30/45 天看趋势
 const INFER_RANGES = [
   { value: '1h', get label() { return tn('range.hours', 1); } },
   { value: '24h', get label() { return tn('range.hours', 24); } },
   { value: '7d', get label() { return tn('range.days', 7); } },
   { value: '30d', get label() { return tn('range.days', 30); } },
-  { value: '90d', get label() { return tn('range.days', 90); } },
-  { value: 'all', get label() { return t('range.all'); } },
+  { value: '45d', get label() { return tn('range.days', 45); } },
 ];
 
 const PROC_HIST_RANGES = [
@@ -247,6 +255,7 @@ const PROC_HIST_MIN_PRESETS = [
 
 let eventSource = null;
 let pollTimer = null;
+let historyFetchController = null;
 let pushRetryTimer = null;
 // 进程历史的重载防抖计时器（见 scheduleProcessHistoryReload）
 let processHistoryTimer = null;
@@ -423,8 +432,8 @@ function appendSample(sample, { force = false } = {}) {
   }
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, { cache: 'no-store' });
+async function fetchJson(url, { signal } = {}) {
+  const response = await fetch(url, { cache: 'no-store', signal });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return response.json();
 }
@@ -946,6 +955,7 @@ function describeRange() {
   }
   const item = RANGES.find((entry) => entry.value === state.range);
   const label = item?.label || state.range;
+  if (state.historyLoading) return t('chart.range.loading', { label });
   // 曲线切到历史区间时，顶部指标、右侧卡片和系统资源里的读数是"现在"的，
   // 不写清楚很容易把两种时间尺度混着看
   const liveNote = t('chart.note.liveCards');
@@ -968,7 +978,7 @@ function describeRange() {
     : '';
   const truncated = state.historyTruncated ? t('chart.range.truncated') : '';
   // 「全部」是"库里现存的全部"，不是"历史上的全部"：默认保留期会把更早的行清掉。
-  // 不写明白的话，选了「全部」却只看到 90 天，很容易以为是 bug
+  // 这个分支只保留给旧链接/API 的 range=all；新界面不再提供「全部」按钮
   if (state.range === 'all') {
     const retention = state.meta?.storage?.retentionDays;
     const bound = retention > 0
@@ -3119,22 +3129,26 @@ function render() {
 
 /* ---------- 交互 ---------- */
 function renderRangePicker() {
-  const signature = `${RANGES.map((item) => item.value).join('|')}#${state.range}`;
+  const signature = `${getLang()}#${state.range}`;
   if (refs.rangePicker.dataset.signature === signature) return;
-  refs.rangePicker.replaceChildren();
-  for (const item of RANGES) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'chip';
-    button.textContent = item.label;
-    button.dataset.value = item.value;
-    button.setAttribute('aria-pressed', item.value === state.range ? 'true' : 'false');
-    button.addEventListener('click', () => {
-      selectRange(item.value);
-    });
-    refs.rangePicker.appendChild(button);
-  }
   refs.rangePicker.dataset.signature = signature;
+  refs.rangeLive?.setAttribute('aria-pressed', state.range === 'live' ? 'true' : 'false');
+  if (refs.rangeHours) refs.rangeHours.dataset.placeholder = t('range.group.hours');
+  if (refs.rangeDays) refs.rangeDays.dataset.placeholder = t('range.group.days');
+
+  const hourValue = HOUR_RANGES.some((item) => item.value === state.range) ? state.range : null;
+  const dayValue = DAY_RANGES.some((item) => item.value === state.range) ? state.range : null;
+
+  if (hoursRangeDropdown) {
+    if (hourValue) hoursRangeDropdown.setValue(hourValue);
+    else hoursRangeDropdown.clear();
+    hoursRangeDropdown.refresh();
+  }
+  if (daysRangeDropdown) {
+    if (dayValue) daysRangeDropdown.setValue(dayValue);
+    else daysRangeDropdown.clear();
+    daysRangeDropdown.refresh();
+  }
 }
 
 function resetSeries() {
@@ -3194,20 +3208,57 @@ async function backfillLiveWindow(memory) {
   return resampleToGrid(data.samples || [], { from, to: boundary, intervalMs: state.intervalMs });
 }
 
-async function loadHistoryRange(range) {
+const HISTORY_CLIENT_CACHE_MS = 5 * 60 * 1000;
+
+function applyHistoryRange(data) {
+  // 只有拿到完整的新数据后才替换旧曲线。请求期间保留上一次的范围，
+  // 用户不会看到一条突然清空的图。
   resetSeries();
+  state.historyPoints = data.points ?? 0;
+  state.historyStep = data.step ?? null;
+  state.historyTruncated = Boolean(data.truncated);
+  // 没启用历史库时会走内存窗口，这里如实说明而不是画一条假的区间
+  state.historyNotice = data.source === 'memory' ? { reason: data.reason || '' } : null;
+  for (const sample of data.samples || []) appendSample(sample, { force: true });
+  state.historyLoading = false;
+  render();
+}
+
+async function loadHistoryRange(range) {
+  historyFetchController?.abort();
+  historyFetchController = null;
+  const cached = state.historyCache.get(range);
+  if (cached && Date.now() - cached.at < HISTORY_CLIENT_CACHE_MS) {
+    applyHistoryRange(cached.data);
+    return;
+  }
+
+  // 连续点多个时间按钮时，只保留最后一次请求；旧请求直接取消。
+  const controller = new AbortController();
+  historyFetchController = controller;
+  state.historyLoading = true;
+  renderRangePicker();
+  render();
+
   try {
-    const data = await fetchJson(`/api/history?range=${encodeURIComponent(range)}`);
-    state.historyPoints = data.points ?? 0;
-    state.historyStep = data.step ?? null;
-    state.historyTruncated = Boolean(data.truncated);
-    // 没启用历史库时会走内存窗口，这里如实说明而不是画一条假的区间
-    // 同 renderProcHistory：这里存原文，翻译放到 describeRange() 里做（切语言才会跟着变）
-    state.historyNotice = data.source === 'memory' ? { reason: data.reason || '' } : null;
-    for (const sample of data.samples || []) appendSample(sample, { force: true });
+    // fields=basic 只取画图实际需要的字段，避免把 ECC/XID 等扩展字段塞进 6MB 响应。
+    const data = await fetchJson(
+      `/api/history?range=${encodeURIComponent(range)}&fields=basic`,
+      { signal: controller.signal },
+    );
+    if (state.range !== range) return;
+    state.historyCache.set(range, { at: Date.now(), data });
+    applyHistoryRange(data);
   } catch (error) {
-    state.historyPoints = 0;
+    if (error?.name === 'AbortError') return;
+    // 失败时保留旧图，只更新提示，避免“切换失败后整张图消失”。
     state.historyNotice = { error: error.message };
+  } finally {
+    if (historyFetchController === controller) {
+      historyFetchController = null;
+      state.historyLoading = false;
+      render();
+    }
   }
 }
 
@@ -3215,9 +3266,15 @@ async function selectRange(value) {
   if (value === state.range) return;
   state.range = value;
   renderRangePicker();
-  if (value === 'live') await reloadLiveWindow();
-  else await loadHistoryRange(value);
-  render();
+  if (value === 'live') {
+    historyFetchController?.abort();
+    historyFetchController = null;
+    state.historyLoading = false;
+    await reloadLiveWindow();
+    render();
+    return;
+  }
+  await loadHistoryRange(value);
 }
 
 function triggerDownload(path, params = new URLSearchParams()) {
@@ -3390,8 +3447,7 @@ const EXPORT_RANGES = [
   { value: '24h', get label() { return tn('range.hours', 24); } },
   { value: '7d', get label() { return tn('range.days', 7); } },
   { value: '30d', get label() { return tn('range.days', 30); } },
-  { value: '90d', get label() { return tn('range.days', 90); } },
-  { value: 'all', get label() { return t('range.all'); } },
+  { value: '45d', get label() { return tn('range.days', 45); } },
 ];
 
 const exportChoice = { content: 'gpu', layout: 'long', range: 'follow', full: false };
@@ -3551,7 +3607,7 @@ function syncExportPanel() {
   refs.exportRangeGroup.dataset.disabled = canRange ? 'false' : 'true';
   for (const button of refs.exportRange.querySelectorAll('.chip')) button.disabled = !canRange;
   refs.exportRangeHint.textContent = canRange
-    ? t('export.range.hint')
+    ? `${t('export.range.hint')}${t('export.range.retention', { days: 45 })}`
     : t('export.range.hintSnapshot', { label: item.label });
 
   refs.exportFullGroup.dataset.disabled = canFull ? 'false' : 'true';
@@ -3603,6 +3659,13 @@ refs.btnExport.addEventListener('click', openExportPanel);
    组件只管开合、键盘、ARIA；选中之后做什么由这里决定。 */
 const viewDropdown = enhanceDropdown(refs.viewSwitch, { onChange: (value) => setView(value) });
 const langDropdown = enhanceDropdown(refs.langSwitch, { onChange: (value) => setLang(value) });
+
+/* 曲线时间范围：实时按钮 + 小时/天两个下拉，互斥选择。 */
+let hoursRangeDropdown = null;
+let daysRangeDropdown = null;
+hoursRangeDropdown = enhanceDropdown(refs.rangeHours, { onChange: (value) => selectRange(value) });
+daysRangeDropdown = enhanceDropdown(refs.rangeDays, { onChange: (value) => selectRange(value) });
+refs.rangeLive?.addEventListener('click', () => selectRange('live'));
 
 /* ---------- 界面语言 ---------- */
 

@@ -1641,13 +1641,28 @@ assert.equal(bucketed.samples[0].gpus[0].pstate, null, '分桶后 pstate 已无�
 assert.equal(bucketed.samples[1].gpus[0].throttled, true, '桶内出现过节流就要标记出来');
 
 const capped = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10000, pointLimit: 3 });
-assert.equal(capped.truncated, true, '超过点数上限要如实标记截断');
 assert.ok(capped.points <= 3);
+assert.ok(capped.step > 0 || capped.truncated, '超过点数上限时要么自动分桶，要么标记截断');
+
+const forcedStep = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10000, stepMs: 2000, pointLimit: 2 });
+assert.equal(forcedStep.truncated, true, '显式分桶后仍超过点数上限，要如实标记截断');
+assert.ok(forcedStep.points <= 2);
 
 // 行数不多时，即使区间很宽也要给原始粒度（不能按"配置间隔"高估行数，把区间压成一两个点）
 const wideRange = { from: dbNow - 1, to: dbNow + 10 * 3600 * 1000 };
 assert.equal(sqliteStore.querySamples(wideRange).step, 0, '只有 6 行数据时不该分桶');
 assert.equal(sqliteStore.querySamples(wideRange).points, 6);
+
+const basicQuery = sqliteStore.querySamples({ from: dbNow - 1, to: dbNow + 10000, basic: true });
+const basicGpu = basicQuery.samples[0].gpus[0];
+assert.deepEqual(
+  Object.keys(basicGpu).sort(),
+  ['index', 'memTotalMiB', 'memUsedMiB', 'memUsedPct', 'name', 'utilGpuPct', 'uuid'],
+  'basic 历史只保留画图需要的 GPU 字段',
+);
+assert.deepEqual(Object.keys(basicQuery.samples[0].system).sort(), ['cpu', 'mem']);
+assert.deepEqual(Object.keys(basicQuery.samples[0].system.cpu), ['usagePct']);
+assert.deepEqual(Object.keys(basicQuery.samples[0].system.mem), ['usedPct']);
 
 /* ---------- 历史库：近 1 小时的利用率均值（跨时间、跨卡） ---------- */
 // 卡片上"平均 GPU 利用率"跟别的指标不一样：它不是这一帧的量，而是把库里
@@ -1818,20 +1833,29 @@ assert.equal(retentionStore.querySamples(nearOld).points, 0, '过期的那条应
 assert.equal(retentionStore.querySamples(nearNow).points, 1, '没过期的那条要保留');
 retentionStore.close();
 
-// 默认必须是永久保留：漏传 retentionDays 时应该什么都不删，
-// 而不是悄悄按某个时限把历史清掉——按天清理属于静默的数据丢失
+// 不传 retentionDays 时按产品硬上限 45 天处理；更大值也必须被夹到 45。
 const defaultRetentionStore = await createSqliteStore({
   file: ':memory:',
   nodeId: 'test-node',
   storeIntervalMs: 1000,
   now: () => dbNow,
 });
-assert.equal(defaultRetentionStore.stats().retentionDays, 0, '不传 retentionDays 时应为永久保留');
+assert.equal(defaultRetentionStore.stats().retentionDays, 45, '不传 retentionDays 时应为 45 天');
 defaultRetentionStore.appendSample({ t: oldTs, gpus: [gpuAt(0)], processes: [], system: hostAt(0) });
 defaultRetentionStore.flush();
-assert.equal(defaultRetentionStore.prune(dbNow), 0, '永久保留时不应删除任何行');
+assert.equal(defaultRetentionStore.prune(dbNow), 0, '三天前的数据在 45 天内，不应删除');
 assert.equal(defaultRetentionStore.querySamples({ from: oldTs - 1000, to: oldTs + 1000 }).points, 1, '三天前的数据要还在');
 defaultRetentionStore.close();
+
+const clampedRetentionStore = await createSqliteStore({
+  file: ':memory:',
+  nodeId: 'test-node',
+  storeIntervalMs: 1000,
+  retentionDays: 90,
+  now: () => dbNow,
+});
+assert.equal(clampedRetentionStore.stats().retentionDays, 45, 'retentionDays 超过 45 必须夹到 45');
+clampedRetentionStore.close();
 
 // 空实现：没有历史库时要明确说"不支持"，而不是假装返回空历史
 const memoryStore = createMemoryStore('启动时加了 --no-db');

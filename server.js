@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 
 import { createCollector } from './src/collector.js';
 import { createAlertsRuntime } from './src/alerts/runtime.js';
@@ -39,6 +40,7 @@ import { createStore } from './src/store/store.js';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(HERE, 'public');
 const VERSION = '1.2.0';
+const MAX_RETENTION_DAYS = 45;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -81,7 +83,7 @@ const HELP = `GPU 显存负载监控服务
       --db <路径>         历史库文件（默认 data/gpu-monitor.db）
       --no-db             不落库，只保留内存窗口
       --store-interval <毫秒> 落库间隔，与页面刷新间隔解耦（默认 5000）
-      --retention-days <天>   历史保留天数；默认 0 = 永久保留，填天数则按天自动清理
+      --retention-days <天>   历史保留天数；默认 45，最多 45（0 或更大值也按 45 天处理）
       --no-store-processes    不把占用进程写入历史库
       --proc-min <MiB>        占用不到这个值的进程不写进历史库；默认 0 = 全记
                               （只想看得清爽点用页面上的「占用下限」，那个不会丢数据）
@@ -128,10 +130,8 @@ function parseArgs(argv) {
     db: true,
     dbPath: process.env.GPU_MONITOR_DB || path.join('data', 'gpu-monitor.db'),
     storeIntervalMs: 5000,
-    // 默认永久保留：历史库的价值就在于"翻得回去"，而按天清理是静默的数据丢失。
-    // 实测单卡 5 秒粒度约 7 MiB/天，一年 2.5 GiB，磁盘上通常不值得为此丢数据；
-    // 真要限制就显式给 --retention-days <天>。
-    retentionDays: 0,
+    // 硬上限 45 天：GPU 历史、进程、推理采样和探针都按这个上限清理。
+    retentionDays: MAX_RETENTION_DAYS,
     storeProcesses: true,
     // 显式时区（IANA 名）。null = 跟随系统时区，也认 TZ 环境变量
     timeZone: null,
@@ -217,7 +217,10 @@ function parseArgs(argv) {
         options.storeIntervalMs = Math.max(1000, Number(next()) || 5000);
         break;
       case '--retention-days':
-        options.retentionDays = Math.max(0, Number(next()) || 0);
+        options.retentionDays = Math.min(
+          MAX_RETENTION_DAYS,
+          Math.max(1, Number(next()) || MAX_RETENTION_DAYS),
+        );
         break;
       case '--no-store-processes':
         options.storeProcesses = false;
@@ -358,15 +361,33 @@ inferenceRuntime = createInferenceRuntime({
 });
 await inferenceRuntime.start();
 
-function sendJson(res, status, payload) {
-  const body = JSON.stringify(payload);
+function encodeJson(res, payload) {
+  const body = Buffer.from(JSON.stringify(payload));
+  const acceptsGzip = /\bgzip\b/.test(String(res.req?.headers?.['accept-encoding'] || ''));
+  return {
+    body: acceptsGzip && body.length > 1024 ? zlib.gzipSync(body) : body,
+    gzip: acceptsGzip && body.length > 1024,
+  };
+}
+
+function sendEncoded(res, status, encoded) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
-    'Content-Length': Buffer.byteLength(body),
+    'Content-Length': encoded.body.length,
+    ...(encoded.gzip ? { 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' } : {}),
   });
-  res.end(body);
+  res.end(encoded.body);
 }
+
+function sendJson(res, status, payload) {
+  sendEncoded(res, status, encodeJson(res, payload));
+}
+
+// 历史区间查询缓存：同一范围的第一次请求仍然要查库，30 秒内的重复切换直接命中。
+const HISTORY_CACHE_MS = 30000;
+const HISTORY_CACHE_MAX = 16;
+const historyCache = new Map();
 
 function sendDownload(res, filename, contentType, body) {
   res.writeHead(200, {
@@ -378,7 +399,7 @@ function sendDownload(res, filename, contentType, body) {
   res.end(body);
 }
 
-// 大区间导出要流式写出：90 天 × 多张卡是几十万行，先拼成一整个字符串会吃掉大量内存
+// 大区间导出要流式写出：45 天 × 多张卡是几十万行，先拼成一整个字符串会吃掉大量内存
 async function streamCsv(res, filename, header, lines) {
   res.writeHead(200, {
     'Content-Type': 'text/csv; charset=utf-8',
@@ -507,7 +528,7 @@ function* gpuCsvLines({ from, to }, step, { full = false } = {}) {
  * 宽表的流式写法：把同一时刻的多张卡攒齐了再吐一行。
  *
  * `gpuPages` 是按 ts 升序给的，所以只需要攒"当前这一拍"——同一时刻的卡一定挨在一起，
- * 不需要把整个区间读进内存（90 天 × 8 卡是几十万行）。攒的行数最多等于卡数。
+ * 不需要把整个区间读进内存（45 天 × 8 卡是几十万行）。攒的行数最多等于卡数。
  */
 function* wideGpuLines({ from, to }, step, indexes) {
   let currentTs = null;
@@ -677,17 +698,44 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === '/api/history') {
     if (fromStore) {
+      const rangeLabel = (url.searchParams.get('range') || '').toLowerCase();
+      const basic = url.searchParams.get('fields') === 'basic';
+      const longRange = ['3d', '5d', '7d', '30d', '45d'].includes(rangeLabel);
+      const pointLimit = basic && longRange ? 1000 : 2000;
+      const wantsGzip = /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''));
+      const cacheKey = [
+        'history',
+        rangeLabel || `${Math.floor(range.from / 1000)}-${Math.floor(range.to / 1000)}`,
+        range.requestedStep || 0,
+        basic ? 'basic' : 'full',
+        pointLimit,
+        wantsGzip ? 'gzip' : 'plain',
+      ].join('|');
+      const cached = historyCache.get(cacheKey);
+      if (cached && Date.now() - cached.at < HISTORY_CACHE_MS) {
+        sendEncoded(res, 200, cached.encoded);
+        return;
+      }
       const result = store.querySamples({
         from: range.from,
         to: range.to,
         stepMs: range.requestedStep,
+        pointLimit,
+        basic,
       });
-      sendJson(res, 200, {
+      const payload = {
         ...result,
         source: 'db',
         intervalMs: options.intervalMs,
         windowSamples: options.windowSamples,
-      });
+        fields: basic ? 'basic' : 'full',
+      };
+      const encoded = encodeJson(res, payload);
+      historyCache.set(cacheKey, { at: Date.now(), encoded });
+      while (historyCache.size > HISTORY_CACHE_MAX) {
+        historyCache.delete(historyCache.keys().next().value);
+      }
+      sendEncoded(res, 200, encoded);
       return;
     }
     // 没有区间参数（或没有历史库）时，仍然用内存里的最近窗口

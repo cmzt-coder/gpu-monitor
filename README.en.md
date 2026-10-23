@@ -42,7 +42,7 @@ Open <http://localhost:8090/>. To deploy it on a server and make it survive rebo
 - **Hardware health**: ECC (correctable / uncorrectable, current-driver and lifetime), row remapping and XID — the question is *is it growing*, not what the number is. When the data is unreadable it says so instead of showing 0
 - **Alerting**: thresholds for VRAM / temperature / throttling / utilisation / host memory / disk / collection outages, including **per-service** rules and hardware-health metrics. Inference availability, queues, KV cache, probes, TTFT and error rate are alertable too, with "must hold for N minutes" and cooldown suppression. Channels: **email**, webhook and console
 - **Export**: a single entry point — pick content, layout (the GPU table can be wide: one row per sample, one column group per GPU), time range and options. CSV carries both local time and UTC
-- **History**: SQLite storage (`data/gpu-monitor.db`) survives restarts; the page switches between live / 3d / 7d / 30d / 60d / 90d / all
+- **History**: SQLite storage (`data/gpu-monitor.db`) survives restarts; the chart switches between live, 1/3/8/12 hours and 1/3/5/7 days. History is capped at **45 days**
 - **Bilingual UI (Chinese / English)**: the `中 / EN` dropdown in the top bar takes effect immediately — no reload, no service restart — and the choice is remembered in local storage. The default follows `navigator.language`; a single link can pin a language with `?lang=en-US` or `#lang=en-US`
 - Also: host metrics (CPU / memory / swap / load / disk / network), SSE push with automatic fallback to polling, idle down-throttling, 90% warning line, and copy-pasteable troubleshooting commands when something breaks
 

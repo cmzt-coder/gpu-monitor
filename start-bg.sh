@@ -25,7 +25,7 @@ print_usage() {
       --db <路径>         历史库文件（默认 data/gpu-monitor.db，需要 Node 22.13+）
       --no-db             不落库，只保留内存窗口
       --store-interval <毫秒> 落库间隔，与页面刷新解耦（默认 5000）
-      --retention-days <天>   历史保留天数；默认 0 = 永久保留，填天数则按天自动清理
+      --retention-days <天>   历史保留天数；默认 45，最多 45（0 或更大值也按 45 天处理）
       --alerts <路径>     告警配置（默认 alerts.json，不存在则不启用）
       --no-alerts         不启用告警
       --alerts-dry-run    只打印将要发送的通知，不真正发信

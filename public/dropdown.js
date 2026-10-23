@@ -82,6 +82,10 @@ export function enhanceDropdown(root, { onChange } = {}) {
 
   function paint() {
     const index = selectedIndex();
+    if (index < 0 && root.dataset.placeholder) {
+      valueNode.textContent = root.dataset.placeholder;
+      return;
+    }
     const current = index >= 0 ? index : 0;
     valueNode.textContent = optionText(options[current]);
   }
@@ -185,6 +189,12 @@ export function enhanceDropdown(root, { onChange } = {}) {
       }
       paint();
       return true;
+    },
+    /** 清空选择并恢复占位文字（用于“小时 / 天”二选一的范围控件） */
+    clear() {
+      for (const option of options) option.setAttribute('aria-selected', 'false');
+      activeIndex = -1;
+      paint();
     },
     getValue: () => options[selectedIndex()]?.dataset.value ?? null,
     /** 选项文字被翻译之后，按钮上那行也要跟着变（选项本身不重写） */

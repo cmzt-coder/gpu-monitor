@@ -6,7 +6,7 @@
 // 粒度：库里按 --store-interval（默认 5 秒）抽稀，与页面刷新间隔解耦。
 // 屏幕上看 1 秒粒度，库里按 5 秒留，体积差 5 倍而历史趋势几乎无损失。
 //
-// 读取：对外提供两个"分页迭代器"（gpu / host），导出 90 天这种大区间时靠它们流式写出，
+// 读取：对外提供两个"分页迭代器"（gpu / host），导出 45 天这种大区间时靠它们流式写出，
 // 不用把几十万行一次性读进内存；querySamples 则是在迭代器之上拼回接口需要的采样点结构。
 import { statSync } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -16,6 +16,9 @@ import { serviceSharePct } from '../services.js';
 import {
   gpuFromRow, gpuRow, hostRow, processFromRow, processRows, processesSignature, serviceRows, systemFromRow,
 } from './rows.js';
+
+// 产品硬上限：所有历史表最多保留 45 天，避免永久增长。
+export const MAX_RETENTION_DAYS = 45;
 
 // 表结构写成数据结构而不是一整段 SQL：建表、补列迁移、以及"哪些列要写要读"都从这一份生成，
 // 避免加了字段却忘了改另一个地方。新增字段只要在这里加一行。
@@ -256,8 +259,8 @@ export async function createSqliteStore({
   file,
   nodeId,
   storeIntervalMs = 5000,
-  // 默认 0 = 永久保留：漏传这个参数时应该"什么都不删"，而不是悄悄按时限删历史
-  retentionDays = 0,
+  // 默认 45 天；0 或更大的值也会在这里被夹到硬上限
+  retentionDays = MAX_RETENTION_DAYS,
   storeProcesses = true,
   // 进程记录下限（MiB）：大于 0 时，占用不到这个值的进程行不写进库。
   // 默认 0 = 全记，因为写入过滤是不可逆的——只看不要的用查询侧的 minMiB 就够了
@@ -272,9 +275,15 @@ export async function createSqliteStore({
   incrementalVacuum = true,
   // 启动时做一次整库重写，把老库（auto_vacuum 未开启）转成增量回收模式
   reclaimOnStart = false,
+  // 维护工具只"看状态"时不要因为默认 45 天保留期顺手删数据
+  pruneOnStart = true,
   now = Date.now,
   maxPoints = 2000,
 } = {}) {
+  retentionDays = Math.min(
+    MAX_RETENTION_DAYS,
+    Math.max(1, Number(retentionDays) || MAX_RETENTION_DAYS),
+  );
   // 动态 import：Node 22.13 以下用不了 node:sqlite（22.5-22.12 还要加 --experimental-sqlite），
   // 这里失败由上层退回纯内存模式
   const { DatabaseSync } = await import('node:sqlite');
@@ -621,17 +630,19 @@ export async function createSqliteStore({
    * 关键在于按"真实行数"而不是"配置的落库间隔"来估：刚建库、服务只跑了几分钟、
    * 或者采集断断续续时，用配置间隔估算会把行数严重高估，7 天的区间会被压成一两个点。
    */
-  function resolveStep(from, to, stepMs) {
+  function resolveStep(from, to, stepMs, pointLimit = maxPoints) {
     const span = Math.max(1, to - from);
     const cadence = Math.max(1, storeIntervalMs);
+    const cap = Math.max(1, Math.floor(pointLimit));
     let step = Number(stepMs) > 0 ? Math.ceil(Number(stepMs)) : 0;
+    // 调用方显式指定 step 时尊重它；只有自动分桶才使用本次的 pointLimit
     if (step > 0) return Math.max(step, Math.ceil(span / maxPoints));
 
-    const rows = probeRows(from, to, maxPoints + 1);
-    if (rows <= maxPoints) return 0; // 行数本来就不多，直接给原始粒度
+    const rows = probeRows(from, to, cap + 1);
+    if (rows <= cap) return 0; // 行数本来就不多，直接给原始粒度
 
     // 行数超了才分桶：让每个桶装 perBucket 行左右，把总点数压到 maxPoints 附近
-    const perBucket = Math.ceil(rows / maxPoints);
+    const perBucket = Math.ceil(rows / cap);
     const idealBucketMs = (perBucket * span) / rows;
     return Math.max(cadence, Math.ceil(idealBucketMs / cadence) * cadence);
   }
@@ -643,10 +654,44 @@ export async function createSqliteStore({
    * 游标用 (ts|bucket, uuid) 行值比较：同一次采样里多张卡共享 ts，
    * 只按 ts 翻页会在页边界丢行；uuid 统一 COALESCE 成 '' 避免 NULL 让比较结果为 NULL。
    */
-  function* gpuPages({ from, to, step = 0, limit = Infinity } = {}) {
+  function* gpuPages({ from, to, step = 0, basic = false, limit = Infinity } = {}) {
     let emitted = 0;
     let cursorTs = from - 1;
     let cursorUuid = '';
+    const stepColumns = basic
+      ? `COALESCE(uuid, '') AS uuid_c, uuid, MAX(idx) AS idx, MAX(name) AS name,
+         AVG(mem_used_mib) AS mem_used_mib, MAX(mem_total_mib) AS mem_total_mib,
+         AVG(util_gpu_pct) AS util_gpu_pct`
+      : `COALESCE(uuid, '') AS uuid_c, uuid, MAX(idx) AS idx, MAX(name) AS name,
+         AVG(mem_used_mib) AS mem_used_mib, MAX(mem_total_mib) AS mem_total_mib,
+         AVG(util_gpu_pct) AS util_gpu_pct, AVG(util_mem_pct) AS util_mem_pct,
+         MAX(temp_c) AS temp_c, AVG(power_w) AS power_w,
+         AVG(clock_sm_mhz) AS clock_sm_mhz, AVG(clock_mem_mhz) AS clock_mem_mhz,
+         MAX(fan_pct) AS fan_pct,
+         MAX(pcie_gen) AS pcie_gen, MAX(pcie_width) AS pcie_width,
+         AVG(enc_util_pct) AS enc_util_pct, AVG(dec_util_pct) AS dec_util_pct,
+         MAX(throttle_any) AS throttle_any,
+         MAX(ecc_mode) AS ecc_mode,
+         MAX(ecc_ce_volatile) AS ecc_ce_volatile, MAX(ecc_ue_volatile) AS ecc_ue_volatile,
+         MAX(ecc_ce_aggregate) AS ecc_ce_aggregate, MAX(ecc_ue_aggregate) AS ecc_ue_aggregate,
+         MAX(remap_correctable) AS remap_correctable,
+         MAX(remap_uncorrectable) AS remap_uncorrectable,
+         MAX(remap_pending) AS remap_pending,
+         MAX(remap_failure) AS remap_failure,
+         MAX(remap_banks_max) AS remap_banks_max,
+         MAX(xid_count) AS xid_count, MAX(xid_last_code) AS xid_last_code,
+         MAX(xid_last_at) AS xid_last_at, MAX(xid_recent) AS xid_recent`;
+    const rawColumns = basic
+      ? `ts, COALESCE(uuid, '') AS uuid_c, uuid, idx, name, mem_used_mib, mem_total_mib,
+         util_gpu_pct`
+      : `ts, COALESCE(uuid, '') AS uuid_c, uuid, idx, name, mem_used_mib, mem_total_mib,
+         util_gpu_pct, util_mem_pct, temp_c, power_w,
+         clock_sm_mhz, clock_mem_mhz, pstate, fan_pct,
+         pcie_gen, pcie_width, enc_util_pct, dec_util_pct,
+         throttle_mask, throttle_any,
+         ecc_mode, ecc_ce_volatile, ecc_ue_volatile, ecc_ce_aggregate, ecc_ue_aggregate,
+         remap_correctable, remap_uncorrectable, remap_pending, remap_failure, remap_banks_max,
+         xid_count, xid_last_code, xid_last_at, xid_recent`;
     for (;;) {
       const remaining = limit === Infinity ? pageSize : Math.min(pageSize, limit - emitted);
       if (remaining <= 0) return;
@@ -654,27 +699,7 @@ export async function createSqliteStore({
       if (step > 0) {
         rows = db.prepare(`
           SELECT q.* FROM (
-            SELECT ${bucketExpr('?')} AS bucket,
-                   COALESCE(uuid, '') AS uuid_c,
-                   uuid, MAX(idx) AS idx, MAX(name) AS name,
-                   AVG(mem_used_mib) AS mem_used_mib, MAX(mem_total_mib) AS mem_total_mib,
-                   AVG(util_gpu_pct) AS util_gpu_pct, AVG(util_mem_pct) AS util_mem_pct,
-                   MAX(temp_c) AS temp_c, AVG(power_w) AS power_w,
-                   AVG(clock_sm_mhz) AS clock_sm_mhz, AVG(clock_mem_mhz) AS clock_mem_mhz,
-                   MAX(fan_pct) AS fan_pct,
-                   MAX(pcie_gen) AS pcie_gen, MAX(pcie_width) AS pcie_width,
-                   AVG(enc_util_pct) AS enc_util_pct, AVG(dec_util_pct) AS dec_util_pct,
-                   MAX(throttle_any) AS throttle_any,
-                   MAX(ecc_mode) AS ecc_mode,
-                   MAX(ecc_ce_volatile) AS ecc_ce_volatile, MAX(ecc_ue_volatile) AS ecc_ue_volatile,
-                   MAX(ecc_ce_aggregate) AS ecc_ce_aggregate, MAX(ecc_ue_aggregate) AS ecc_ue_aggregate,
-                   MAX(remap_correctable) AS remap_correctable,
-                   MAX(remap_uncorrectable) AS remap_uncorrectable,
-                   MAX(remap_pending) AS remap_pending,
-                   MAX(remap_failure) AS remap_failure,
-                   MAX(remap_banks_max) AS remap_banks_max,
-                   MAX(xid_count) AS xid_count, MAX(xid_last_code) AS xid_last_code,
-                   MAX(xid_last_at) AS xid_last_at, MAX(xid_recent) AS xid_recent
+            SELECT ${bucketExpr('?')} AS bucket, ${stepColumns}
             FROM gpu_sample
             WHERE ts >= ? AND ts <= ?
             GROUP BY bucket, uuid_c
@@ -685,14 +710,7 @@ export async function createSqliteStore({
         `).all(step, step, from, to, cursorTs, cursorUuid, remaining);
       } else {
         rows = db.prepare(`
-          SELECT ts, COALESCE(uuid, '') AS uuid_c, uuid, idx, name, mem_used_mib, mem_total_mib,
-                 util_gpu_pct, util_mem_pct, temp_c, power_w,
-                 clock_sm_mhz, clock_mem_mhz, pstate, fan_pct,
-                 pcie_gen, pcie_width, enc_util_pct, dec_util_pct,
-                 throttle_mask, throttle_any,
-                 ecc_mode, ecc_ce_volatile, ecc_ue_volatile, ecc_ce_aggregate, ecc_ue_aggregate
-                 , remap_correctable, remap_uncorrectable, remap_pending, remap_failure, remap_banks_max
-                 , xid_count, xid_last_code, xid_last_at, xid_recent
+          SELECT ${rawColumns}
           FROM gpu_sample
           WHERE ts >= ? AND ts <= ? AND (ts, COALESCE(uuid, '')) > (?, ?)
           ORDER BY ts ASC, uuid_c ASC
@@ -714,22 +732,28 @@ export async function createSqliteStore({
     }
   }
 
-  function* hostPages({ from, to, step = 0, limit = Infinity } = {}) {
+  function* hostPages({ from, to, step = 0, basic = false, limit = Infinity } = {}) {
     let emitted = 0;
     let cursorTs = from - 1;
+    const stepColumns = basic
+      ? `AVG(cpu_pct) AS cpu_pct, AVG(mem_used_pct) AS mem_used_pct`
+      : `AVG(cpu_pct) AS cpu_pct, AVG(mem_used_mib) AS mem_used_mib,
+         MAX(mem_total_mib) AS mem_total_mib, AVG(mem_used_pct) AS mem_used_pct,
+         AVG(swap_used_mib) AS swap_used_mib, MAX(swap_total_mib) AS swap_total_mib,
+         AVG(load1) AS load1, AVG(load5) AS load5, AVG(load15) AS load15,
+         MAX(disk_json) AS disk_json, AVG(net_rx_bps) AS net_rx_bps,
+         AVG(net_tx_bps) AS net_tx_bps, MAX(uptime_sec) AS uptime_sec`;
+    const rawColumns = basic
+      ? `ts, cpu_pct, mem_used_pct`
+      : `ts, cpu_pct, mem_used_mib, mem_total_mib, mem_used_pct, swap_used_mib,
+         swap_total_mib, load1, load5, load15, disk_json, net_rx_bps, net_tx_bps, uptime_sec`;
     for (;;) {
       const remaining = limit === Infinity ? pageSize : Math.min(pageSize, limit - emitted);
       if (remaining <= 0) return;
       const rows = step > 0
         ? db.prepare(`
             SELECT q.* FROM (
-              SELECT ${bucketExpr('?')} AS bucket,
-                     AVG(cpu_pct) AS cpu_pct, AVG(mem_used_mib) AS mem_used_mib,
-                     MAX(mem_total_mib) AS mem_total_mib, AVG(mem_used_pct) AS mem_used_pct,
-                     AVG(swap_used_mib) AS swap_used_mib, MAX(swap_total_mib) AS swap_total_mib,
-                     AVG(load1) AS load1, AVG(load5) AS load5, AVG(load15) AS load15,
-                     MAX(disk_json) AS disk_json, AVG(net_rx_bps) AS net_rx_bps,
-                     AVG(net_tx_bps) AS net_tx_bps, MAX(uptime_sec) AS uptime_sec
+              SELECT ${bucketExpr('?')} AS bucket, ${stepColumns}
               FROM host_sample
               WHERE ts >= ? AND ts <= ?
               GROUP BY bucket
@@ -739,8 +763,7 @@ export async function createSqliteStore({
             LIMIT ?
           `).all(step, step, from, to, cursorTs, remaining)
         : db.prepare(`
-            SELECT ts, cpu_pct, mem_used_mib, mem_total_mib, mem_used_pct, swap_used_mib,
-                   swap_total_mib, load1, load5, load15, disk_json, net_rx_bps, net_tx_bps, uptime_sec
+            SELECT ${rawColumns}
             FROM host_sample
             WHERE ts >= ? AND ts <= ? AND ts > ?
             ORDER BY ts ASC
@@ -782,26 +805,39 @@ export async function createSqliteStore({
    * 区间查询，返回与 /api/history 一致的采样点结构，
    * 这样前端切到历史模式时能复用同一套画图逻辑。
    */
-  function querySamples({ from, to, stepMs = 0, pointLimit = maxPoints } = {}) {
-    const step = resolveStep(from, to, stepMs);
+  function querySamples({ from, to, stepMs = 0, pointLimit = maxPoints, basic = false } = {}) {
     const cap = Math.max(1, Math.floor(pointLimit));
+    const step = resolveStep(from, to, stepMs, cap);
     const buckets = new Map();
     let truncated = false;
 
-    for (const row of gpuPages({ from, to, step, limit: cap * 64 })) {
+    for (const row of gpuPages({ from, to, step, basic, limit: cap * 64 })) {
       if (!buckets.has(row.ts) && buckets.size >= cap) {
         truncated = true;
         break;
       }
       if (!buckets.has(row.ts)) buckets.set(row.ts, { t: row.ts, gpus: [], system: null });
-      buckets.get(row.ts).gpus.push(gpuFromRow(row));
+      const gpu = gpuFromRow(row);
+      buckets.get(row.ts).gpus.push(basic ? {
+        index: gpu.index,
+        uuid: gpu.uuid,
+        name: gpu.name,
+        memUsedMiB: gpu.memUsedMiB,
+        memTotalMiB: gpu.memTotalMiB,
+        memUsedPct: gpu.memUsedPct,
+        utilGpuPct: gpu.utilGpuPct,
+      } : gpu);
     }
-    for (const row of hostPages({ from, to, step, limit: cap * 4 })) {
+    for (const row of hostPages({ from, to, step, basic, limit: cap * 4 })) {
       if (!buckets.has(row.ts)) {
         if (buckets.size >= cap) break;
         buckets.set(row.ts, { t: row.ts, gpus: [], system: null });
       }
-      buckets.get(row.ts).system = systemFromRow(row);
+      const system = systemFromRow(row);
+      buckets.get(row.ts).system = basic ? {
+        cpu: { usagePct: system?.cpu?.usagePct ?? null },
+        mem: { usedPct: system?.mem?.usedPct ?? null },
+      } : system;
     }
 
     // 服务维度：占比要按"当时的整机显存总量"算，所以放在 gpus 归拢完之后再补
@@ -1019,7 +1055,7 @@ export async function createSqliteStore({
     return Number(row?.total ?? 0);
   }
 
-  /** 流式导出推理采样：按 (ts, service_id) 翻页，避免 90 天整段读进内存 */
+  /** 流式导出推理采样：按 (ts, service_id) 翻页，避免 45 天整段读进内存 */
   function* inferencePages({ from, to, serviceId = null, limit = Infinity } = {}) {
     let emitted = 0;
     let cursorTs = from - 1;
@@ -1177,7 +1213,7 @@ export async function createSqliteStore({
     };
   }
 
-  if (retentionDays > 0) prune();
+  if (pruneOnStart && retentionDays > 0) prune();
   if (reclaimOnStart) maintain({ reclaim: true });
   const flushTimer = setInterval(() => {
     try {

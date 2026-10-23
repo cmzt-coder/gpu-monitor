@@ -27,7 +27,7 @@ WorkingDirectory=/opt/gpu-monitor
 User=root
 
 # 【改】node 路径用 `which node` 的结果替换；下面这行末尾的反斜杠表示续行
-# 默认永久保留历史；想按天清理就加上 `--retention-days 90 \` 这样一行
+# 历史默认最多保留 45 天；也可以调小，例如 `--retention-days 30 \`
 ExecStart=/usr/bin/node /opt/gpu-monitor/server.js \
   --port 8090 \
   --db /opt/gpu-monitor/data/gpu-monitor.db \

@@ -311,11 +311,10 @@ export async function runPreflight({
     }
 
     // 体积预估：按当前检测到的卡数 + 默认落库粒度。
-    // 保留期默认是永久，所以这里给"一年"这个基准——磁盘够不够一年，基本就够用很多年了
+    // 历史库硬上限是 45 天，按稳态大小估算磁盘占用
     const cardsForEstimate = gpuCount > 0 ? gpuCount : 1;
     const perDay = cardsForEstimate * Math.round(86400000 / storeIntervalMs);
-    const perYear = perDay * 365 * BYTES_PER_ROW;
-    dbLines.push([ICONS.skip, `体积预估：${gpuCount > 0 ? `${gpuCount} 张卡` : '卡数未知（按 1 张卡估）'}、每 ${storeIntervalMs / 1000} 秒落一行 → 约 ${perDay.toLocaleString('en-US')} 行/天，永久保留一年约 ${gib(perYear)}`]);
+    dbLines.push([ICONS.skip, `体积预估：${gpuCount > 0 ? `${gpuCount} 张卡` : '卡数未知（按 1 张卡估）'}、每 ${storeIntervalMs / 1000} 秒落一行 → 约 ${perDay.toLocaleString('en-US')} 行/天，45 天稳态约 ${gib(perDay * BYTES_PER_ROW * 45)}`]);
     // 库目录可能还不存在，那就用最近的已存在祖先来看剩余空间
     let spaceProbe = dir;
     while (!fs.existsSync(spaceProbe) && path.dirname(spaceProbe) !== spaceProbe) spaceProbe = path.dirname(spaceProbe);

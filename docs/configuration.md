@@ -17,7 +17,7 @@
 | `--db` | `data/gpu-monitor.db` | 历史库文件路径，也可用环境变量 `GPU_MONITOR_DB` |
 | `--no-db` | 关闭 | 不落库，只保留内存窗口 |
 | `--store-interval` | `5000` | 落库间隔（毫秒），与页面刷新间隔解耦 |
-| `--retention-days` | `0` | 历史保留天数；默认 `0` = 永久保留，填天数才按天清理 |
+| `--retention-days` | `45` | 历史保留天数；默认 45 天，最多 45 天。填 0 或大于 45 的值也按 45 天处理，可填更小值 |
 | `--no-store-processes` | 关闭 | 不把占用进程写进历史库 |
 | `--proc-min` | `0` | 占用不到这个值（MiB）的进程**不写进**历史库；默认 `0` = 全记。只想看得清爽点请用页面上的「占用下限」，那个不丢数据 |
 | `--reclaim` | 关闭 | 启动时把历史库整库重写一次，释放已删数据占用的空间（等价于 `db-maintenance --reclaim`） |
@@ -48,7 +48,7 @@
 | `GET /api/health` | 健康检查：`200` 健康或仅有提醒、`503` 有致命项；探活不会打断空闲降频 |
 | `GET /api/stream` | SSE 推送：每采集一帧推一条，内容与 `/api/state` 同构；`--no-push` 时返回 404 |
 | `GET /api/history?limit=N` | 内存中的采样窗口，页面打开时用于回填曲线 |
-| `GET /api/history?range=7d` | 历史区间（`3d` / `7d` / `30d` / `60d` / `90d` / `all`，或 `from`/`to`、`step`） |
+| `GET /api/history?range=7d&fields=basic` | 历史区间（`1h` / `3h` / `8h` / `12h` / `1d` / `3d` / `5d` / `7d` / `30d` / `45d`，或 `from`/`to`、`step`）；`fields=basic` 只返回画图需要的字段，长区间最多 1000 点 |
 | `GET /api/processes?range=24h&limit=50` | 进程占用事件（谁在什么时候占上了哪张卡），区间写法同 `/api/history`，另返回 `total` 总数。`limit` 一次取多少条（上限 2000），`min` 是**占用下限**（MiB，如 `&min=1024` 只看 ≥ 1 GiB 的），默认取启动参数里的 `--proc-min` |
 | `GET /api/export.csv` | 下载曲线原始数据（每行 = 一个采样点 × 一张卡）；加 `&fields=full` 会带上时钟 / P-State / 风扇 / PCIe / 编解码 / 节流等扩展列（需要历史库）。加 `&layout=wide` 换成宽表：一行一个采样点，每张卡各占一组列（`gpu0_mem_used_mib`、`gpu1_mem_used_mib`…），那一刻没有数据的卡该组留空。宽表只带基础指标，所以和 `fields=full` 互斥（同时给会返回 400） |
 | `GET /api/export.system.csv` | 下载宿主指标（每行 = 一个采样点；磁盘只导出第一个挂载点，完整明细在 JSON 里） |
@@ -73,13 +73,15 @@
 
 `/api/history` 的采样点与 `/api/state` 的 `gpus[]` 同构（含上面那些硬件健康字段），另外多一个 `system`。
 
-导出接口接受与 `/api/history` 相同的区间参数（`?range=7d` / `?from=…&to=…` / `?step=`），带区间时会**流式写出**——90 天那种几十万行的导出不会先整块读进内存。不带区间参数时行为与以前完全一致（导出内存窗口）。
+页面曲线使用 `fields=basic`，只取 `index / uuid / name / memUsedMiB / memTotalMiB / memUsedPct / utilGpuPct` 以及 CPU/内存百分比，避免把 ECC、XID、行重映射等扩展字段塞进长区间响应。历史查询结果在服务端缓存 30 秒；JSON 响应超过 1 KiB 且客户端支持 gzip 时会压缩。
+
+导出接口接受与 `/api/history` 相同的区间参数（`?range=7d` / `?from=…&to=…` / `?step=`），带区间时会**流式写出**——大区间导出不会先整块读进内存。不带区间参数时行为与以前完全一致（导出内存窗口）。历史库最多保留 45 天，超出部分会被自动清理。
 
 **时间列有两列，不是一个失误**：第一列 `time_local` 是**服务器本地时间**（`2026-10-14 14:25:03`），Excel / pandas 直接认成日期时间；第二列 `timestamp_iso` 是 **UTC**（`2026-10-14T06:25:03.000Z`），脚本读、跨时区对齐用。只给 UTC 的话，在东八区用 Excel 打开会看到比墙上时钟早 8 小时，像数据错了一样；只给本地时间又丢了时区信息，换台机器或改时区后老文件没法解释。服务器时区取系统设置，也可以用 `TZ=Asia/Shanghai` 显式指定（Node 原生支持）。页面导出弹窗里会写明当前服务器时区，不用猜。
 
 默认 CSV 的列是固定的（本地时间、UTC 时间、卡号、名称、显存、利用率、温度、功耗）；加 `?fields=full` 会再追加 `clock_sm_mhz / clock_mem_mhz / pstate / fan_pct / pcie_gen / pcie_width / enc_util_pct / dec_util_pct / throttled / ecc_mode / ecc_corrected_volatile / ecc_uncorrected_volatile / ecc_corrected_aggregate / ecc_uncorrected_aggregate` 共十四列（`throttled` 用 0/1 表示，空值代表这次采集没拿到节流信息）。这些扩展字段只存在历史库里，所以没有启用历史库时会返回 400 并说明原因；页面的导出弹窗里勾「包含扩展指标」就是它，没有历史库时这个勾选项会自动置灰并说明原因。
 
-**导出与时间范围的关系**：导出的时间范围由导出弹窗里那一组单独决定，默认「跟随曲线」——也就是曲线上方选的是什么（实时 → 内存窗口；3 天/90 天/全部 → 查库）就导什么。只有**「当前完整快照」不含时间范围**（它导的是"此刻"，选中时那一组会自动置灰），其余三项都跟着走。
+**导出与时间范围的关系**：导出的时间范围由导出弹窗里那一组单独决定，默认「跟随曲线」——也就是曲线上方选的是什么（实时 → 内存窗口；1/3/8/12 小时、1/3/5/7 天 → 查库）就导什么。手动可选 1 小时、24 小时、7 天、30 天、45 天。只有**「当前完整快照」不含时间范围**（它导的是"此刻"，选中时那一组会自动置灰），其余三项都跟着走。
 
 ## 推理服务监控（vLLM）
 

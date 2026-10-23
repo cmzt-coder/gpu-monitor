@@ -881,6 +881,13 @@ h1, h2, p, dl, dd, dt, figure { margin: 0; }
 .chart-head-actions { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
 .range-picker { display: flex; flex-wrap: wrap; gap: 6px; }
 .range-picker .chip { min-height: 30px; padding: 0 11px; font-size: 12.5px; }
+.range-picker--history { align-items: center; }
+.range-picker--history .dropdown__button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+.range-picker--history .dropdown__list { min-width: 132px; }
 .chart__stat[data-tone="warning"] b { color: var(--jf-color-warning); }
 
 /* ---------- 告警 ---------- */

@@ -9,13 +9,13 @@
 //
 // 什么时候需要用：SQLite 删掉旧行之后不会自动把空间还给文件系统。
 // 稳态运行（写入速率恒定 + 保留期固定）时，删掉的页会被新数据复用，文件大小会稳定下来；
-// 但如果你调大了 --store-interval、调小了 --retention-days，或曾经用 --retention-days 0 跑过，
+// 但如果你调大了 --store-interval、调小了 --retention-days，或曾经用更大的保留期跑过，
 // 文件就会长期停在"高水位"，这时用 --reclaim 收一次即可。
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { createSqliteStore } from '../src/store/sqlite-store.js';
+import { createSqliteStore, MAX_RETENTION_DAYS } from '../src/store/sqlite-store.js';
 
 function gib(bytes) {
   if (bytes == null) return '--';
@@ -50,11 +50,12 @@ export async function runMaintenance({ dbPath, prune = false, reclaim = false, r
   }
 
   const beforeBytes = fs.statSync(absolute).size;
-  // 只带了 --prune 时才在库里启用保留期：否则不动数据
+  // 只带了 --prune 时才在打开库时执行清理；否则只看状态，不动数据
   const store = await createSqliteStore({
     file: absolute,
     nodeId: 'maintenance',
-    retentionDays: prune ? retentionDays : 0,
+    retentionDays,
+    pruneOnStart: prune,
     // 维护工具不做抽稀判断，也不会写新样本
     storeIntervalMs: 5000,
     now,
@@ -102,12 +103,9 @@ function print(report, { prune, reclaim, retentionDays }) {
   lines.push(`  WAL 体积：${mib(report.walBefore)} → ${mib(report.walAfter)}${report.result.checkpointed ? '（已截断）' : ''}`);
   lines.push(`  可回收空间：${mib(report.reclaimableBefore)} → ${mib(report.reclaimableAfter)}`);
   lines.push(`  auto_vacuum：${report.autoVacuumBefore === 2 ? '增量回收（已开启）' : `未开启（${report.autoVacuumBefore}）`}${report.autoVacuumAfter === 2 && report.autoVacuumBefore !== 2 ? ' → 增量回收（已转换）' : ''}`);
-  // 保留期默认 0（永久保留），这时 --prune 不做任何事。必须说清楚，
-  // 否则用户会以为"跑过 --prune 了"，或者反过来，以为自己的历史被清了
+  // 保留期默认 45 天；--prune 会按这个上限删除更早的数据。
   if (prune && retentionDays > 0) {
     lines.push(`  本次清理：删除 ${report.dropped} 行（保留 ${retentionDays} 天）`);
-  } else if (prune) {
-    lines.push('  本次清理：未删除任何行——保留期是 0（永久保留），要按天清理请显式加 --retention-days <天>');
   }
   if (report.result.incremental) lines.push('  增量回收：已执行');
   if (report.result.error) lines.push(`  维护出错：${report.result.error}`);
@@ -115,14 +113,19 @@ function print(report, { prune, reclaim, retentionDays }) {
   if (!reclaim && report.reclaimableBefore > 16 * 1024 * 1024) {
     lines.push(`提示：有 ${mib(report.reclaimableBefore)} 空间可回收，跑一次 --reclaim 即可（会整库重写，大库需要一点时间和等量磁盘空间）。`);
   } else if (!prune && !reclaim) {
-    lines.push('提示：加 --reclaim 回收空间；要按天清理历史用 --prune --retention-days <天>（服务默认永久保留）。');
+    lines.push('提示：加 --reclaim 回收空间；要按保留期清理历史用 --prune（默认 45 天，可用 --retention-days 调小）。');
   }
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const argv = process.argv.slice(2);
-  const options = { dbPath: path.join('data', 'gpu-monitor.db'), prune: false, reclaim: false, retentionDays: 0 };
+  const options = {
+    dbPath: path.join('data', 'gpu-monitor.db'),
+    prune: false,
+    reclaim: false,
+    retentionDays: MAX_RETENTION_DAYS,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => argv[(i += 1)];
     switch (argv[i]) {
@@ -130,7 +133,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         options.dbPath = next() || options.dbPath;
         break;
       case '--retention-days':
-        options.retentionDays = Math.max(0, Number(next()) || 0);
+        options.retentionDays = Math.min(
+          MAX_RETENTION_DAYS,
+          Math.max(1, Number(next()) || MAX_RETENTION_DAYS),
+        );
         break;
       case '--prune':
         options.prune = true;
@@ -142,8 +148,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       case '-h':
         process.stdout.write(
           '用法：node tools/db-maintenance.mjs [--db <路径>] [--prune] [--reclaim] [--retention-days <天>]\n\n'
-          + '  --retention-days 默认 0（永久保留）。服务也是默认永久保留，所以除非你显式给天数，\n'
-          + '  --prune 不会删除任何数据。\n',
+          + `  --retention-days 默认 ${MAX_RETENTION_DAYS}，最多 ${MAX_RETENTION_DAYS}；0 或更大值按 ${MAX_RETENTION_DAYS} 处理。\n`
+          + '  --prune 会删除超过保留期的数据。\n',
         );
         process.exit(0);
         break;
