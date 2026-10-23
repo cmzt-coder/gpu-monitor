@@ -337,6 +337,14 @@ function fmtClock(ts) {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+// 曲线可能跨天，悬停时必须带完整日期；坐标轴和状态信息仍用短时间，避免挤占空间。
+function fmtTooltipDateTime(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
 function fmtRelative(ts) {
   if (!ts) return '--';
   const seconds = Math.max(0, Math.round((Date.now() - ts) / 1000));
@@ -1108,7 +1116,7 @@ function showChartTip(event, data, index) {
     seriesList: data.seriesList,
     times: data.times,
     index,
-    timeLabel: fmtClock,
+    timeLabel: fmtTooltipDateTime,
   });
   if (!view) {
     hideChartTip();
