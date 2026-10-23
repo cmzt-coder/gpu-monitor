@@ -67,6 +67,7 @@ The detailed documentation is currently **in Chinese**:
 | [Alerting and hardware health](docs/alerts.md) | Full metric table, rule syntax and examples, threshold advice; ECC / row remapping / XID |
 | [Platform support and feature details](docs/features.md) | What can be read, host-metric coverage, how service attribution works, history database and maintenance |
 | [History database growth](docs/storage-growth.md) | SQLite growth sources, size estimates, known limits and future optimization options |
+| [Adding an inference service](docs/add-inference-service.md) | End-to-end setup: endpoint checks, UI/JSON configuration, parameters, probes and troubleshooting (Chinese) |
 | [Inference metric data flow](docs/推理服务监控指标数据获取逻辑.md) | Source, parsing, delta/quantile calculation and storage fields for every inference metric (Chinese) |
 | [FAQ](docs/faq.md) | Start here when the page or the numbers look wrong |
 | [Development notes](docs/development.md) | Layout, implementation choices, running the mock, the smoke test |

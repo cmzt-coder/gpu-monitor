@@ -1125,13 +1125,14 @@ assert.ok(appJs.includes('refs.exportTimeHint.textContent'), 'app.js 要往那�
 assert.ok(appJs.includes('time_local') && appJs.includes('timestamp_iso'), '说明文字里要点名列名，不能只说"有两列时间"');
 
 /* ---------- 文档：相对链接都要落到真实文件 ---------- */
-// README 拆成 README + docs/ 六篇之后，最容易坏的就是跨文件链接（路径写错、改了文件名、
+// README 拆成 README + docs/ 多篇之后，最容易坏的就是跨文件链接（路径写错、改了文件名、
 // 搬运时忘了加 ../）。这里只查"指向仓库内文件"的相对链接，http(s) 与页内锚点跳过。
 const repoRoot = path.join(HERE, '..');
 const docFiles = [
   'README.md', 'README.en.md', 'LICENSE',
   'docs/features.md', 'docs/alerts.md', 'docs/deployment.md',
   'docs/configuration.md', 'docs/faq.md', 'docs/development.md',
+  'docs/add-inference-service.md', 'docs/推理服务监控指标数据获取逻辑.md',
 ];
 for (const file of docFiles) {
   const text = fs.readFileSync(path.join(repoRoot, file), 'utf8');

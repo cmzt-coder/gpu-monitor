@@ -1,0 +1,419 @@
+# 新增推理服务配置流程
+
+本文说明如何把一个推理服务加入 GPU 监控，包括页面配置、手工配置、参数说明、验证方式和常见故障排查。
+
+适用对象：
+
+- vLLM
+- llama.cpp / `llama-server`
+- 提供 OpenAI 兼容接口的其他推理服务
+
+相关文档：
+
+- [启动参数与配置字段](configuration.md)
+- [推理指标数据获取逻辑](推理服务监控指标数据获取逻辑.md)
+- [部署与常驻](deployment.md)
+
+## 一、先确认服务接口
+
+在填写监控配置前，先从运行监控服务的机器上确认三项接口。以下命令以本机端口 `18081` 为例：
+
+```bash
+BASE="http://127.0.0.1:18081"
+
+curl -i "$BASE/health"
+curl -i "$BASE/v1/models"
+curl -i "$BASE/metrics"
+```
+
+判断方式：
+
+| 接口 | 用途 | 正常结果 |
+| --- | --- | --- |
+| `/health` | 判断进程是否就绪 | HTTP 200 |
+| `/v1/models` | 校验模型 ID | HTTP 200，且 `data[].id` 包含目标模型 |
+| `/metrics` | 获取运行负载指标 | HTTP 200，返回 Prometheus 文本 |
+
+如果 `/v1/models` 或 `/metrics` 需要鉴权，请求时增加：
+
+```bash
+curl -i \
+  -H "Authorization: Bearer $INFERENCE_API_KEY" \
+  "$BASE/v1/models"
+```
+
+模型 ID 必须与 `/v1/models` 返回的 `data[].id` 完全一致。服务没有安装 `jq` 时可以用 Python 格式化：
+
+```bash
+curl -sS "$BASE/v1/models" | python3 -m json.tool
+```
+
+## 二、通过页面新增服务
+
+### 1. 准备管理员令牌
+
+配置弹窗由独立管理员令牌保护。原生部署在 `gpu-monitor.conf` 中配置：
+
+```ini
+GPU_MONITOR_ADMIN_TOKEN=替换为随机长令牌
+```
+
+Docker 部署写入 `.env`，然后重新创建容器：
+
+```bash
+docker compose up -d --force-recreate
+```
+
+生成随机令牌：
+
+```bash
+openssl rand -hex 32
+```
+
+管理员令牌只用于配置弹窗，不影响普通监控页面的只读访问。
+
+### 2. 打开配置弹窗
+
+打开：
+
+```text
+http://<监控服务器>:8090/#view=nav&page=inference
+```
+
+点击「推理服务状态」右侧的「配置」，输入管理员令牌。
+
+浏览器只在当前标签页的 `sessionStorage` 中保存令牌，关闭标签页后失效。
+
+### 3. 新增服务
+
+点击「新增服务」，填写基础信息：
+
+| 字段 | 填写说明 |
+| --- | --- |
+| 服务 ID | 稳定唯一标识，建议使用服务名，例如 `vllm-chat`、`startlux-llama` |
+| 显示名称 | 页面展示名称，例如 `StartLux Llama` |
+| 服务地址 | 只写到端口，例如 `http://127.0.0.1:18081`，不要带 `/v1` |
+| 模型 ID | 必须与 `/v1/models` 返回的 `data[].id` 一致 |
+| 接口类型 | `chat`、`completions`、`embeddings` 或 `rerank` |
+| 并发上限 | 引擎实际并发数；llama.cpp 的 `-np 1` 应对应 `1` |
+
+服务 ID 上线后尽量不要再修改，否则历史记录会按新 ID 重新开始。
+
+### 4. 选择鉴权方式
+
+页面提供三种模式：
+
+| 模式 | 使用场景 |
+| --- | --- |
+| 无鉴权 | 内网服务或 `llama-server` 未启用 API Key |
+| 环境变量 | 推荐用于 Docker、systemd 和长期部署 |
+| 直接密钥 | 只在页面配置，适合暂时不想修改启动环境的场景 |
+
+环境变量模式填写的是变量名，不是密钥本身。例如：
+
+```ini
+MY_INFERENCE_API_KEY=实际密钥
+```
+
+配置弹窗里的值应为：
+
+```text
+MY_INFERENCE_API_KEY
+```
+
+直接密钥模式会写入本机 `inference.json`，文件和自动备份权限均为 `600`，读取接口不会回显密钥原文。不建议把使用直接密钥的 `inference.json` 复制到其他机器。
+
+### 5. 配置路径
+
+展开「高级配置」，按服务实际路由填写：
+
+| 字段 | 常见值 |
+| --- | --- |
+| 健康检查路径 | `/health` |
+| 模型列表路径 | `/v1/models` |
+| 指标路径 | `/metrics` |
+
+如果前面使用反向代理修改了路由，以代理后的实际路径为准。
+
+### 6. 配置主动探针
+
+主动探针会真实发送推理请求，用于验证服务能否生成响应并测量首 token 延迟。
+
+| 字段 | 建议 |
+| --- | --- |
+| 启用探针 | 需要响应速度监控时开启 |
+| 探针间隔 | 常用 `5m`；服务较重时可用 `10m` |
+| 探针超时 | 普通模型 `60000` ms；推理模型建议 `120000` ms |
+| 启动宽限期 | `5m`，刚保存或服务重启后不会立即判失败 |
+| 仅空闲时执行 | 建议开启，避免和真实请求争抢容量 |
+| 先预热再测热态 | 需要区分冷启动与热态延迟时开启 |
+| 流式请求 | 测量真实首 token 时间时开启 |
+| 最大输出 token | 普通模型可用 `32`；reasoning 模型建议 `128` 或更高 |
+| 探针输入 | chat 使用 `prompt`，embedding 使用 `input`，rerank 使用 `query` 和 `documents` |
+
+探针被启动宽限期或业务忙时跳过，会记为「跳过」，不算故障。
+
+### 7. 保存
+
+点击「保存配置」后，系统会：
+
+1. 校验全部服务配置
+2. 生成 `inference.json.bak.<时间>.<随机串>` 备份
+3. 原子写入 `inference.json`
+4. 将文件和备份权限设为 `600`
+5. 立即重新加载推理配置
+6. 触发一次新的服务抓取
+
+通常不需要重启监控进程。管理员令牌本身属于启动环境，新增或修改令牌后仍需要重启服务。
+
+## 三、手工配置 inference.json
+
+不使用页面时，可以在 `services` 数组中增加服务对象。该文件已被 `.gitignore` 忽略。
+
+vLLM 示例：
+
+```json
+{
+  "id": "vllm-chat",
+  "name": "vLLM Chat",
+  "baseUrl": "http://127.0.0.1:8000",
+  "apiKeyEnv": "VLLM_CHAT_API_KEY",
+  "model": "your-model-id",
+  "kind": "chat",
+  "maxConcurrency": 16,
+  "paths": {
+    "health": "/health",
+    "models": "/v1/models",
+    "metrics": "/metrics"
+  },
+  "probe": {
+    "enabled": true,
+    "interval": "5m",
+    "timeoutMs": 60000,
+    "idleOnly": true,
+    "startupGrace": "5m",
+    "warmup": true,
+    "stream": true,
+    "maxTokens": 32,
+    "prompt": "ping"
+  }
+}
+```
+
+llama.cpp 示例：
+
+```json
+{
+  "id": "startlux-llama",
+  "name": "StartLux Llama",
+  "baseUrl": "http://127.0.0.1:18081",
+  "model": "startlux-4b",
+  "kind": "chat",
+  "maxConcurrency": 1,
+  "paths": {
+    "health": "/health",
+    "models": "/v1/models",
+    "metrics": "/metrics"
+  },
+  "probe": {
+    "enabled": true,
+    "interval": "5m",
+    "timeoutMs": 120000,
+    "idleOnly": true,
+    "startupGrace": "5m",
+    "warmup": true,
+    "stream": true,
+    "maxTokens": 128,
+    "prompt": "ping"
+  }
+}
+```
+
+`baseUrl` 使用监控进程能够访问的地址。监控进程直接运行在宿主机时，`127.0.0.1` 可以访问宿主机回环端口；如果监控改为非 host 网络的容器，需要使用宿主机地址或 Docker host gateway。
+
+## 四、服务字段说明
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `id` | 是 | 唯一稳定 ID，只允许字母、数字、点、下划线和短横线 |
+| `name` | 否 | 页面显示名称，默认使用 `id` |
+| `baseUrl` | 是 | `http://` 或 `https://` 地址，写到端口即可 |
+| `model` | 是 | 必须与 `/v1/models` 的 `data[].id` 一致 |
+| `kind` | 否 | `chat`、`completions`、`embeddings`、`rerank`，默认 `chat` |
+| `apiKeyEnv` | 否 | 密钥环境变量名，不是密钥值 |
+| `apiKey` | 否 | 直接密钥，只保存在本机配置文件中 |
+| `maxConcurrency` | 否 | 服务实际并发上限，用于计算并发占用比例 |
+| `headers` | 否 | 额外请求头，适合反向代理鉴权 |
+| `paths.health` | 否 | 默认 `/health` |
+| `paths.models` | 否 | 默认 `/v1/models` |
+| `paths.metrics` | 否 | 默认 `/metrics` |
+| `probe` | 否 | 主动探针配置 |
+
+顶层字段：
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | `true` | 是否启用整份推理监控 |
+| `interval` | `15s` | 健康、模型和指标抓取间隔 |
+| `timeoutMs` | `3000` | 普通抓取请求超时 |
+
+## 五、验证配置是否生效
+
+页面应满足：
+
+1. 推理服务总数增加
+2. 左侧出现新服务卡片
+3. 状态不再是“未知”
+4. 健康检查和模型识别正常
+
+调用接口验证：
+
+```bash
+curl -s http://127.0.0.1:8090/api/inference | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+service = next((x for x in data["services"] if x["id"] == "startlux-llama"), None)
+print(json.dumps({
+    "configured": data["configured"],
+    "autoReload": data["autoReload"],
+    "service": service
+}, ensure_ascii=False, indent=2))
+'
+```
+
+重点检查：
+
+| 字段 | 含义 |
+| --- | --- |
+| `state` | `up` / `degraded` / `down` / `unknown` |
+| `up` | 健康检查是否通过 |
+| `modelsOk` | 模型 ID 是否匹配 |
+| `metricsOk` | `/metrics` 是否返回可解析内容 |
+| `error` / `warning` | 失败或兼容性提示 |
+| `probe` | 最近一次主动探针结果 |
+
+确认探针记录：
+
+```bash
+curl -s \
+  "http://127.0.0.1:8090/api/inference/probes?range=1h&service=startlux-llama&limit=10&offset=0" \
+  | python3 -m json.tool
+```
+
+刚保存配置时，探针可能因为启动宽限期显示“跳过”，这是正常现象。
+
+## 六、llama.cpp 兼容性说明
+
+llama.cpp 只有在启动参数包含 `--metrics` 时才会开放 `/metrics`。检查方式：
+
+```bash
+docker inspect <llama容器名> \
+  --format '{{json .Config.Cmd}}' \
+  | grep -o -- '--metrics'
+```
+
+其指标格式与 vLLM 不同，例如：
+
+```text
+llamacpp:requests_processing
+llamacpp:requests_deferred
+llamacpp:prompt_tokens_total
+llamacpp:tokens_predicted_total
+```
+
+当前监控的主要指标映射面向 vLLM。llama.cpp 可以正常完成：
+
+- `/health` 可用性检查
+- `/v1/models` 模型校验
+- 主动探针
+- 探针成功率和响应耗时
+
+但以下 vLLM 专用指标可能显示 `--`：
+
+- KV Cache 使用率
+- vLLM 风格的等待队列细分
+- TTFT / E2E / ITL 直方图分位数
+- vLLM 请求成功率、中断率
+
+此时服务显示“可用”不等于负载指标已经全部适配。要获得 llama.cpp 原生请求数、排队数、token 吞吐等指标，需要后续增加 `llamacpp:` 指标解析映射。
+
+如果一个 OpenAI 兼容封装层没有 `/metrics` 路由，应优先监控实际提供指标的下层引擎。例如同时存在业务包装服务和 llama-server 时：
+
+- 业务入口 `/metrics` 返回 404：不要把它的指标路径设为 `/metrics`
+- 下层 llama-server `/metrics` 返回 200：监控下层引擎
+- 模型身份通过同一个 llama-server 的 `/v1/models` 确认
+
+## 七、常见问题
+
+### 服务显示“不可用”
+
+先检查：
+
+```bash
+curl -i http://127.0.0.1:<端口>/health
+```
+
+常见原因：
+
+- 模型仍在加载
+- `baseUrl` 端口错误
+- 监控进程访问不到该地址
+- 容器网络隔离
+
+### 模型识别失败
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $INFERENCE_API_KEY" \
+  http://127.0.0.1:<端口>/v1/models \
+  | python3 -m json.tool
+```
+
+确认 `model` 与 `data[].id` 完全一致，包括大小写和短横线。
+
+### 指标字段全部显示 `--`
+
+先确认 `/metrics` 返回 200：
+
+```bash
+curl -i http://127.0.0.1:<端口>/metrics
+```
+
+再确认指标前缀：
+
+```bash
+curl -sS http://127.0.0.1:<端口>/metrics \
+  | grep -E '^(vllm:|llamacpp:)' \
+  | head -n 40
+```
+
+- `vllm:`：当前版本支持较完整
+- `llamacpp:`：当前可做健康、模型和探针，负载指标仍需适配
+- 空结果：不是 Prometheus 指标或指标未启用
+
+### 探针一直“跳过”
+
+- 启动宽限期内跳过：等待宽限期结束
+- `idleOnly=true` 且服务正在处理请求：等空闲后重试
+- 服务不可用：先修复健康检查
+
+### 保存时报“配置已被其他窗口修改”
+
+说明打开弹窗后，`inference.json` 已被另一个窗口或手工编辑修改。重新打开配置弹窗、载入最新配置后再次编辑，避免覆盖别人的修改。
+
+## 八、回滚
+
+每次页面保存都会生成：
+
+```text
+inference.json.bak.<时间>.<随机串>
+```
+
+出现配置错误时，可以停止服务或确保页面不再保存后，用最近一份备份恢复：
+
+```bash
+cp inference.json.bak.<时间>.<随机串> inference.json
+chmod 600 inference.json
+```
+
+手工替换后等待热加载完成，或调用监控服务重启流程。
