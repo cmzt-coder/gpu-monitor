@@ -1921,6 +1921,7 @@ function renderInference() {
     service.id, service.state, service.running, service.waiting,
     service.kvCachePct, service.ttftAvgMs, service.tokensPerSec, service.error,
     service.probe?.at, service.probe?.ok, service.probe?.skipped, service.probe?.ttftMs,
+    service.queuedTasks, service.processingTasks, service.cumulativeSuccessPct, service.probe?.e2eMs,
   ].join('¦')).join('|')}`;
   if (signature === state.inferSignature) return;
   state.inferSignature = signature;
@@ -1969,14 +1970,24 @@ function renderInference() {
       if (probe.warmTtftMs != null) probeParts.push(`${t('inferHist.warm')} ${fmtInferMs(probe.warmTtftMs)}`);
       if (probe.error) probeParts.push(backendText(probe.error));
     }
-    metrics.append(
-      item(t('infer.metric.running'), fmtInferCount(service.running)),
-      item(t('infer.metric.waiting'), fmtInferCount(service.waiting)),
-      item(t('infer.metric.kv'), service.kvCachePct == null ? '--' : fmtPct(service.kvCachePct, 0)),
-      item(t('infer.metric.ttft'), service.ttftAvgMs == null ? '--' : `${Math.round(service.ttftAvgMs)} ms`),
-      item(t('infer.metric.tps'), service.tokensPerSec == null ? '--' : `${Math.round(service.tokensPerSec)} tok/s`),
-      item(t('infer.metric.probe'), probeText, probeParts.join(' · ')),
-    );
+    if (service.kind === 'mineru') {
+      metrics.append(
+        item(t('infer.metric.queued'), fmtInferCount(service.queuedTasks)),
+        item(t('infer.metric.processing'), fmtInferCount(service.processingTasks)),
+        item(t('infer.metric.cumSuccess'), service.cumulativeSuccessPct == null ? '--' : fmtPct(service.cumulativeSuccessPct, 0)),
+        item(t('infer.metric.parseMs'), fmtInferMs(service.probe?.e2eMs ?? null)),
+        item(t('infer.metric.probe'), probeText, probeParts.join(' · ')),
+      );
+    } else {
+      metrics.append(
+        item(t('infer.metric.running'), fmtInferCount(service.running)),
+        item(t('infer.metric.waiting'), fmtInferCount(service.waiting)),
+        item(t('infer.metric.kv'), service.kvCachePct == null ? '--' : fmtPct(service.kvCachePct, 0)),
+        item(t('infer.metric.ttft'), service.ttftAvgMs == null ? '--' : `${Math.round(service.ttftAvgMs)} ms`),
+        item(t('infer.metric.tps'), service.tokensPerSec == null ? '--' : `${Math.round(service.tokensPerSec)} tok/s`),
+        item(t('infer.metric.probe'), probeText, probeParts.join(' · ')),
+      );
+    }
 
     row.append(head, metrics);
     if (service.error) {
@@ -2043,6 +2054,8 @@ function fmtInferRate(value, unit = '') {
 }
 
 function inferGroupTiles(service, group) {
+  // MinerU 是解析服务：没有 KV Cache / token 速率，指标换成队列与解析耗时
+  if (service.kind === 'mineru') return mineruGroupTiles(service, group);
   if (group === 'latency') {
     return [
       [t('infer.metric.p95Ttft'), 'infer.tip.p95Ttft', fmtInferMs(service.ttftP95Ms)],
@@ -2084,6 +2097,41 @@ function inferGroupTiles(service, group) {
   ];
 }
 
+function mineruGroupTiles(service, group) {
+  const probe = service.probe;
+  const stats = service.probeStats;
+  if (group === 'latency') {
+    return [
+      [t('infer.metric.parseMs'), 'infer.tip.parseMs', fmtInferMs(probe?.e2eMs ?? null)],
+      [t('infer.metric.parseAvg'), 'infer.tip.parseAvg', fmtInferMs(stats?.avgE2eMs ?? null)],
+      [t('infer.metric.lastProbe'), 'infer.tip.lastProbe', stats?.lastAt ? fmtRelative(stats.lastAt) : '--'],
+      [t('infer.metric.probe'), 'infer.tip.probe', probeSummary(service).text],
+    ];
+  }
+  if (group === 'throughput') {
+    return [
+      [t('infer.metric.completedPerMin'), 'infer.tip.completedPerMin', fmtInferRate(service.completedPerMin, ' /min')],
+      [t('infer.metric.failedPerMin'), 'infer.tip.failedPerMin', fmtInferRate(service.failedPerMin, ' /min')],
+      [t('infer.metric.completed'), 'infer.tip.completed', fmtInferCount(service.completedTotal)],
+      [t('infer.metric.failed'), 'infer.tip.failed', fmtInferCount(service.failedTotal)],
+    ];
+  }
+  if (group === 'quality') {
+    return [
+      [t('infer.metric.windowSuccess'), 'infer.tip.windowSuccess', service.windowSuccessPct == null ? '--' : fmtPct(service.windowSuccessPct, 1)],
+      [t('infer.metric.cumSuccess'), 'infer.tip.cumSuccess', service.cumulativeSuccessPct == null ? '--' : fmtPct(service.cumulativeSuccessPct, 1)],
+      [t('infer.metric.probeSuccess'), 'infer.tip.probeSuccess', stats?.successPct == null ? '--' : fmtPct(stats.successPct, 0)],
+    ];
+  }
+  return [
+    [t('infer.metric.queued'), 'infer.tip.queued', fmtInferCount(service.queuedTasks)],
+    [t('infer.metric.processing'), 'infer.tip.processing', fmtInferCount(service.processingTasks)],
+    [t('infer.metric.maxConc'), 'infer.tip.maxConc', fmtInferCount(service.maxConcurrent)],
+    [t('infer.metric.concurrency'), 'infer.tip.concurrency', service.concurrencyPct == null ? '--' : fmtPct(service.concurrencyPct, 0)],
+    [t('infer.metric.procWindow'), 'infer.tip.procWindow', fmtInferCount(service.processingWindow)],
+  ];
+}
+
 function renderInferServiceCards(info) {
   const history = state.inferHistory;
   const services = (info?.services || []).filter((service) => !history.service || service.id === history.service);
@@ -2099,6 +2147,10 @@ function renderInferServiceCards(info) {
     service.probe?.at, service.probe?.ok, service.probe?.skipped,
     service.probe?.coldTtftMs, service.probe?.warmTtftMs,
     service.probeStats?.successPct, service.probeStats?.coldWarmRatio,
+    service.probe?.e2eMs, service.probeStats?.avgE2eMs, service.probeStats?.lastAt,
+    service.queuedTasks, service.processingTasks, service.processingWindow,
+    service.completedTotal, service.failedTotal, service.completedPerMin, service.failedPerMin,
+    service.windowSuccessPct, service.cumulativeSuccessPct,
   ].join('¦')}`).join('|')}`;
   if (signature === history.cardSignature) return;
   history.cardSignature = signature;
@@ -2138,7 +2190,10 @@ function renderInferServiceCards(info) {
 
     const meta = document.createElement('p');
     meta.className = 'infer-svc__meta';
-    meta.textContent = `${service.model || '--'}${service.version ? ` · vLLM ${service.version}` : ''}`;
+    const backendName = service.kind === 'mineru' ? 'MinerU' : 'vLLM';
+    meta.textContent = [service.model, service.version ? `${backendName} ${service.version}` : '']
+      .filter(Boolean)
+      .join(' · ') || '--';
 
     const tabs = document.createElement('div');
     tabs.className = 'infer-svc__tabs';

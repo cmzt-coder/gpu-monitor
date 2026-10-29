@@ -10,6 +10,7 @@ import {
   counterDelta, extractVllmMetrics, histogramQuantile, subtractHistograms,
 } from './metrics.js';
 import { mockInferenceServices } from './mock.js';
+import { buildProbePdf } from './probe-pdf.js';
 
 // /version 基本不变，低频刷新即可
 const VERSION_TTL_MS = 300000;
@@ -271,6 +272,95 @@ function probeRow(service, result, cold, now) {
 }
 
 /**
+ * MinerU 探针：上传一页小 PDF 走同步解析接口，量"提交到出结果"的总耗时。
+ *
+ * 和 chat 探针的区别：
+ *   - 没有首 token 概念，ttftMs 恒为 null，只看 e2eMs；
+ *   - 请求体是 multipart，Content-Type 必须交给 fetch 自己带 boundary；
+ *   - 一轮只发一次，不做冷热双峰（解析成本太高，也没有"热态"这一说）。
+ */
+async function probeDocumentParse(fetchImpl, service, { headers, timeoutMs, now }) {
+  let file;
+  try {
+    file = service.probe.pdfPath
+      ? await fs.promises.readFile(service.probe.pdfPath)
+      : buildProbePdf();
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      ttftMs: null,
+      e2eMs: null,
+      outputTokens: null,
+      tokensPerSec: null,
+      error: `读取探针 PDF 失败：${error?.message || error}`,
+    };
+  }
+
+  const form = new FormData();
+  form.append('files', new Blob([file], { type: 'application/pdf' }), 'gpu-monitor-probe.pdf');
+  if (service.probe.backend) form.append('backend', service.probe.backend);
+
+  const url = `${service.baseUrl}${service.paths.parse || '/file_parse'}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const started = now();
+  try {
+    const response = await fetchImpl(url, {
+      method: 'POST',
+      headers,
+      body: form,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    const e2eMs = now() - started;
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        ttftMs: null,
+        e2eMs,
+        outputTokens: null,
+        tokensPerSec: null,
+        error: `HTTP ${response.status}${text ? `：${text.slice(0, 160)}` : ''}`,
+      };
+    }
+
+    // 200 只说明接口通了；能解析出 results 数组时再要求里面真的有内容
+    let emptyResult = false;
+    try {
+      const data = JSON.parse(text);
+      const items = Array.isArray(data?.results) ? data.results : (Array.isArray(data?.data) ? data.data : null);
+      if (items && items.length === 0) emptyResult = true;
+    } catch {
+      // 不是 JSON 但状态码 200：按成功算，耗时仍然有效
+    }
+    return {
+      ok: !emptyResult,
+      status: response.status,
+      ttftMs: null,
+      e2eMs,
+      outputTokens: null,
+      tokensPerSec: null,
+      error: emptyResult ? '解析返回了空结果' : null,
+    };
+  } catch (error) {
+    const aborted = controller.signal.aborted || error?.name === 'AbortError';
+    return {
+      ok: false,
+      status: 0,
+      ttftMs: null,
+      e2eMs: now() - started,
+      outputTokens: null,
+      tokensPerSec: null,
+      error: aborted ? `超时（>${timeoutMs}ms）` : (error?.cause?.code || error?.message || String(error)),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * 执行一轮探针。chat/completions 默认"冷一次 + 热一次"，
  * embeddings/rerank 只发一次（它们没有生成过程，冷热差异通常不明显）。
  * 返回要落库的探针行数组。
@@ -286,6 +376,17 @@ export async function runProbe(service, { fetchImpl = globalThis.fetch, env = pr
       error: `缺少环境变量 ${service.apiKeyEnv}`,
     }, true, now);
     return [row];
+  }
+
+  if (service.kind === 'mineru') {
+    // MinerU 不需要 JSON 头：multipart 的 boundary 由 fetch 生成
+    const { headers: plainHeaders } = authHeaders(service, env);
+    const result = await probeDocumentParse(fetchImpl, service, {
+      headers: plainHeaders,
+      timeoutMs: probe.timeoutMs,
+      now,
+    });
+    return [probeRow(service, result, true, now)];
   }
 
   const url = `${service.baseUrl}${probePath(service)}`;
@@ -375,7 +476,133 @@ export function advanceProbeAvailability(state, snapshot, startupGraceMs, at = D
   };
 }
 
-export async function scrapeService(service, previous, { fetchImpl, timeoutMs, env, now }) {
+const MINERU_DOWN_STATUS = ['unhealthy', 'down', 'error', 'offline', 'not ready', 'notready'];
+
+function numberOrNull(value) {
+  if (value == null || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * MinerU 抓取：只请求 /health。
+ *
+ * 3.x 的 /health 一次就把队列情况全给了：
+ *   {"status":"healthy","version":"3.4.5","queued_tasks":0,"processing_tasks":0,
+ *    "completed_tasks":8,"failed_tasks":1,"max_concurrent_requests":3,...}
+ * 它没有 /v1/models、也没有 /metrics，所以 modelsOk 恒为 null（不参与降级判断）。
+ *
+ * 成功率用两次抓取之间的累计计数增量算，并且把"我们自己探针产生的任务"从增量里扣掉，
+ * 否则空闲时每轮探针都会把窗口成功率拉成 100%，掩盖真实请求的失败。
+ */
+export async function scrapeMineru(service, previous, { fetchImpl, timeoutMs, env, now, probeAccounting }) {
+  const { headers } = authHeaders(service, env);
+  const result = await fetchText(fetchImpl, `${service.baseUrl}${service.paths.health}`, {
+    timeoutMs, headers, now,
+  });
+
+  let payload = null;
+  let parseError = null;
+  if (result.status === 200) {
+    try {
+      payload = JSON.parse(result.body);
+    } catch {
+      parseError = '/health 返回的不是合法 JSON';
+    }
+    if (payload && (typeof payload !== 'object' || Array.isArray(payload))) {
+      payload = null;
+      parseError = '/health 返回的 JSON 不是对象';
+    }
+  }
+
+  const statusText = String(payload?.status || '').toLowerCase();
+  const selfHealthy = Boolean(payload) && !MINERU_DOWN_STATUS.includes(statusText);
+  const up = result.status === 200 && selfHealthy;
+
+  let error = null;
+  if (result.status === 0) error = `健康检查失败：${result.error || '连接不上'}`;
+  else if (result.status !== 200) error = `健康检查返回 HTTP ${result.status}`;
+  else if (parseError) error = parseError;
+  else if (!selfHealthy) error = `服务自述状态：${payload.status}`;
+
+  const queued = numberOrNull(payload?.queued_tasks);
+  const processing = numberOrNull(payload?.processing_tasks);
+  const completedTotal = numberOrNull(payload?.completed_tasks);
+  const failedTotal = numberOrNull(payload?.failed_tasks);
+  const maxConcurrent = numberOrNull(payload?.max_concurrent_requests);
+  const processingWindow = numberOrNull(payload?.processing_window_size);
+
+  // 扣掉自己探针带来的计数：探针成功算 completed、失败算 failed
+  const since = previous?.updatedAt || 0;
+  const finishedProbes = (probeAccounting || []).filter((item) => item.at > since);
+  const probeOkCount = finishedProbes.filter((item) => item.ok).length;
+  const probeFailCount = finishedProbes.length - probeOkCount;
+
+  const completedDelta = counterDelta(completedTotal, previous?.completedTotal);
+  const failedDelta = counterDelta(failedTotal, previous?.failedTotal);
+  const windowCompleted = completedDelta == null ? null : Math.max(0, completedDelta - probeOkCount);
+  const windowFailed = failedDelta == null ? null : Math.max(0, failedDelta - probeFailCount);
+  const elapsedSec = previous?.updatedAt ? (now() - previous.updatedAt) / 1000 : null;
+  const perMin = (value) => (value != null && elapsedSec > 0 ? (value / elapsedSec) * 60 : null);
+  const windowTotal = windowCompleted != null && windowFailed != null ? windowCompleted + windowFailed : null;
+  const windowSuccessPct = windowTotal > 0 ? (windowCompleted / windowTotal) * 100 : null;
+  const cumulativeTotal = completedTotal != null && failedTotal != null ? completedTotal + failedTotal : null;
+  const cumulativeSuccessPct = cumulativeTotal > 0 ? (completedTotal / cumulativeTotal) * 100 : null;
+  const concurrencyPct = maxConcurrent && processing != null ? (processing / maxConcurrent) * 100 : null;
+
+  return {
+    snapshot: {
+      id: service.id,
+      name: service.name,
+      kind: service.kind,
+      model: service.model || null,
+      baseUrl: service.baseUrl,
+      state: up ? 'up' : (result.status === 0 && !result.error ? 'unknown' : 'down'),
+      up: result.status === 0 && !result.error ? null : up,
+      modelsOk: null,
+      modelsError: null,
+      metricsOk: Boolean(payload),
+      statusCode: result.status || null,
+      healthMs: result.ms,
+      version: payload?.version ? String(payload.version) : (previous?.version ?? null),
+      // 沿用 running / waiting 的字段名：页面、探针的 idleOnly 判断都直接复用
+      running: processing,
+      waiting: queued,
+      queuedTasks: queued,
+      processingTasks: processing,
+      maxConcurrent,
+      processingWindow,
+      concurrencyPct: round2(concurrencyPct),
+      completedTotal,
+      failedTotal,
+      completedPerMin: round2(perMin(windowCompleted)),
+      failedPerMin: round2(perMin(windowFailed)),
+      windowSuccessPct: round2(windowSuccessPct),
+      cumulativeSuccessPct: round2(cumulativeSuccessPct),
+      // MinerU 没有这些 vLLM 概念，显式置空，页面显示 --
+      kvCachePct: null,
+      ttftAvgMs: null,
+      e2eAvgMs: null,
+      tokensPerSec: null,
+      updatedAt: now(),
+      error,
+      warning: null,
+    },
+    cache: {
+      updatedAt: now(),
+      completedTotal,
+      failedTotal,
+      version: payload?.version ? String(payload.version) : (previous?.version ?? null),
+    },
+  };
+}
+
+export async function scrapeService(service, previous, { fetchImpl, timeoutMs, env, now, probeAccounting }) {
+  if (service.kind === 'mineru') {
+    return scrapeMineru(service, previous, {
+      fetchImpl, timeoutMs, env, now, probeAccounting,
+    });
+  }
   const { headers, authMissing } = authHeaders(service, env);
   const urlOf = (key) => `${service.baseUrl}${service.paths[key]}`;
   const [health, metrics, models] = await Promise.all([
@@ -638,6 +865,8 @@ export function createInferenceRuntime({
     // 告警引擎用的内存环形缓冲：每轮抓取一条，默认保留 600 条（15s 一轮约 2.5 小时）
     samples: [],
     probeStates: new Map(),
+    // MinerU 探针自己会进 /health 的累计计数，这里记下来，抓取时从增量里扣掉
+    probeAccounting: new Map(),
     probeTimer: null,
   };
 
@@ -711,9 +940,16 @@ export function createInferenceRuntime({
       service.probe = state.lastResult;
       const rated = state.history || [];
       const successCount = rated.filter((item) => item.ok).length;
+      const okLatencies = rated.filter((item) => item.ok && item.e2eMs != null).map((item) => item.e2eMs);
       service.probeStats = {
         samples: rated.length,
         successPct: rated.length > 0 ? round2((successCount / rated.length) * 100) : null,
+        // 最近一次"真正执行过"的探针时刻：跳过的行不进 history，忙时不会把时间刷成刚刚
+        lastAt: rated.length > 0 ? rated[rated.length - 1].ts : null,
+        // 解析类服务（MinerU）看的是整体耗时，这里给最近 10 次成功的平均值
+        avgE2eMs: okLatencies.length > 0
+          ? round2(okLatencies.slice(-10).reduce((sum, value) => sum + value, 0) / Math.min(10, okLatencies.length))
+          : null,
         coldWarmRatio: state.lastResult.coldTtftMs != null && state.lastResult.warmTtftMs > 0
           ? round2(state.lastResult.coldTtftMs / state.lastResult.warmTtftMs)
           : null,
@@ -750,8 +986,14 @@ export function createInferenceRuntime({
       error: row.error,
     };
     if (!row.skipped) {
-      state.history.push({ ts: row.ts, ok: Boolean(row.ok) });
+      state.history.push({ ts: row.ts, ok: Boolean(row.ok), e2eMs: row.e2eMs ?? null });
       if (state.history.length > 50) state.history.shift();
+    }
+    // 探针任务本身也会进 MinerU 的 completed/failed 计数，记一笔供抓取时抵扣
+    if (service.kind === 'mineru' && !row.skipped) {
+      const ledger = runtime.probeAccounting.get(service.id) || [];
+      ledger.push({ at: row.ts, ok: Boolean(row.ok) });
+      runtime.probeAccounting.set(service.id, ledger.slice(-20));
     }
     attachProbeResults();
   }
@@ -873,7 +1115,11 @@ export function createInferenceRuntime({
       const results = await Promise.all(runtime.config.services.map(async (service) => {
         try {
           return await scrapeService(service, runtime.lastByService.get(service.id), {
-            fetchImpl, timeoutMs: runtime.timeoutMs, env, now,
+            fetchImpl,
+            timeoutMs: runtime.timeoutMs,
+            env,
+            now,
+            probeAccounting: runtime.probeAccounting.get(service.id),
           });
         } catch (error) {
           return {

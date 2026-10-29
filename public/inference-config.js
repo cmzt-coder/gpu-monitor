@@ -277,14 +277,19 @@ export function createInferenceConfigController({ onSaved } = {}) {
     const basic = node('div', 'infer-config__section');
     basic.appendChild(node('h4', '', t('inferConfig.section.basic')));
     const grid = node('div', 'infer-config__grid');
+    const isMineru = (service.kind || 'chat') === 'mineru';
     grid.append(
       field(t('inferConfig.field.id'), textInput(service.id, (value) => { service.id = value.trim(); selectedId = value.trim(); })),
       field(t('inferConfig.field.name'), textInput(service.name, (value) => { service.name = value; })),
       field(t('inferConfig.field.baseUrl'), textInput(service.baseUrl, (value) => { service.baseUrl = value.trim(); }, { placeholder: 'http://127.0.0.1:8000' })),
-      field(t('inferConfig.field.model'), textInput(service.model, (value) => { service.model = value.trim(); })),
+      field(
+        t('inferConfig.field.model'),
+        textInput(service.model, (value) => { service.model = value.trim(); }),
+        isMineru ? t('inferConfig.modelOptional') : '',
+      ),
     );
     const kind = node('select', 'input');
-    for (const value of ['chat', 'completions', 'embeddings', 'rerank']) {
+    for (const value of ['chat', 'completions', 'embeddings', 'rerank', 'mineru']) {
       const option = node('option', '', t(`inferConfig.kind.${value}`));
       option.value = value;
       option.selected = (service.kind || 'chat') === value;
@@ -292,6 +297,20 @@ export function createInferenceConfigController({ onSaved } = {}) {
     }
     kind.addEventListener('change', () => {
       service.kind = kind.value;
+      // 切到 MinerU 时补上它专用的一组默认路径，省得用户手动记 /file_parse
+      if (service.kind === 'mineru') {
+        service.paths = service.paths && typeof service.paths === 'object' ? service.paths : {};
+        service.paths.health = service.paths.health || '/health';
+        service.paths.parse = service.paths.parse || '/file_parse';
+        delete service.paths.models;
+        delete service.paths.metrics;
+      } else if (service.paths && typeof service.paths === 'object') {
+        // 从 MinerU 切回 OpenAI 兼容类型：去掉 parse，补回两条默认路径
+        delete service.paths.parse;
+        service.paths.health = service.paths.health || '/health';
+        service.paths.models = service.paths.models || '/v1/models';
+        service.paths.metrics = service.paths.metrics || '/metrics';
+      }
       markDirty();
       renderEditor();
     });
@@ -345,7 +364,9 @@ export function createInferenceConfigController({ onSaved } = {}) {
     advanced.appendChild(node('summary', '', t('inferConfig.section.advanced')));
     const paths = node('div', 'infer-config__grid');
     service.paths = service.paths && typeof service.paths === 'object' ? service.paths : {};
-    for (const key of ['health', 'models', 'metrics']) {
+    // MinerU 没有模型列表和 Prometheus 指标，改成"健康检查 + 解析接口"两个路径
+    const pathKeys = isMineru ? ['health', 'parse'] : ['health', 'models', 'metrics'];
+    for (const key of pathKeys) {
       paths.appendChild(field(t(`inferConfig.path.${key}`), textInput(service.paths[key], (value) => { service.paths[key] = value; }, { placeholder: `/${key}` })));
     }
     advanced.appendChild(paths);
@@ -366,17 +387,39 @@ export function createInferenceConfigController({ onSaved } = {}) {
     probeSection.appendChild(checkInput(probe.enabled === true, (value) => { probe.enabled = value; }, t('inferConfig.probe.enabled')));
     const probeGrid = node('div', 'infer-config__grid');
     probeGrid.append(
-      field(t('inferConfig.probe.interval'), textInput(probe.interval ?? '10m', (value) => { probe.interval = value; }, { placeholder: '10m' })),
-      field(t('inferConfig.probe.timeout'), textInput(probe.timeoutMs ?? 60000, (value) => { probe.timeoutMs = Number(value) || 0; }, { type: 'number' })),
+      field(t('inferConfig.probe.interval'), textInput(probe.interval ?? (isMineru ? '15m' : '10m'), (value) => { probe.interval = value; }, { placeholder: isMineru ? '15m' : '10m' })),
+      field(t('inferConfig.probe.timeout'), textInput(probe.timeoutMs ?? (isMineru ? 180000 : 60000), (value) => { probe.timeoutMs = Number(value) || 0; }, { type: 'number' })),
       field(t('inferConfig.probe.startupGrace'), textInput(probe.startupGrace ?? '5m', (value) => { probe.startupGrace = value; }, { placeholder: '5m' })),
-      field(t('inferConfig.probe.maxTokens'), textInput(probe.maxTokens ?? 32, (value) => { probe.maxTokens = Number(value) || 0; }, { type: 'number' })),
     );
-    if (['chat', 'completions'].includes(service.kind || 'chat')) {
-      probeGrid.appendChild(field(t('inferConfig.probe.prompt'), textInput(probe.prompt ?? 'ping', (value) => { probe.prompt = value; })));
-    } else if (service.kind === 'embeddings') {
-      probeGrid.appendChild(field(t('inferConfig.probe.input'), textInput(probe.input ?? 'ping', (value) => { probe.input = value; })));
-    } else if (service.kind === 'rerank') {
-      probeGrid.appendChild(field(t('inferConfig.probe.query'), textInput(probe.query ?? 'ping', (value) => { probe.query = value; })));
+    if (isMineru) {
+      const backend = node('select', 'input');
+      for (const value of ['', 'pipeline', 'vlm-engine', 'hybrid-engine', 'vlm-http-client', 'hybrid-http-client']) {
+        const option = node('option', '', value || t('inferConfig.probe.backendDefault'));
+        option.value = value;
+        option.selected = (probe.backend || '') === value;
+        backend.appendChild(option);
+      }
+      backend.addEventListener('change', () => {
+        probe.backend = backend.value;
+        markDirty();
+      });
+      probeGrid.append(
+        field(t('inferConfig.probe.backend'), backend, t('inferConfig.probe.backendHint')),
+        field(
+          t('inferConfig.probe.pdfPath'),
+          textInput(probe.pdfPath ?? '', (value) => { probe.pdfPath = value.trim(); }, { placeholder: t('inferConfig.probe.pdfPathPlaceholder') }),
+          t('inferConfig.probe.pdfPathHint'),
+        ),
+      );
+    } else {
+      probeGrid.appendChild(field(t('inferConfig.probe.maxTokens'), textInput(probe.maxTokens ?? 32, (value) => { probe.maxTokens = Number(value) || 0; }, { type: 'number' })));
+      if (['chat', 'completions'].includes(service.kind || 'chat')) {
+        probeGrid.appendChild(field(t('inferConfig.probe.prompt'), textInput(probe.prompt ?? 'ping', (value) => { probe.prompt = value; })));
+      } else if (service.kind === 'embeddings') {
+        probeGrid.appendChild(field(t('inferConfig.probe.input'), textInput(probe.input ?? 'ping', (value) => { probe.input = value; })));
+      } else if (service.kind === 'rerank') {
+        probeGrid.appendChild(field(t('inferConfig.probe.query'), textInput(probe.query ?? 'ping', (value) => { probe.query = value; })));
+      }
     }
     probeSection.appendChild(probeGrid);
     if (service.kind === 'rerank') {
@@ -390,11 +433,16 @@ export function createInferenceConfigController({ onSaved } = {}) {
       probeSection.appendChild(field(t('inferConfig.probe.documents'), documents, t('inferConfig.probe.documentsHint')));
     }
     const checks = node('div', 'infer-config__checks');
-    checks.append(
-      checkInput(probe.idleOnly !== false, (value) => { probe.idleOnly = value; }, t('inferConfig.probe.idleOnly')),
-      checkInput(probe.warmup !== false, (value) => { probe.warmup = value; }, t('inferConfig.probe.warmup')),
-      checkInput(probe.stream !== false, (value) => { probe.stream = value; }, t('inferConfig.probe.stream')),
-    );
+    if (isMineru) {
+      // 解析探针会真占一次解析名额，默认只在服务空闲时跑
+      checks.append(checkInput(probe.idleOnly !== false, (value) => { probe.idleOnly = value; }, t('inferConfig.probe.idleOnlyMineru')));
+    } else {
+      checks.append(
+        checkInput(probe.idleOnly !== false, (value) => { probe.idleOnly = value; }, t('inferConfig.probe.idleOnly')),
+        checkInput(probe.warmup !== false, (value) => { probe.warmup = value; }, t('inferConfig.probe.warmup')),
+        checkInput(probe.stream !== false, (value) => { probe.stream = value; }, t('inferConfig.probe.stream')),
+      );
+    }
     probeSection.appendChild(checks);
     advanced.appendChild(probeSection);
 

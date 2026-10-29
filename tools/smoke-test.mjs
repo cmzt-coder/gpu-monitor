@@ -95,6 +95,7 @@ import {
   runProbe,
   scrapeService,
 } from '../src/inference/runtime.js';
+import { buildProbePdf } from '../src/inference/probe-pdf.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FAKE_SMI = path.join(HERE, 'fake-nvidia-smi.mjs');
@@ -3497,6 +3498,114 @@ vllm:time_to_first_token_seconds_count{engine="0",model_name="m"} 12
   }, { fetchImpl: embeddingFetch, env: {}, now: Date.now });
   assert.equal(embeddingRows[0].ok, true, 'embedding 探针识别 data[].embedding');
   assert.equal(embeddingRows[0].ttftMs, null, 'embedding 没有首 token');
+
+  // MinerU：解析服务的专用适配（/health 取队列，探针走 multipart 解析）
+  const mineruNormalized = normalizeInferenceConfig({
+    services: [{
+      id: 'mineru', name: 'MinerU', baseUrl: 'http://127.0.0.1:1212', kind: 'mineru',
+      probe: { enabled: true },
+    }],
+  });
+  const mineruService = mineruNormalized.config.services[0];
+  assert.equal(mineruNormalized.warnings.length, 0, 'MinerU 允许不填 model');
+  assert.equal(mineruService.model, '');
+  assert.equal(mineruService.paths.health, '/health');
+  assert.equal(mineruService.paths.parse, '/file_parse');
+  assert.equal(mineruService.paths.models, null, 'MinerU 不请求 /v1/models');
+  assert.equal(mineruService.paths.metrics, null, 'MinerU 不请求 /metrics');
+  assert.equal(mineruService.probe.intervalMs, 900000, 'MinerU 探针默认 15 分钟');
+  assert.equal(mineruService.probe.timeoutMs, 180000, 'MinerU 探针默认 180 秒超时');
+  assert.equal(mineruService.probe.idleOnly, true, '默认有任务时不解析');
+
+  const mineruHealth = (patch = {}) => JSON.stringify({
+    status: 'healthy',
+    version: '3.4.5',
+    protocol_version: 2,
+    queued_tasks: 2,
+    processing_tasks: 1,
+    completed_tasks: 8,
+    failed_tasks: 1,
+    max_concurrent_requests: 3,
+    processing_window_size: 64,
+    task_retention_seconds: 86400,
+    task_cleanup_interval_seconds: 300,
+    ...patch,
+  });
+  const mineruFetch = (body) => async () => new Response(body, { status: 200 });
+  const mineruScrape = await scrapeService(mineruService, null, {
+    fetchImpl: mineruFetch(mineruHealth()), timeoutMs: 1000, env: {}, now: () => 1000,
+  });
+  assert.equal(mineruScrape.snapshot.state, 'up');
+  assert.equal(mineruScrape.snapshot.queuedTasks, 2);
+  assert.equal(mineruScrape.snapshot.processingTasks, 1);
+  assert.equal(mineruScrape.snapshot.running, 1, 'running 复用成运行中任务数');
+  assert.equal(mineruScrape.snapshot.waiting, 2, 'waiting 复用成排队任务数');
+  assert.equal(mineruScrape.snapshot.maxConcurrent, 3);
+  assert.equal(mineruScrape.snapshot.processingWindow, 64);
+  assert.equal(mineruScrape.snapshot.version, '3.4.5');
+  assert.equal(mineruScrape.snapshot.modelsOk, null, '没有模型列表就不参与降级判断');
+  assert.equal(mineruScrape.snapshot.cumulativeSuccessPct, 88.89);
+
+  const mineruScrape2 = await scrapeService(mineruService, mineruScrape.cache, {
+    fetchImpl: mineruFetch(mineruHealth({ completed_tasks: 10, failed_tasks: 2 })),
+    timeoutMs: 1000,
+    env: {},
+    now: () => 61000,
+    probeAccounting: [{ at: 3000, ok: true }],
+  });
+  assert.equal(mineruScrape2.snapshot.windowSuccessPct, 50, '探针自己完成的任务要从增量里扣掉');
+  assert.equal(mineruScrape2.snapshot.completedPerMin, 1);
+
+  const mineruUnhealthy = await scrapeService(mineruService, null, {
+    fetchImpl: mineruFetch(JSON.stringify({ status: 'unhealthy' })),
+    timeoutMs: 1000,
+    env: {},
+    now: () => 1000,
+  });
+  assert.equal(mineruUnhealthy.snapshot.state, 'down', '服务自述 unhealthy 判为不可用');
+  assert.match(mineruUnhealthy.snapshot.error, /unhealthy/);
+
+  let mineruProbeRequest = null;
+  const mineruProbeFetch = async (url, options = {}) => {
+    // 用 Request 把 FormData 真正序列化一次，确认 boundary、字段名和 PDF 内容都在
+    const encoded = new Request(url, { method: 'POST', headers: options.headers, body: options.body });
+    const bodyText = await encoded.text();
+    mineruProbeRequest = {
+      url,
+      isForm: options.body instanceof FormData,
+      contentType: options.headers?.['Content-Type'],
+      encodedType: encoded.headers.get('content-type') || '',
+      bodyText,
+    };
+    return new Response(JSON.stringify({ backend: 'hybrid-engine', version: '3.4.5', results: [{ md_content: '# ok' }] }), { status: 200 });
+  };
+  let mineruClock = 5000;
+  const mineruRows = await runProbe(mineruService, {
+    fetchImpl: mineruProbeFetch,
+    env: {},
+    now: () => (mineruClock += 250),
+  });
+  assert.equal(mineruRows.length, 1, 'MinerU 探针一轮只发一次');
+  assert.equal(mineruRows[0].ok, true);
+  assert.equal(mineruRows[0].ttftMs, null, '解析探针没有首 token');
+  assert.equal(mineruRows[0].e2eMs, 250);
+  assert.equal(mineruProbeRequest.url, 'http://127.0.0.1:1212/file_parse');
+  assert.equal(mineruProbeRequest.isForm, true, '探针必须用 multipart 上传 PDF');
+  assert.equal(mineruProbeRequest.contentType, undefined, 'Content-Type 交给 fetch 自动带 boundary');
+  assert.match(mineruProbeRequest.encodedType, /^multipart\/form-data; boundary=/, 'multipart 必须自动生成 boundary');
+  assert.ok(mineruProbeRequest.bodyText.includes('name="files"'), '字段名必须是 files（MinerU 的接口约定）');
+  assert.ok(mineruProbeRequest.bodyText.includes('%PDF-1.4'), '上传体里要真的是 PDF 内容');
+
+  const probePdf = buildProbePdf();
+  const probePdfText = probePdf.toString('latin1');
+  assert.equal(probePdfText.slice(0, 8), '%PDF-1.4');
+  assert.ok(probePdfText.trimEnd().endsWith('%%EOF'), '内置探针 PDF 必须有结束标记');
+  const pdfXref = Number(probePdfText.slice(probePdfText.lastIndexOf('startxref') + 9).trim().split('\n')[0]);
+  assert.equal(probePdfText.slice(pdfXref, pdfXref + 4), 'xref', 'startxref 必须指向 xref 表');
+  const pdfOffsets = [...probePdfText.slice(pdfXref).matchAll(/^(\d{10}) 00000 n $/gm)].map((match) => Number(match[1]));
+  pdfOffsets.forEach((offset, index) => {
+    assert.ok(probePdfText.startsWith(`${index + 1} 0 obj`, offset), `PDF 对象 ${index + 1} 的偏移要正确`);
+  });
 
   // 历史库：推理采样与探针都要能落库、查询、流式导出
   const inferStore = await createSqliteStore({ file: ':memory:', nodeId: 'test-host', storeIntervalMs: 1000 });

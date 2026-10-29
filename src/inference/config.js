@@ -7,12 +7,23 @@ import fs from 'node:fs/promises';
 
 import { expandEnv } from '../alerts/config.js';
 
-export const INFERENCE_KINDS = ['chat', 'completions', 'embeddings', 'rerank'];
+export const INFERENCE_KINDS = ['chat', 'completions', 'embeddings', 'rerank', 'mineru'];
 
 const DEFAULT_PATHS = {
   health: '/health',
   models: '/v1/models',
   metrics: '/metrics',
+};
+
+// MinerU 没有 OpenAI 接口和 Prometheus 指标：
+//   - 服务状态、排队数、运行中任务数、成功/失败计数都在 /health 的 JSON 里
+//   - 探针走同步解析接口 /file_parse（multipart 上传一个小 PDF）
+// 所以 models / metrics 明确置空，避免去请求并不存在的 /v1/models 和 /metrics。
+const MINERU_PATHS = {
+  health: '/health',
+  models: null,
+  metrics: null,
+  parse: '/file_parse',
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -60,6 +71,28 @@ function normalizeProbe(raw, kind, warnings, id) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     return { enabled: false };
   }
+  // MinerU 的探针要真的跑一次文档解析，成本比一次 chat 请求高得多：
+  // 间隔默认 15 分钟、超时默认 180 秒，并且没有冷热双峰和流式概念。
+  if (kind === 'mineru') {
+    return {
+      enabled: raw.enabled === true,
+      intervalMs: Math.max(30000, parseDurationMs(raw.interval, 900000)),
+      timeoutMs: Math.max(5000, Number(raw.timeoutMs) || 180000),
+      idleOnly: raw.idleOnly !== false,
+      startupGraceMs: Math.max(0, parseDurationMs(raw.startupGrace, 300000)),
+      warmup: false,
+      stream: false,
+      maxTokens: 1,
+      prompt: String(raw.prompt || 'ping'),
+      input: String(raw.input || raw.prompt || 'ping'),
+      query: String(raw.query || 'ping'),
+      documents: ['pong'],
+      // 解析后端：留空表示用服务端默认值（3.4.x 默认 hybrid-engine）
+      backend: String(raw.backend || '').trim(),
+      // 万一内置探针 PDF 被服务端拒绝，可以指定一个本机 PDF 文件兜底
+      pdfPath: String(raw.pdfPath || '').trim(),
+    };
+  }
   const documents = Array.isArray(raw.documents) && raw.documents.length > 0
     ? raw.documents.map((item) => String(item))
     : ['pong'];
@@ -105,16 +138,17 @@ function normalizeService(raw, index, warnings, seen) {
     return null;
   }
 
-  const model = String(raw?.model || '').trim();
-  if (!model) {
-    warnings.push({ index, id, message: '缺少 model（必须与 /v1/models 返回的 id 一致）' });
-    return null;
-  }
-
   let kind = String(raw?.kind || 'chat').trim().toLowerCase();
   if (!INFERENCE_KINDS.includes(kind)) {
     warnings.push({ index, id, message: `kind=${kind} 不支持，已按 chat 处理` });
     kind = 'chat';
+  }
+
+  // MinerU 没有 /v1/models，model 只用于卡片标题，允许留空
+  const model = String(raw?.model || '').trim();
+  if (!model && kind !== 'mineru') {
+    warnings.push({ index, id, message: '缺少 model（必须与 /v1/models 返回的 id 一致）' });
+    return null;
   }
 
   let apiKeyEnv = null;
@@ -147,13 +181,25 @@ function normalizeService(raw, index, warnings, seen) {
     apiKeyEnv,
     apiKey,
     headers: normalizeHeaders(raw?.headers, warnings, id),
-    paths: {
-      health: normalizePath(raw?.paths?.health, DEFAULT_PATHS.health),
-      models: normalizePath(raw?.paths?.models, DEFAULT_PATHS.models),
-      metrics: normalizePath(raw?.paths?.metrics, DEFAULT_PATHS.metrics),
-    },
+    paths: normalizePaths(raw?.paths, kind),
     probe: normalizeProbe(raw?.probe, kind, warnings, id),
   };
+}
+
+/**
+ * 接口路径按 kind 取默认值。
+ * MinerU 的 models / metrics 是 null：运行时据此直接跳过这两类请求。
+ */
+function normalizePaths(raw, kind) {
+  const defaults = kind === 'mineru' ? MINERU_PATHS : DEFAULT_PATHS;
+  const pathOf = (key) => (defaults[key] === null ? null : normalizePath(raw?.[key], defaults[key]));
+  const paths = {
+    health: pathOf('health'),
+    models: pathOf('models'),
+    metrics: pathOf('metrics'),
+  };
+  if (kind === 'mineru') paths.parse = pathOf('parse');
+  return paths;
 }
 
 /**

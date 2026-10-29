@@ -59,6 +59,25 @@
         "query": "ping",
         "documents": ["pong"]
       }
+    },
+    {
+      "id": "mineru",
+      "name": "MinerU 文档解析",
+      "baseUrl": "http://127.0.0.1:1212",
+      "kind": "mineru",
+      "paths": {
+        "health": "/health",
+        "parse": "/file_parse"
+      },
+      "probe": {
+        "enabled": true,
+        "interval": "15m",
+        "timeoutMs": 180000,
+        "idleOnly": true,
+        "startupGrace": "5m",
+        "backend": "",
+        "pdfPath": ""
+      }
     }
   ]
 }
